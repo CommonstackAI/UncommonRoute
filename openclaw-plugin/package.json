@@ -1,6 +1,6 @@
 {
   "name": "@anjieyang/uncommon-route",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenClaw plugin — UncommonRoute smart LLM router, 98% accuracy, <1ms local routing",
   "type": "module",
   "main": "src/index.js",

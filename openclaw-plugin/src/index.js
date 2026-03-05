@@ -16,7 +16,7 @@
 import { spawn, execSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const DEFAULT_PORT = 8403;
 const DEFAULT_UPSTREAM = "";
 const HEALTH_TIMEOUT_MS = 15_000;
@@ -245,8 +245,14 @@ const plugin = {
             body: JSON.stringify({ model: "uncommon-route/auto", messages: [{ role: "user", content: `/debug ${prompt}` }] }),
             signal: AbortSignal.timeout(5000),
           });
+          lastRequestId = resp.headers.get("x-uncommon-route-request-id");
+          lastTier = resp.headers.get("x-uncommon-route-tier");
           const data = await resp.json();
-          return { text: data?.choices?.[0]?.message?.content || "No response" };
+          let text = data?.choices?.[0]?.message?.content || "No response";
+          if (lastRequestId) {
+            text += `\n\n_Rate this: \`/feedback ok\` · \`/feedback weak\` · \`/feedback strong\`_`;
+          }
+          return { text };
         } catch (err) {
           return { text: `Error: ${err.message}. Is proxy running?`, isError: true };
         }
@@ -284,6 +290,59 @@ const plugin = {
           return result ? { text: `Cleared ${parts[1]} limit` } : { text: "Failed", isError: true };
         }
         return { text: "Usage: `/spend [status | set <window> <amount> | clear <window>]`\nWindows: per_request, hourly, daily, session" };
+      },
+    });
+
+    let lastRequestId = null;
+    let lastTier = null;
+
+    api.registerCommand({
+      name: "feedback",
+      description: "Rate last routing decision: /feedback ok|weak|strong|status",
+      acceptsArgs: true,
+      requireAuth: false,
+      handler: async (ctx) => {
+        const args = (ctx.args || "").trim().toLowerCase();
+        const feedbackUrl = `http://127.0.0.1:${port}/v1/feedback`;
+
+        if (!args || args === "status") {
+          const data = await fetchJson(feedbackUrl);
+          if (!data) return { text: "Proxy not running.", isError: true };
+          const lines = [
+            "**Online Learning Status**",
+            "",
+            `Pending contexts: ${data.pending_contexts}`,
+            `Total updates: ${data.total_online_updates}`,
+            `Updates (last hour): ${data.updates_last_hour}`,
+            `Online model: ${data.online_model_active ? "active" : "inactive (base model)"}`,
+            "",
+            "Usage: `/feedback ok` (correct) | `/feedback weak` (should be harder) | `/feedback strong` (should be easier)",
+          ];
+          return { text: lines.join("\n") };
+        }
+
+        if (["ok", "weak", "strong"].includes(args)) {
+          if (!lastRequestId) {
+            return { text: "No recent routing decision to give feedback on. Send a message with `uncommon-route/auto` first.", isError: true };
+          }
+          const result = await postJson(feedbackUrl, { request_id: lastRequestId, signal: args });
+          if (!result) return { text: "Proxy not running.", isError: true };
+          if (!result.ok) return { text: `Feedback failed: ${result.reason || result.action}`, isError: true };
+
+          const emoji = { reinforced: "✓", updated: "↑", no_change: "—" }[result.action] || "•";
+          const tierInfo = result.from_tier === result.to_tier
+            ? `${result.from_tier} (reinforced)`
+            : `${result.from_tier} → ${result.to_tier}`;
+          lastRequestId = null;
+          return { text: `${emoji} Feedback applied: ${tierInfo}  (total updates: ${result.total_updates})` };
+        }
+
+        if (args === "rollback") {
+          const result = await postJson(feedbackUrl, { action: "rollback" });
+          return { text: result?.ok ? "✓ Online weights rolled back to base model" : "Rollback failed" };
+        }
+
+        return { text: "Usage: `/feedback [ok|weak|strong|status|rollback]`\n• **ok** — tier was correct\n• **weak** — model was too weak, should route to harder tier\n• **strong** — model was overkill, should route to easier tier" };
       },
     });
 

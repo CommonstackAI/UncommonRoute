@@ -1,9 +1,10 @@
 """CLI entry point for UncommonRoute.
 
 Subcommands:
-    route    — classify a prompt and print the routing decision
+    route    — classify a prompt and print the routing decision (with interactive feedback)
     serve    — start the OpenAI-compatible proxy server
     debug    — show per-dimension scoring breakdown
+    feedback — manage online learning (status/rollback)
     openclaw — manage OpenClaw integration (install/uninstall/status)
     spend    — manage spending limits (set/clear/status/history)
     provider — API key management (BYOK)
@@ -26,16 +27,17 @@ from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
 from uncommon_route.router.keywords import extract_keyword_features
 
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 
 
 def _print_help() -> None:
     print(f"""uncommon-route v{VERSION} — SOTA LLM Router
 
 Usage:
-  uncommon-route route <prompt>         Route a prompt to the best model
+  uncommon-route route <prompt>         Route a prompt (with interactive feedback)
   uncommon-route serve                  Start OpenAI-compatible proxy server
   uncommon-route debug <prompt>         Show per-dimension scoring breakdown
+  uncommon-route feedback <sub>         Online learning (status|rollback)
   uncommon-route openclaw <sub>         OpenClaw integration (install|uninstall|status)
   uncommon-route spend <sub>            Spending limits (status|set|clear|history)
   uncommon-route provider <sub>          API key management (list|add|remove|models)
@@ -47,6 +49,11 @@ Route options:
   --system-prompt <text>              System prompt for context
   --max-tokens <n>                    Max output tokens (default: 4096)
   --json                              Output as JSON
+  --no-feedback                       Skip interactive feedback prompt
+
+Feedback subcommands:
+  feedback status                     Show online learning status
+  feedback rollback                   Discard online weights, revert to base model
 
 Serve options:
   --port <n>                          Port to listen on (default: 8403)
@@ -112,11 +119,35 @@ def _parse_flags(args: list[str], known_flags: dict[str, bool]) -> tuple[dict[st
     return flags, rest
 
 
+_TIER_ORDER = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"]
+
+
+def _apply_feedback(features: dict[str, float], current_tier: str, signal: str) -> str | None:
+    """Apply one online learning update from CLI feedback. Returns the target tier or None."""
+    from uncommon_route.router.classifier import save_online_model, update_model
+
+    idx = _TIER_ORDER.index(current_tier) if current_tier in _TIER_ORDER else 1
+    if signal == "u":
+        target = _TIER_ORDER[min(idx + 1, len(_TIER_ORDER) - 1)]
+    elif signal == "d":
+        target = _TIER_ORDER[max(idx - 1, 0)]
+    elif signal == "ok":
+        target = current_tier
+    else:
+        return None
+
+    if not update_model(features, target):
+        return None
+    save_online_model()
+    return target
+
+
 def _cmd_route(args: list[str]) -> None:
     flags, rest = _parse_flags(args, {
         "system-prompt": True,
         "max-tokens": True,
         "json": False,
+        "no-feedback": False,
     })
 
     prompt = " ".join(rest)
@@ -127,6 +158,7 @@ def _cmd_route(args: list[str]) -> None:
     system_prompt = str(flags["system-prompt"]) if "system-prompt" in flags else None
     max_tokens = int(flags.get("max-tokens", 4096))
     output_json = bool(flags.get("json", False))
+    no_feedback = bool(flags.get("no-feedback", False))
 
     start = time.perf_counter_ns()
     decision = route(prompt, system_prompt=system_prompt, max_output_tokens=max_tokens)
@@ -147,16 +179,39 @@ def _cmd_route(args: list[str]) -> None:
             ],
             "latency_us": round(elapsed_us, 1),
         }, indent=2))
-    else:
-        print(f"  Model:      {decision.model}")
-        print(f"  Tier:       {decision.tier.value}")
-        print(f"  Confidence: {decision.confidence:.2f}")
-        print(f"  Cost:       ${decision.cost_estimate:.6f}")
-        print(f"  Savings:    {decision.savings:.0%}")
-        print(f"  Latency:    {elapsed_us:.0f}µs")
-        print(f"  Reasoning:  {decision.reasoning}")
-        if decision.fallback_chain:
-            print(f"  Fallback:   {' → '.join(fb.model for fb in decision.fallback_chain)}")
+        return
+
+    print(f"  Model:      {decision.model}")
+    print(f"  Tier:       {decision.tier.value}")
+    print(f"  Confidence: {decision.confidence:.2f}")
+    print(f"  Cost:       ${decision.cost_estimate:.6f}")
+    print(f"  Savings:    {decision.savings:.0%}")
+    print(f"  Latency:    {elapsed_us:.0f}µs")
+    print(f"  Reasoning:  {decision.reasoning}")
+    if decision.fallback_chain:
+        print(f"  Fallback:   {' → '.join(fb.model for fb in decision.fallback_chain)}")
+
+    if no_feedback or not sys.stdin.isatty():
+        return
+
+    print()
+    print("  Feedback: [Enter] ok  [u] should be harder  [d] should be easier  [s] skip")
+    try:
+        choice = input("  > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if not choice or choice == "ok":
+        choice = "ok"
+    elif choice not in ("u", "d"):
+        return
+
+    from uncommon_route.router.classifier import extract_features
+    features = extract_features(prompt, system_prompt)
+    target = _apply_feedback(features, decision.tier.value, choice)
+    if target:
+        action = "reinforced" if target == decision.tier.value else f"learned: {decision.tier.value} → {target}"
+        print(f"  ✓ {action} (weights updated)")
 
 
 def _cmd_debug(args: list[str]) -> None:
@@ -363,6 +418,48 @@ def _cmd_stats(args: list[str]) -> None:
         sys.exit(1)
 
 
+def _cmd_feedback(args: list[str]) -> None:
+    from uncommon_route.router.classifier import (
+        _get_online_model_path,
+        rollback_online_model,
+    )
+
+    if not args:
+        args = ["status"]
+
+    sub = args[0]
+
+    if sub == "status":
+        online_path = _get_online_model_path()
+        active = online_path.exists()
+        print(f"  Online model: {'active' if active else 'inactive (using base model)'}")
+        if active:
+            import os
+            size_kb = os.path.getsize(online_path) / 1024
+            mtime = os.path.getmtime(online_path)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+            print(f"  Path:         {online_path}")
+            print(f"  Size:         {size_kb:.0f} KB")
+            print(f"  Last updated: {ts}")
+        print()
+        print("  How feedback works:")
+        print("    1. Run `uncommon-route route <prompt>` and rate the tier")
+        print("    2. Your feedback updates a local model overlay (~/.uncommon-route/model_online.json)")
+        print("    3. The base model is never modified — rollback anytime with `feedback rollback`")
+
+    elif sub == "rollback":
+        deleted = rollback_online_model()
+        if deleted:
+            print("  ✓ Online weights deleted — reverted to base model")
+        else:
+            print("  No online weights found (already using base model)")
+
+    else:
+        print(f"Unknown feedback subcommand: {sub}", file=sys.stderr)
+        print("  Available: status, rollback", file=sys.stderr)
+        sys.exit(1)
+
+
 def _cmd_sessions(args: list[str]) -> None:
     from uncommon_route.session import SessionStore
     store = SessionStore()
@@ -398,6 +495,7 @@ def main() -> None:
         "provider": _cmd_provider,
         "stats": _cmd_stats,
         "sessions": _cmd_sessions,
+        "feedback": _cmd_feedback,
     }
 
     handler = commands.get(cmd)

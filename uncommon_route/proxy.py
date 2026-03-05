@@ -45,7 +45,7 @@ from uncommon_route.stats import RouteRecord, RouteStats
 from uncommon_route.feedback import FeedbackCollector
 from uncommon_route.providers import ProvidersConfig, load_providers
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 DEFAULT_UPSTREAM = os.environ.get("UNCOMMON_ROUTE_UPSTREAM", "")
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 VIRTUAL_MODEL = "uncommon-route/auto"

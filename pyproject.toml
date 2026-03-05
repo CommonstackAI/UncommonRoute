@@ -1,6 +1,6 @@
 [project]
 name = "uncommon-route"
-version = "0.1.1"
+version = "0.1.2"
 description = "SOTA LLM router — 98% accuracy, cascade classifier, <1ms local routing"
 requires-python = ">=3.11"
 license = {text = "MIT"}

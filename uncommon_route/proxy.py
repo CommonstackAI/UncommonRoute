@@ -674,6 +674,14 @@ def create_app(
             debug_headers["x-uncommon-route-tier"] = tier_value
             debug_headers["x-uncommon-route-step"] = step_type
             debug_headers["x-uncommon-route-reasoning"] = reasoning
+            stream_tag = " stream" if is_streaming else ""
+            session_tag = f"  session:{session_id[:8]}" if session_id else ""
+            fmt_tag = f"  [{api_format}]" if api_format != "openai" else ""
+            print(
+                f"[route] {tier_value} → {selected_model}"
+                f"  ${estimated_cost:.4f}  ({route_latency_us:.0f}µs"
+                f"  {route_method}{stream_tag}{session_tag}{fmt_tag})"
+            )
 
         try:
             if is_streaming:
@@ -744,6 +752,7 @@ def create_app(
                         reasoning = f"fallback: {original_model} unavailable → {fb_resolved}"
                         debug_headers["x-uncommon-route-model"] = selected_model
                         debug_headers["x-uncommon-route-reasoning"] = reasoning
+                        print(f"[route] fallback → {fb_resolved}  ({original_model} unavailable)")
                         break
 
             if is_virtual:
@@ -885,4 +894,11 @@ def serve(
     print(f"[UncommonRoute] Endpoints: /v1/chat/completions (OpenAI) + /v1/messages (Anthropic)")
     print(f"[UncommonRoute] Session persistence: enabled")
     print(f"[UncommonRoute] Spend control: enabled")
+    try:
+        import importlib.resources as _pr
+        _sd = _pr.files("uncommon_route") / "static" / "index.html"
+        if _sd.is_file():
+            print(f"[UncommonRoute] Dashboard: http://{host}:{port}/dashboard/")
+    except Exception:  # noqa: BLE001
+        pass
     uvicorn.run(app, host=host, port=port, log_level="info")

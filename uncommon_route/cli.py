@@ -34,7 +34,7 @@ from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
 from uncommon_route.router.keywords import extract_keyword_features
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 _DATA_DIR = Path.home() / ".uncommon-route"
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"

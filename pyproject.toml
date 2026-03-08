@@ -1,6 +1,6 @@
 [project]
 name = "uncommon-route"
-version = "0.2.3"
+version = "0.2.4"
 description = "Local LLM router that cuts premium-model spend with 4-tier routing, OpenAI + Anthropic compatible"
 requires-python = ">=3.11"
 license = {text = "MIT"}

@@ -16,7 +16,7 @@
 import { spawn, execSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const VERSION = "0.2.3";
+const VERSION = "0.2.4";
 const DEFAULT_PORT = 8403;
 const DEFAULT_UPSTREAM = "";
 const HEALTH_TIMEOUT_MS = 15_000;

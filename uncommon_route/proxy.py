@@ -56,7 +56,7 @@ from uncommon_route.anthropic_compat import (
     OpenAIToAnthropicStreamConverter,
 )
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 DEFAULT_UPSTREAM = os.environ.get("UNCOMMON_ROUTE_UPSTREAM", "")
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 VIRTUAL_MODEL = "uncommon-route/auto"

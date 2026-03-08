@@ -2,18 +2,11 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>The local LLM router that cuts premium-model spend before your next agent session.</strong></p>
-
-<p>
-<strong>92.3% held-out routing accuracy</strong>, <strong>0.5ms local routing</strong>, and <strong>67% lower cost than always using Claude Opus</strong> in a real coding-session simulation.<br>
-If your agent sends every prompt to the same frontier model, you are probably overpaying. UncommonRoute fixes that locally with 4-tier routing for SIMPLE, MEDIUM, COMPLEX, and REASONING prompts.
-</p>
-
 <p><strong>Don't route by habit. Route by difficulty.</strong></p>
 
 <p>
-<strong>UncommonRoute is developed by <a href="https://commonstack.ai">Commonstack</a></strong>, a unified LLM API gateway for production apps.<br>
-Commonstack gives you one API key for OpenAI, Anthropic, Google, DeepSeek, MiniMax, xAI, and more, with consolidated billing and infrastructure designed for teams that care about cost, reliability, and privacy.
+If your agent sends every prompt to the same frontier model, you are probably overpaying.<br>
+UncommonRoute is a local 4-tier LLM router — <strong>92.3% accuracy</strong>, <strong>0.5ms</strong>, <strong>67% cheaper than always-Opus</strong>.
 </p>
 
 <p>
@@ -23,36 +16,24 @@ Commonstack gives you one API key for OpenAI, Anthropic, Google, DeepSeek, MiniM
 <a href="https://commonstack.ai"><strong>Commonstack</strong></a>
 </p>
 
-<img src="https://img.shields.io/badge/92.3%25_Held--Out_Accuracy-success?style=for-the-badge" alt="92.3% held-out accuracy">&nbsp;
-<img src="https://img.shields.io/badge/67%25_Lower_Cost_vs_Opus-brightgreen?style=for-the-badge" alt="67% lower cost vs opus">&nbsp;
-<img src="https://img.shields.io/badge/0.5ms_Local_Routing-blue?style=for-the-badge" alt="0.5ms routing">&nbsp;
-<img src="https://img.shields.io/badge/93.5%25_Quality_Retained-blueviolet?style=for-the-badge" alt="93.5% quality retained">&nbsp;
-<img src="https://img.shields.io/badge/Zero_Router_API_Calls-purple?style=for-the-badge" alt="Local routing">
+<br>
 
-<br><br>
+<img src="docs/uncommon-route-cost-savings.svg" alt="Before: every request to Claude Opus at $1.75. After: mixed routing at $0.58, 67 percent lower cost" width="880">
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776ab?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-169_passing-success?style=flat-square)]()
-[![Claude Code](https://img.shields.io/badge/Claude_Code-Ready-111111?style=flat-square)](#usage-modes)
-[![Codex](https://img.shields.io/badge/Codex-Ready-412991?style=flat-square)](#usage-modes)
-[![Cursor and OpenAI SDK](https://img.shields.io/badge/Cursor_and_OpenAI_SDK-Compatible-0ea5e9?style=flat-square)](#usage-modes)
-[![OpenClaw Plugin](https://img.shields.io/badge/OpenClaw-Plugin-orange?style=flat-square)](https://openclaw.ai)
-[![Train Your Own Router](https://img.shields.io/badge/Train_Your_Own_Router-Locally-16a34a?style=flat-square)](#benchmarks)
+<br>
 
-<br><br>
+<p>
+<strong>Python 3.11+</strong> · <strong>MIT</strong> · <strong>169 tests</strong> ·
+<a href="#usage-modes"><strong>Claude Code</strong></a> ·
+<a href="#usage-modes"><strong>Codex</strong></a> ·
+<a href="#usage-modes"><strong>Cursor</strong></a> ·
+<a href="https://openclaw.ai"><strong>OpenClaw</strong></a> ·
+<a href="#benchmarks"><strong>Train your own router</strong></a>
+</p>
 
-<img src="docs/uncommon-route-cost-savings.svg" alt="Before UncommonRoute every request hits Claude Opus, after UncommonRoute requests are split across cheaper and stronger models with 67 percent lower cost" width="960">
-
-| | Without UncommonRoute | With UncommonRoute |
-|---|---|---|
-| **Routing strategy** | Default everything to the same premium model | Route by task difficulty: SIMPLE, MEDIUM, COMPLEX, REASONING |
-| **Cost profile** | Easy prompts pay frontier-model prices | 67% lower cost vs always using Opus in a real coding-session simulation |
-| **Latency** | No routing logic, but no cost control either | 0.5ms local routing, zero router API calls |
-| **Tooling** | You hand-wire behavior per client | Claude Code, Codex, Cursor, OpenAI SDKs, Anthropic-compatible clients, and OpenClaw |
-| **Control** | Hosted black box or manual prompt heuristics | Local-first router you can retrain on 1,904 prompts in about 26 seconds |
-
-<p><strong>Works with Claude Code, Codex, Cursor, OpenAI SDKs, and OpenClaw. Local first. Cheap by default. Strong when it matters.</strong></p>
+<p>
+Built by <a href="https://commonstack.ai"><strong>Commonstack</strong></a> — one API key for OpenAI, Anthropic, Google, DeepSeek, xAI, and more.
+</p>
 
 </div>
 

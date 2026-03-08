@@ -1,84 +1,69 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="440" viewBox="0 0 880 440" role="img" aria-labelledby="title desc">
   <title id="title">UncommonRoute cost savings</title>
-  <desc id="desc">Before UncommonRoute every request is routed to Claude Opus. After UncommonRoute requests are split across multiple models and total cost is reduced by 67 percent.</desc>
-  <rect width="1200" height="560" fill="#050816" rx="24"/>
-  <rect x="24" y="24" width="1152" height="512" rx="22" fill="#0b1220" stroke="#1e293b"/>
-  <text x="600" y="58" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700" text-anchor="middle">
-    Before vs After UncommonRoute
-  </text>
-  <text x="600" y="92" fill="#cbd5e1" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle">
-    Same coding session. Same user. Much less premium-model waste.
-  </text>
-  <rect x="470" y="108" width="260" height="34" rx="17" fill="#14532d"/>
-  <text x="600" y="131" fill="#dcfce7" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
-    67% lower cost • 93.5% quality retained
-  </text>
+  <desc id="desc">Before: every request routed to Claude Opus, $1.75 per session. After: mixed routing, $0.58 per session, 67% lower cost.</desc>
 
-  <rect x="50" y="160" width="520" height="320" rx="20" fill="#0f172a" stroke="#334155" stroke-width="2"/>
-  <text x="80" y="205" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="700">
-    Before UncommonRoute
-  </text>
-  <text x="80" y="235" fill="#94a3b8" font-family="Arial, Helvetica, sans-serif" font-size="17">
-    Every request is treated like it needs the most expensive model
-  </text>
-  <rect x="80" y="275" width="460" height="72" rx="14" fill="#f97316"/>
-  <text x="310" y="318" fill="#fff7ed" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="700" text-anchor="middle">
-    anthropic/claude-opus-4.6
-  </text>
-  <text x="80" y="382" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700">
-    Total cost: $1.7529
-  </text>
-  <text x="80" y="412" fill="#fda4af" font-family="Arial, Helvetica, sans-serif" font-size="17">
-    Great for the hardest prompts, wasteful for everything else
-  </text>
-  <text x="80" y="448" fill="#cbd5e1" font-family="Arial, Helvetica, sans-serif" font-size="16">
-    131-request coding session: one model, one giant bill
-  </text>
+  <rect width="880" height="440" fill="#050816" rx="20"/>
 
-  <rect x="630" y="160" width="520" height="320" rx="20" fill="#0f172a" stroke="#334155" stroke-width="2"/>
-  <text x="660" y="205" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="700">
-    After UncommonRoute
-  </text>
-  <text x="660" y="235" fill="#94a3b8" font-family="Arial, Helvetica, sans-serif" font-size="17">
-    Each request goes to the cheapest model that can still do the job
-  </text>
+  <!-- Header -->
+  <text x="440" y="38" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" text-anchor="middle">Same coding session. Much less waste.</text>
+  <rect x="310" y="52" width="260" height="28" rx="14" fill="#14532d"/>
+  <text x="440" y="72" fill="#dcfce7" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" text-anchor="middle">67% lower cost · 93.5% quality retained</text>
 
-  <rect x="660" y="275" width="96" height="72" rx="14" fill="#22c55e"/>
-  <rect x="764" y="275" width="156" height="72" rx="14" fill="#38bdf8"/>
-  <rect x="928" y="275" width="170" height="72" rx="14" fill="#a855f7"/>
-  <text x="708" y="300" fill="#052e16" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" text-anchor="middle">
-    SIMPLE
-  </text>
-  <text x="708" y="322" fill="#052e16" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
-    Kimi
-  </text>
-  <text x="842" y="300" fill="#082f49" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" text-anchor="middle">
-    MEDIUM / COMPLEX
-  </text>
-  <text x="842" y="322" fill="#082f49" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
-    Gemini
-  </text>
-  <text x="1013" y="300" fill="#faf5ff" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" text-anchor="middle">
-    REASONING / FALLBACK
-  </text>
-  <text x="1013" y="322" fill="#faf5ff" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
-    Grok / Sonnet
-  </text>
-  <text x="660" y="382" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700">
-    Total cost: $0.5801
-  </text>
-  <text x="660" y="412" fill="#86efac" font-family="Arial, Helvetica, sans-serif" font-size="17">
-    67% lower cost with 93.5% quality retained
-  </text>
-  <text x="660" y="448" fill="#cbd5e1" font-family="Arial, Helvetica, sans-serif" font-size="16">
-    131-request coding session: mixed models, much smaller bill
-  </text>
+  <!-- Left card: Before -->
+  <rect x="24" y="96" width="390" height="310" rx="16" fill="#0f172a" stroke="#334155" stroke-width="1.5"/>
+  <text x="48" y="132" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700">Before</text>
+  <text x="48" y="156" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="14">Every request → most expensive model</text>
 
-  <path d="M585 318 L615 318" stroke="#64748b" stroke-width="4" stroke-linecap="round"/>
-  <path d="M607 308 L621 318 L607 328" fill="none" stroke="#64748b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Single big orange bar -->
+  <rect x="48" y="180" width="342" height="60" rx="12" fill="#f97316"/>
+  <text x="219" y="216" fill="#fff7ed" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700" text-anchor="middle">claude-opus-4.6</text>
 
-  <rect x="420" y="500" width="360" height="34" rx="17" fill="#14532d"/>
-  <text x="600" y="523" fill="#dcfce7" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
-    Keep the hard prompts smart. Route the rest cheaper.
-  </text>
+  <!-- Repeated bars (faded, showing waste) -->
+  <rect x="48" y="250" width="342" height="24" rx="8" fill="#f97316" opacity="0.35"/>
+  <rect x="48" y="280" width="342" height="24" rx="8" fill="#f97316" opacity="0.2"/>
+  <rect x="48" y="310" width="342" height="24" rx="8" fill="#f97316" opacity="0.1"/>
+
+  <text x="48" y="364" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700">$1.75</text>
+  <text x="102" y="364" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="14"> per session</text>
+  <text x="48" y="388" fill="#fda4af" font-family="system-ui, -apple-system, sans-serif" font-size="13">Same model for "what's 2+2" and "design a database"</text>
+
+  <!-- Arrow -->
+  <path d="M424 256 L456 256" stroke="#64748b" stroke-width="3" stroke-linecap="round"/>
+  <path d="M448 248 L460 256 L448 264" fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Right card: After -->
+  <rect x="466" y="96" width="390" height="310" rx="16" fill="#0f172a" stroke="#334155" stroke-width="1.5"/>
+  <text x="490" y="132" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700">After</text>
+  <text x="490" y="156" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="14">Each request → cheapest model that can do the job</text>
+
+  <!-- Three model bars, proportional to usage -->
+  <rect x="490" y="180" width="200" height="60" rx="12" fill="#22c55e"/>
+  <text x="590" y="204" fill="#052e16" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">SIMPLE + MEDIUM</text>
+  <text x="590" y="224" fill="#052e16" font-family="system-ui, -apple-system, sans-serif" font-size="17" font-weight="700" text-anchor="middle">Kimi K2.5</text>
+
+  <rect x="700" y="180" width="120" height="60" rx="12" fill="#38bdf8"/>
+  <text x="760" y="204" fill="#082f49" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">COMPLEX</text>
+  <text x="760" y="224" fill="#082f49" font-family="system-ui, -apple-system, sans-serif" font-size="17" font-weight="700" text-anchor="middle">Gemini</text>
+
+  <rect x="490" y="250" width="120" height="44" rx="10" fill="#a855f7"/>
+  <text x="550" y="268" fill="#faf5ff" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">REASONING</text>
+  <text x="550" y="286" fill="#faf5ff" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" text-anchor="middle">Grok Fast</text>
+
+  <rect x="620" y="250" width="100" height="44" rx="10" fill="#64748b"/>
+  <text x="670" y="268" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">FALLBACK</text>
+  <text x="670" y="286" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" text-anchor="middle">Sonnet</text>
+
+  <!-- Smaller free tier hint -->
+  <rect x="730" y="250" width="90" height="44" rx="10" fill="#1e293b" stroke="#334155"/>
+  <text x="775" y="268" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">FREE</text>
+  <text x="775" y="286" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" text-anchor="middle">GPT-OSS</text>
+
+  <text x="490" y="330" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700">$0.58</text>
+  <text x="542" y="330" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="14"> per session</text>
+  <text x="490" y="354" fill="#86efac" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">67% saved</text>
+  <text x="568" y="354" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="13">, quality stays at 93.5%</text>
+  <text x="490" y="388" fill="#cbd5e1" font-family="system-ui, -apple-system, sans-serif" font-size="13">Right model for each prompt, automatically</text>
+
+  <!-- Bottom tagline -->
+  <text x="440" y="430" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="13" text-anchor="middle">131-request agent coding session · benchmark: router-bench/cost_simulation</text>
 </svg>

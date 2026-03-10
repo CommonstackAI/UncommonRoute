@@ -1,3 +1,5 @@
+<p align="right"><strong>English</strong> | <a href="https://github.com/anjieyang/UncommonRoute/blob/main/README.zh-CN.md">简体中文</a></p>
+
 <div align="center">
 
 <h1>UncommonRoute</h1>
@@ -70,8 +72,10 @@ Your client
             |
             v
     Your upstream API
- (Commonstack / OpenAI / Ollama / vLLM / ...)
+ (Parallax / Commonstack / OpenAI / Ollama / vLLM / ...)
 ```
+
+Examples: [Parallax](https://github.com/GradientHQ/parallax), [Commonstack](https://commonstack.ai/), OpenAI, Ollama, vLLM.
 
 Important terms:
 
@@ -99,9 +103,9 @@ If you are brand new, follow these steps in order.
 
 Good upstream choices:
 
-- **Commonstack** if you want one key that can reach multiple providers
+- [**Commonstack**](https://commonstack.ai/) if you want one key that can reach multiple providers
 - **OpenAI** if you already use OpenAI directly
-- **Ollama / vLLM** if you want to route to a local OpenAI-compatible server
+- [**Parallax**](https://github.com/GradientHQ/parallax) / **Ollama / vLLM** if you want to route to a local OpenAI-compatible server
 
 ### 1. Install
 
@@ -152,11 +156,18 @@ export UNCOMMON_ROUTE_API_KEY="sk-..."
 ```
 
 ```bash
-# Local OpenAI-compatible server (Ollama, vLLM, etc.)
+# Parallax scheduler endpoint (experimental local OpenAI-style upstream)
+export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:3001/v1"
+```
+
+```bash
+# Other local OpenAI-compatible servers (Ollama, vLLM, etc.)
 export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:11434/v1"
 ```
 
 If your upstream does not need a key, you can skip `UNCOMMON_ROUTE_API_KEY`.
+
+Parallax is listed as experimental here: its public docs and source clearly expose `POST /v1/chat/completions`, but I could not find a public `/v1/models` route, so UncommonRoute model discovery may be limited.
 
 ### 4. Start the proxy
 
@@ -203,7 +214,8 @@ Each `setup` command prints the exact next step for your shell or client.
 
 You only need one of these sections.
 
-### Codex
+<details>
+<summary><strong>Codex</strong> · OpenAI-compatible local routing for Codex</summary>
 
 ```bash
 uncommon-route setup codex
@@ -229,7 +241,10 @@ For smart routing, use:
 model = "uncommon-route/auto"
 ```
 
-### Claude Code
+</details>
+
+<details>
+<summary><strong>Claude Code</strong> · Anthropic-style local routing for Claude Code</summary>
 
 ```bash
 uncommon-route setup claude-code
@@ -251,7 +266,10 @@ claude
 
 Claude Code talks to the Anthropic-style `/v1/messages` endpoint. UncommonRoute converts formats and handles smart routing automatically.
 
-### OpenAI SDK or Cursor
+</details>
+
+<details>
+<summary><strong>OpenAI SDK / Cursor</strong> · One local OpenAI-compatible base URL</summary>
 
 ```bash
 uncommon-route setup openai
@@ -275,13 +293,18 @@ response = client.chat.completions.create(
 
 Cursor users can point "OpenAI Base URL" to `http://localhost:8403/v1`.
 
-### OpenClaw
+</details>
+
+<details>
+<summary><strong>OpenClaw</strong> · Plugin-based integration</summary>
 
 ```bash
 openclaw plugins install @anjieyang/uncommon-route
 ```
 
 The plugin handles dependency installation, proxy startup, and registration.
+
+</details>
 
 ---
 
@@ -349,7 +372,8 @@ Your integration is "live" when all of these are true:
 
 ## Everyday Usage
 
-### CLI
+<details>
+<summary><strong>CLI</strong> · Inspect routing locally without sending a real upstream request</summary>
 
 Use the CLI when you want to inspect routing locally without sending a real request upstream.
 
@@ -365,7 +389,10 @@ What each command is for:
 - `route --json`: same information in machine-readable form
 - `debug`: see the feature breakdown behind the classification
 
-### Python SDK
+</details>
+
+<details>
+<summary><strong>Python SDK</strong> · Call the router directly inside Python</summary>
 
 Use the SDK when you want routing decisions directly inside Python.
 
@@ -382,7 +409,10 @@ print(result.tier)
 print(result.signals)
 ```
 
-### HTTP Proxy
+</details>
+
+<details>
+<summary><strong>HTTP Proxy</strong> · Put UncommonRoute in front of real clients and apps</summary>
 
 Use the proxy when you want real applications to send requests through UncommonRoute.
 
@@ -407,6 +437,8 @@ response = client.chat.completions.create(
 ```
 
 Non-virtual model names are passed through unchanged, so you can still target a specific model when you want to.
+
+</details>
 
 ---
 
@@ -750,5 +782,5 @@ MIT — see [LICENSE](LICENSE).
 ---
 
 <div align="center">
-<sub>Built by <a href="https://github.com/anjieyang">Anjie Yang</a> · Commonstack-compatible</sub>
+<sub>Built by <a href="https://github.com/anjieyang">Anjie Yang</a> · <a href="https://commonstack.ai/">Commonstack-compatible</a></sub>
 </div>

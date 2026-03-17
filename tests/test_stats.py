@@ -12,7 +12,6 @@ from starlette.testclient import TestClient
 
 from uncommon_route.artifacts import ArtifactStore
 from uncommon_route.proxy import create_app
-from uncommon_route.session import SessionConfig, SessionStore
 from uncommon_route.semantic import SemanticCallResult
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.stats import (
@@ -47,7 +46,7 @@ def _make_record(
     model: str = "moonshot/kimi-k2.5",
     tier: str = "SIMPLE",
     confidence: float = 0.9,
-    method: str = "cascade",
+    method: str = "pool",
     estimated_cost: float = 0.001,
     actual_cost: float | None = None,
     savings: float = 0.95,
@@ -103,12 +102,12 @@ class TestRouteStats:
 
     def test_summary_by_method(self) -> None:
         rs = RouteStats(storage=InMemoryRouteStatsStorage())
-        rs.record(_make_record(method="cascade"))
-        rs.record(_make_record(method="cascade"))
-        rs.record(_make_record(method="session-hold"))
+        rs.record(_make_record(method="pool"))
+        rs.record(_make_record(method="pool"))
+        rs.record(_make_record(method="fallback"))
         s = rs.summary()
-        assert s.by_method["cascade"] == 2
-        assert s.by_method["session-hold"] == 1
+        assert s.by_method["pool"] == 2
+        assert s.by_method["fallback"] == 1
 
     def test_actual_cost_preferred(self) -> None:
         rs = RouteStats(storage=InMemoryRouteStatsStorage())
@@ -237,6 +236,7 @@ class TestRouteStats:
         assert rs2.count == 2
         h = rs2.history()
         assert h[0].model == "test/model2"
+        assert h[0].tier == "COMPLEX"
         assert h[1].confidence == 0.77
         assert h[1].transport == "anthropic-messages"
         assert h[1].cache_mode == "cache_control"
@@ -269,7 +269,6 @@ def stats_client() -> TestClient:
     """Test client with in-memory stats."""
     app = create_app(
         upstream="http://127.0.0.1:1/fake",
-        session_store=SessionStore(SessionConfig(enabled=True, timeout_s=300)),
         spend_control=SpendControl(storage=InMemorySpendControlStorage()),
         route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
     )
@@ -299,8 +298,8 @@ class TestStatsEndpoint:
         # Upstream is fake (502), but for non-streaming the stats still record
         assert data["total_requests"] == 1
         assert "SIMPLE" in data["by_tier"]
-        assert data["by_profile"]["auto"] == 1
-        assert data["by_method"].get("cascade", 0) >= 1
+        assert data["by_mode"]["auto"] == 1
+        assert sum(data["by_method"].values()) >= 1
         assert "by_transport" in data
         assert "by_cache_mode" in data
         assert "by_cache_family" in data
@@ -312,7 +311,7 @@ class TestStatsEndpoint:
         assert "total_savings_absolute" in data
         assert "total_cache_savings" in data
         assert "total_compaction_savings" in data
-        assert "selection_profiles" in data["selector"]
+        assert "selection_modes" in data["selector"]
         assert "recent_feedback_changes" in data["selector"]["experience"]
 
     def test_recent_includes_transport_and_cache_strategy(self, stats_client: TestClient) -> None:
@@ -324,10 +323,12 @@ class TestStatsEndpoint:
 
         recent = stats_client.get("/v1/stats/recent").json()
         assert len(recent) == 1
+        assert "mode" in recent[0]
         assert "transport" in recent[0]
         assert "cache_mode" in recent[0]
         assert "cache_family" in recent[0]
         assert "cache_breakpoints" in recent[0]
+        assert "feedback_action" in recent[0]
 
     def test_stats_include_selector_feedback_summary(self, stats_client: TestClient) -> None:
         resp = stats_client.post("/v1/chat/completions", json={
@@ -343,24 +344,9 @@ class TestStatsEndpoint:
         assert data["selector"]["experience"]["demoted_models"]
         assert data["selector"]["experience"]["recent_feedback_changes"][0]["last_feedback_signal"] == "weak"
 
-    def test_stats_include_decision_tier_for_session_hold(self, stats_client: TestClient) -> None:
-        headers = {"x-session-id": "stats-hold"}
-        stats_client.post("/v1/chat/completions", json={
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "design a consensus protocol with proofs"}],
-        }, headers=headers)
-        stats_client.post("/v1/chat/completions", json={
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "hello"}],
-        }, headers=headers)
-        data = stats_client.get("/v1/stats").json()
-        assert data["total_requests"] == 2
-        assert "SIMPLE" in data["by_decision_tier"]
-
     def test_stats_track_artifacts_and_input_reduction(self, tmp_path) -> None:
         app = create_app(
             upstream="http://127.0.0.1:1/fake",
-            session_store=SessionStore(SessionConfig(enabled=True, timeout_s=300)),
             spend_control=SpendControl(storage=InMemorySpendControlStorage()),
             route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
             artifact_store=ArtifactStore(root=tmp_path / "artifacts"),
@@ -394,7 +380,6 @@ class TestStatsEndpoint:
     def test_stats_track_semantic_quality_fallbacks(self, tmp_path) -> None:
         app = create_app(
             upstream="http://127.0.0.1:1/fake",
-            session_store=SessionStore(SessionConfig(enabled=True, timeout_s=300)),
             spend_control=SpendControl(storage=InMemorySpendControlStorage()),
             route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
             artifact_store=ArtifactStore(root=tmp_path / "artifacts"),
@@ -458,7 +443,6 @@ class TestStatsEndpoint:
         try:
             app = create_app(
                 upstream="https://api.commonstack.ai/v1",
-                session_store=SessionStore(SessionConfig(enabled=True, timeout_s=300)),
                 spend_control=SpendControl(storage=InMemorySpendControlStorage()),
                 route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
             )

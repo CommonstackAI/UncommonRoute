@@ -163,7 +163,6 @@ def train_and_save_model(data_path: str, out_path: str | None = None) -> None:
 
     for case in cases:
         prompt = case["prompt"]
-        sys_prompt = case.get("system_prompt")
 
         # Extract features from prompt only (matches inference behavior)
         struct_dims = extract_structural_features(prompt)
@@ -173,7 +172,9 @@ def train_and_save_model(data_path: str, out_path: str | None = None) -> None:
         keyword_scores = {d.name: d.score for d in kw_dims}
 
         features = model._build_features(structural_scores, unicode_blocks, keyword_scores, prompt)
-        feature_sets.append((features, case["expected_tier"]))
+        normalized_tier = model._normalize_tier_label(case["expected_tier"])
+        if normalized_tier is not None:
+            feature_sets.append((features, normalized_tier))
 
     model.train(feature_sets, epochs=12)
 
@@ -219,6 +220,18 @@ def _sigmoid(distance: float, steepness: float) -> float:
     return 1.0 / (1.0 + math.exp(-clamped))
 
 
+def _reasoning_preference_score(all_features: dict[str, float]) -> float:
+    reasoning = all_features.get("k_reasoning_markers", 0.0)
+    analytical = all_features.get("k_analytical_verbs", 0.0)
+    multi_step = all_features.get("k_multi_step_patterns", 0.0)
+    math = all_features.get("s_math_symbols", 0.0)
+    return max(
+        reasoning,
+        (0.70 * reasoning) + (0.30 * math),
+        (0.60 * reasoning) + (0.25 * analytical) + (0.15 * multi_step),
+    )
+
+
 def _rule_based_classify(
     all_features: dict[str, float],
     config: ScoringConfig,
@@ -261,11 +274,8 @@ def _rule_based_classify(
     elif score < bounds.medium_complex:
         tier = Tier.MEDIUM
         dist = min(score - bounds.simple_medium, bounds.medium_complex - score)
-    elif score < bounds.complex_reasoning:
-        tier = Tier.COMPLEX
-        dist = min(score - bounds.medium_complex, bounds.complex_reasoning - score)
     else:
-        tier, dist = Tier.REASONING, score - bounds.complex_reasoning
+        tier, dist = Tier.COMPLEX, score - bounds.medium_complex
 
     confidence = _sigmoid(dist, config.confidence_steepness)
     return tier, confidence
@@ -291,9 +301,11 @@ def classify(
     # Level 0: Trivial
     trivial = _check_trivial(prompt, estimated_tokens)
     if trivial is not None:
+        trivial_complexity = 0.0 if trivial is Tier.SIMPLE else 0.8
         return ScoringResult(
             score=0.0, tier=trivial, confidence=0.95,
             signals=[f"trivial:{trivial.value}"], agentic_score=0.0,
+            complexity=trivial_complexity,
         )
 
     # Extract all features (prompt-only; full_text is passed for compat but unused)
@@ -304,29 +316,47 @@ def classify(
 
     # Level 1: Model prediction (primary)
     if _model is not None:
-        tier_str, confidence = _model.predict(all_features)
-        tier = Tier(tier_str)
-        signals = [f"model:{tier_str}({confidence:.2f})"]
+        complexity, tier_str, confidence = _model.predict_complexity(all_features)
+        reasoning_pref = _reasoning_preference_score(all_features)
+        if reasoning_pref >= 0.80 and complexity >= 0.35:
+            complexity = max(complexity, 0.82)
+        normalized_tier = "COMPLEX" if tier_str == "REASONING" else tier_str
+        tier = Tier.COMPLEX if complexity >= 0.67 else Tier(normalized_tier)
+        signals = [f"model:{normalized_tier}({confidence:.2f})", f"complexity:{complexity:.2f}"]
+        if reasoning_pref >= 0.80:
+            signals.append(f"reasoning-pref:{reasoning_pref:.2f}")
         return ScoringResult(
             score=0.0, tier=tier, confidence=confidence,
             signals=signals, agentic_score=agentic_score,
+            complexity=complexity,
         )
 
     # Level 2: Rule-based fallback
     tier, confidence = _rule_based_classify(all_features, config)
+    _TIER_TO_COMPLEXITY = {Tier.SIMPLE: 0.15, Tier.MEDIUM: 0.42, Tier.COMPLEX: 0.86}
+    complexity = _TIER_TO_COMPLEXITY.get(tier, 0.33)
+    reasoning_pref = _reasoning_preference_score(all_features)
+    if reasoning_pref >= 0.80 and complexity >= 0.35:
+        tier = Tier.COMPLEX
+        complexity = max(complexity, 0.82)
     struct_dims = extract_structural_features(prompt)
     kw_dims = extract_keyword_features(prompt)
     all_dims = struct_dims + kw_dims
     signals = [d.signal for d in all_dims if d.signal is not None]
     signals.append("rule-fallback")
+    signals.append(f"complexity:{complexity:.2f}")
+    if reasoning_pref >= 0.80:
+        signals.append(f"reasoning-pref:{reasoning_pref:.2f}")
 
     if confidence < config.confidence_threshold:
         return ScoringResult(
             score=0.0, tier=None, confidence=confidence,
             signals=signals, dimensions=all_dims, agentic_score=agentic_score,
+            complexity=complexity,
         )
 
     return ScoringResult(
         score=0.0, tier=tier, confidence=confidence,
         signals=signals, dimensions=all_dims, agentic_score=agentic_score,
+        complexity=complexity,
     )

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from uncommon_route.router.classifier import classify as ur_classify
 from bench.clawrouter_v2_compat import classify_clawrouter_v2 as cr_classify
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING, DEFAULT_CONFIG
-from uncommon_route.router.types import Tier
+from uncommon_route.router.types import RoutingMode, Tier
 
 app = FastAPI(title="UncommonRoute vs ClawRouter vs Claude")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -20,17 +20,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 TIER_MODEL = {
-    "SIMPLE": DEFAULT_CONFIG.tiers[Tier.SIMPLE].primary,
-    "MEDIUM": DEFAULT_CONFIG.tiers[Tier.MEDIUM].primary,
-    "COMPLEX": DEFAULT_CONFIG.tiers[Tier.COMPLEX].primary,
-    "REASONING": DEFAULT_CONFIG.tiers[Tier.REASONING].primary,
+    "SIMPLE": DEFAULT_CONFIG.modes[RoutingMode.AUTO].tiers[Tier.SIMPLE].primary,
+    "MEDIUM": DEFAULT_CONFIG.modes[RoutingMode.AUTO].tiers[Tier.MEDIUM].primary,
+    "COMPLEX": DEFAULT_CONFIG.modes[RoutingMode.AUTO].tiers[Tier.COMPLEX].primary,
 }
 
 TIER_COLORS = {
     "SIMPLE": "#22c55e",
     "MEDIUM": "#3b82f6",
     "COMPLEX": "#f59e0b",
-    "REASONING": "#a855f7",
 }
 
 BASELINE = "anthropic/claude-opus-4.6"
@@ -46,14 +44,14 @@ def _get_claude():
     return _claude_client
 
 
-CLAUDE_CLASSIFY_PROMPT = """You are a query complexity classifier for an LLM router. Classify the user's query into exactly one of these four tiers:
+CLAUDE_CLASSIFY_PROMPT = """You are a query complexity classifier for an LLM router. Classify the user's query into exactly one of these three tiers:
 
 - SIMPLE: Factual Q&A, definitions, translations, greetings, trivial lookups
 - MEDIUM: Single-task code generation, explanations, comparisons, summaries, debugging, code review, rewrites
 - COMPLEX: Multi-requirement system design, architecture, security audits, ML pipelines, migrations, infrastructure (typically lists 3+ requirements)
-- REASONING: Formal mathematical proofs, algorithm correctness proofs, derivations, game theory, logic puzzles
+- COMPLEX also covers formal mathematical proofs, algorithm correctness proofs, derivations, game theory, and logic puzzles.
 
-Respond with ONLY one word: SIMPLE, MEDIUM, COMPLEX, or REASONING. Nothing else."""
+Respond with ONLY one word: SIMPLE, MEDIUM, or COMPLEX. Nothing else."""
 
 
 def classify_with_claude(prompt: str) -> tuple[str, float, float]:
@@ -72,7 +70,7 @@ def classify_with_claude(prompt: str) -> tuple[str, float, float]:
 
         text = response.content[0].text.strip().upper()
         tier = "MEDIUM"
-        for t in ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING"):
+        for t in ("SIMPLE", "MEDIUM", "COMPLEX"):
             if t in text:
                 tier = t
                 break
@@ -132,7 +130,6 @@ def compare(q: Query):
 
     # Claude (real API call)
     claude_tier, claude_conf, claude_ms = classify_with_claude(prompt)
-    claude_model = TIER_MODEL.get(claude_tier, BASELINE)
     claude_us = claude_ms * 1000
 
     return CompareResponse(

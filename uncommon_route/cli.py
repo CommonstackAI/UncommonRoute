@@ -11,9 +11,8 @@ Subcommands:
     openclaw — manage OpenClaw integration (install/uninstall/status)
     spend    — manage spending limits (set/clear/status/history)
     provider — API key management (BYOK)
-    config   — routing profile/tier defaults
+    config   — routing mode/tier defaults
     stats    — routing analytics (summary/history/reset)
-    sessions — show active session stats
 
 Global flags:
     --version / -v
@@ -30,6 +29,7 @@ import sys
 import time
 from urllib.parse import urlparse
 
+from uncommon_route.connections_store import ConnectionsStore, resolve_primary_connection
 from uncommon_route.paths import data_dir
 from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
@@ -62,14 +62,14 @@ Commands:
   openclaw <sub>                    OpenClaw integration (install|uninstall|status)
   spend <sub>                       Spending limits (status|set|clear|history)
   provider <sub>                    API key management (list|add|remove|models)
-  config <sub>                      Routing config (show|set-tier|reset-tier|reset)
+  config <sub>                      Routing config (show|set-default-mode|set-tier|reset-tier|reset)
   stats [sub]                       Routing analytics (summary|history|reset)
-  sessions                          Show active session stats
   --version                         Show version
 
 Route options:
   --system-prompt <text>              System prompt for context
   --max-tokens <n>                    Max output tokens (default: 4096)
+  --mode <name>                       Routing mode: auto|fast|best
   --json                              Output as JSON
   --no-feedback                       Skip interactive feedback prompt
 
@@ -112,10 +112,11 @@ Stats subcommands:
   stats reset                         Clear all stats
 
 Config subcommands:
-  config show [--json]                Show active profile/tier routing config
-  config set-tier <profile> <tier> <primary> [--fallback <csv>] [--mode adaptive|hard-pin]
-                                      Override one profile/tier routing table
-  config reset-tier <profile> <tier>  Remove one override
+  config show [--json]                Show active default mode and tier overrides
+  config set-default-mode <mode>      Set the default mode used when no model is specified
+  config set-tier <mode> <tier> <primary> [--fallback <csv>] [--strategy adaptive|hard-pin]
+                                      Override one mode/tier routing table
+  config reset-tier <mode> <tier>     Remove one override
   config reset                        Clear all routing overrides
 
 Setup subcommands:
@@ -132,7 +133,8 @@ Examples:
   uncommon-route logs --follow
   uncommon-route spend set hourly 5.00
   uncommon-route provider add deepseek sk-...
-  uncommon-route config set-tier auto SIMPLE moonshot/kimi-k2.5 --fallback google/gemini-2.5-flash-lite,deepseek/deepseek-chat --mode adaptive
+  uncommon-route config set-default-mode fast
+  uncommon-route config set-tier auto SIMPLE openai/gpt-4o-mini --fallback moonshot/kimi-k2.5 --strategy hard-pin
 """)
 
 
@@ -161,7 +163,7 @@ def _parse_flags(args: list[str], known_flags: dict[str, bool]) -> tuple[dict[st
     return flags, rest
 
 
-_TIER_ORDER = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"]
+_TIER_ORDER = ["SIMPLE", "MEDIUM", "COMPLEX"]
 
 
 def _apply_feedback(features: dict[str, float], current_tier: str, signal: str) -> str | None:
@@ -188,6 +190,7 @@ def _cmd_route(args: list[str]) -> None:
     flags, rest = _parse_flags(args, {
         "system-prompt": True,
         "max-tokens": True,
+        "mode": True,
         "json": False,
         "no-feedback": False,
     })
@@ -199,15 +202,37 @@ def _cmd_route(args: list[str]) -> None:
 
     system_prompt = str(flags["system-prompt"]) if "system-prompt" in flags else None
     max_tokens = int(flags.get("max-tokens", 4096))
+    if "mode" in flags:
+        mode_flag = str(flags["mode"]).strip().lower()
+    else:
+        from uncommon_route.routing_config_store import RoutingConfigStore
+        mode_flag = RoutingConfigStore().default_mode().value
     output_json = bool(flags.get("json", False))
     no_feedback = bool(flags.get("no-feedback", False))
 
+    from uncommon_route.router.types import RoutingMode
+
+    try:
+        routing_mode = RoutingMode(mode_flag)
+    except ValueError:
+        print(
+            "Error: --mode must be one of auto, fast, best",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     start = time.perf_counter_ns()
-    decision = route(prompt, system_prompt=system_prompt, max_output_tokens=max_tokens)
+    decision = route(
+        prompt,
+        system_prompt=system_prompt,
+        max_output_tokens=max_tokens,
+        routing_mode=routing_mode,
+    )
     elapsed_us = (time.perf_counter_ns() - start) / 1000
 
     if output_json:
         print(json.dumps({
+            "mode": decision.mode.value,
             "model": decision.model,
             "tier": decision.tier.value,
             "confidence": round(decision.confidence, 3),
@@ -223,6 +248,7 @@ def _cmd_route(args: list[str]) -> None:
         }, indent=2))
         return
 
+    print(f"  Mode:       {decision.mode.value}")
     print(f"  Model:      {decision.model}")
     print(f"  Tier:       {decision.tier.value}")
     print(f"  Confidence: {decision.confidence:.2f}")
@@ -307,11 +333,11 @@ def _cmd_serve(args: list[str]) -> None:
         "background": False,
     })
 
-    from uncommon_route.proxy import DEFAULT_PORT, DEFAULT_UPSTREAM
+    from uncommon_route.proxy import DEFAULT_PORT
 
     port = int(flags.get("port", DEFAULT_PORT))
     host = str(flags.get("host", "127.0.0.1"))
-    upstream = str(flags.get("upstream", DEFAULT_UPSTREAM))
+    upstream = str(flags.get("upstream", "")).strip() or None
     composition_config = str(flags.get("composition-config", "")).strip()
     daemon = bool(flags.get("daemon") or flags.get("background"))
 
@@ -343,7 +369,7 @@ def _cmd_serve(args: list[str]) -> None:
         _PID_FILE.write_text(str(proc.pid))
         print(f"  Started in background (PID {proc.pid})")
         print(f"  Logs:  {_LOG_FILE}")
-        print(f"  Stop:  uncommon-route stop")
+        print("  Stop:  uncommon-route stop")
         return
 
     from uncommon_route.proxy import serve
@@ -380,8 +406,8 @@ def _cmd_doctor(args: list[str]) -> None:
     ok = vi >= (3, 11)
     checks.append(("Python version", ok, f"{vi.major}.{vi.minor}.{vi.micro}"))
 
-    # Upstream configured
-    upstream = os.environ.get("UNCOMMON_ROUTE_UPSTREAM", "")
+    connection = resolve_primary_connection(store=ConnectionsStore())
+    upstream = connection.upstream
     checks.append(("Upstream configured", bool(upstream), upstream or "(not set)"))
 
     def _upstream_is_local(url: str) -> bool:
@@ -389,10 +415,7 @@ def _cmd_doctor(args: list[str]) -> None:
         return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
     # API key configured
-    api_key = (
-        os.environ.get("UNCOMMON_ROUTE_API_KEY", "")
-        or os.environ.get("COMMONSTACK_API_KEY", "")
-    )
+    api_key = connection.api_key
     local_upstream = bool(upstream) and _upstream_is_local(upstream)
     key_preview = f"{api_key[:8]}..." if len(api_key) > 8 else ("(set)" if api_key else "(not set)")
     if api_key:
@@ -452,6 +475,12 @@ def _cmd_doctor(args: list[str]) -> None:
             checks.append(("Proxy daemon", False, f"stale PID file (PID {pid})"))
     else:
         checks.append(("Proxy daemon", True, "not running (foreground or stopped)"))
+
+    checks.append((
+        "Primary connection source",
+        True,
+        f"source={connection.source} upstream={connection.upstream_source} api_key={connection.api_key_source}",
+    ))
 
     # Output
     all_ok = all(ok for _, ok, _ in checks)
@@ -516,7 +545,7 @@ def _cmd_openclaw(args: list[str]) -> None:
 
 
 def _cmd_spend(args: list[str]) -> None:
-    from uncommon_route.spend_control import SpendControl, format_duration
+    from uncommon_route.spend_control import SpendControl
 
     sc = SpendControl()
 
@@ -592,18 +621,19 @@ def _print_routing_config(payload: dict[str, object], *, as_json: bool = False) 
     print("  Routing Config:")
     print(f"    Source:    {payload.get('source', 'local-file')}")
     print(f"    Editable:  {'yes' if payload.get('editable', False) else 'no'}")
-    profiles = payload.get("profiles", {})
-    if not isinstance(profiles, dict):
+    print(f"    Default:   {payload.get('default_mode', 'auto')}")
+    modes = payload.get("modes", {})
+    if not isinstance(modes, dict):
         return
-    for profile_name in ("free", "eco", "auto", "premium", "agentic"):
-        profile_payload = profiles.get(profile_name)
-        if not isinstance(profile_payload, dict):
+    for mode_name in ("auto", "fast", "best"):
+        mode_payload = modes.get(mode_name)
+        if not isinstance(mode_payload, dict):
             continue
-        tiers = profile_payload.get("tiers", {})
+        tiers = mode_payload.get("tiers", {})
         if not isinstance(tiers, dict):
             continue
-        print(f"\n  {profile_name}:")
-        for tier_name in ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING"):
+        print(f"\n  {mode_name}:")
+        for tier_name in ("SIMPLE", "MEDIUM", "COMPLEX"):
             row = tiers.get(tier_name)
             if not isinstance(row, dict):
                 continue
@@ -612,17 +642,18 @@ def _print_routing_config(payload: dict[str, object], *, as_json: bool = False) 
             overridden = bool(row.get("overridden", False))
             selection_mode = str(row.get("selection_mode", "adaptive"))
             suffix = "  [override]" if overridden else ""
-            print(f"    {tier_name:<10} {primary}{suffix}")
-            print(f"               mode: {selection_mode}")
+            label = primary or "Discovery-managed"
+            print(f"    {tier_name:<10} {label}{suffix}")
+            print(f"               strategy: {selection_mode}")
             if isinstance(fallback, list) and fallback:
                 print(f"               fallback: {', '.join(str(item) for item in fallback)}")
 
 
 def _cmd_config(args: list[str]) -> None:
-    from uncommon_route.router.types import RoutingProfile, Tier
+    from uncommon_route.router.types import RoutingMode, Tier
     from uncommon_route.routing_config_store import RoutingConfigStore
 
-    flags, rest = _parse_flags(args, {"json": False, "fallback": True, "mode": True})
+    flags, rest = _parse_flags(args, {"json": False, "fallback": True, "strategy": True})
     store = RoutingConfigStore()
     if not rest:
         rest = ["show"]
@@ -634,52 +665,65 @@ def _cmd_config(args: list[str]) -> None:
         _print_routing_config(store.export(), as_json=output_json)
         return
 
+    if sub == "set-default-mode":
+        if len(rest) < 2:
+            print("Usage: uncommon-route config set-default-mode <mode>", file=sys.stderr)
+            sys.exit(1)
+        try:
+            routing_mode = RoutingMode(rest[1].strip().lower())
+        except ValueError:
+            print("Error: invalid mode", file=sys.stderr)
+            sys.exit(1)
+        payload = store.set_default_mode(routing_mode)
+        _print_routing_config(payload, as_json=output_json)
+        return
+
     if sub == "set-tier":
         if len(rest) < 4:
             print(
-                "Usage: uncommon-route config set-tier <profile> <tier> <primary> [--fallback <csv>] [--mode adaptive|hard-pin]",
+                "Usage: uncommon-route config set-tier <mode> <tier> <primary> [--fallback <csv>] [--strategy adaptive|hard-pin]",
                 file=sys.stderr,
             )
             sys.exit(1)
         try:
-            profile = RoutingProfile(rest[1].strip().lower())
+            routing_mode = RoutingMode(rest[1].strip().lower())
             tier = Tier(rest[2].strip().upper())
         except ValueError:
-            print("Error: invalid profile or tier", file=sys.stderr)
+            print("Error: invalid mode or tier", file=sys.stderr)
             sys.exit(1)
         primary = rest[3].strip()
         fallback_csv = str(flags.get("fallback", rest[4] if len(rest) > 4 else ""))
         fallback = [part.strip() for part in fallback_csv.split(",") if part.strip()]
-        mode = str(flags.get("mode", "adaptive")).strip().lower()
-        if mode not in {"adaptive", "hard-pin", "hard_pin", "pinned"}:
-            print("Error: --mode must be adaptive or hard-pin", file=sys.stderr)
+        strategy = str(flags.get("strategy", "adaptive")).strip().lower()
+        if strategy not in {"adaptive", "hard-pin", "hard_pin", "pinned"}:
+            print("Error: --strategy must be adaptive or hard-pin", file=sys.stderr)
             sys.exit(1)
         payload = store.set_tier(
-            profile,
+            routing_mode,
             tier,
             primary=primary,
             fallback=fallback,
-            hard_pin=mode in {"hard-pin", "hard_pin", "pinned"},
+            hard_pin=strategy in {"hard-pin", "hard_pin", "pinned"},
         )
         _print_routing_config(payload, as_json=output_json)
     elif sub == "reset-tier":
         if len(rest) < 3:
-            print("Usage: uncommon-route config reset-tier <profile> <tier>", file=sys.stderr)
+            print("Usage: uncommon-route config reset-tier <mode> <tier>", file=sys.stderr)
             sys.exit(1)
         try:
-            profile = RoutingProfile(rest[1].strip().lower())
+            routing_mode = RoutingMode(rest[1].strip().lower())
             tier = Tier(rest[2].strip().upper())
         except ValueError:
-            print("Error: invalid profile or tier", file=sys.stderr)
+            print("Error: invalid mode or tier", file=sys.stderr)
             sys.exit(1)
-        payload = store.reset_tier(profile, tier)
+        payload = store.reset_tier(routing_mode, tier)
         _print_routing_config(payload, as_json=output_json)
     elif sub == "reset":
         payload = store.reset()
         _print_routing_config(payload, as_json=output_json)
     else:
         print(f"Unknown config subcommand: {sub}", file=sys.stderr)
-        print("  Available: show, set-tier, reset-tier, reset", file=sys.stderr)
+        print("  Available: show, set-default-mode, set-tier, reset-tier, reset", file=sys.stderr)
         sys.exit(1)
 
     if _PID_FILE.exists() and not output_json:
@@ -733,8 +777,8 @@ def _cmd_stats(args: list[str]) -> None:
         )
 
         if s.by_tier:
-            print(f"\n  By Tier:")
-            for tier in ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING"):
+            print("\n  By Tier:")
+            for tier in ("SIMPLE", "MEDIUM", "COMPLEX"):
                 ts = s.by_tier.get(tier)
                 if not ts:
                     continue
@@ -747,37 +791,37 @@ def _cmd_stats(args: list[str]) -> None:
                 )
 
         if s.by_model:
-            print(f"\n  By Model:")
+            print("\n  By Model:")
             ranked = sorted(s.by_model.items(), key=lambda x: -x[1].count)
             for model, ms in ranked[:8]:
                 print(f"    {model:<40} {ms.count:>5} reqs  ${ms.total_cost:.4f}")
 
-        if s.by_profile:
-            print(f"\n  By Profile:")
-            for profile, count in sorted(s.by_profile.items(), key=lambda x: -x[1]):
+        if s.by_mode:
+            print("\n  By Mode:")
+            for mode, count in sorted(s.by_mode.items(), key=lambda x: -x[1]):
                 pct = count / s.total_requests * 100
-                print(f"    {profile:<20} {count:>5} ({pct:.1f}%)")
+                print(f"    {mode:<20} {count:>5} ({pct:.1f}%)")
 
         if s.by_method:
-            print(f"\n  By Method:")
+            print("\n  By Method:")
             for method, count in sorted(s.by_method.items(), key=lambda x: -x[1]):
                 pct = count / s.total_requests * 100
                 print(f"    {method:<20} {count:>5} ({pct:.1f}%)")
 
         if s.by_transport:
-            print(f"\n  By Transport:")
+            print("\n  By Transport:")
             for transport, ms in sorted(s.by_transport.items(), key=lambda x: -x[1].count):
                 pct = ms.count / s.total_requests * 100
                 print(f"    {transport:<20} {ms.count:>5} ({pct:.1f}%)  ${ms.total_cost:.4f}")
 
         if s.by_cache_mode:
-            print(f"\n  By Cache Mode:")
+            print("\n  By Cache Mode:")
             for cache_mode, ms in sorted(s.by_cache_mode.items(), key=lambda x: -x[1].count):
                 pct = ms.count / s.total_requests * 100
                 print(f"    {cache_mode:<20} {ms.count:>5} ({pct:.1f}%)  ${ms.total_cost:.4f}")
 
         if s.by_cache_family:
-            print(f"\n  By Cache Family:")
+            print("\n  By Cache Family:")
             for cache_family, ms in sorted(s.by_cache_family.items(), key=lambda x: -x[1].count):
                 pct = ms.count / s.total_requests * 100
                 print(f"    {cache_family:<20} {ms.count:>5} ({pct:.1f}%)  ${ms.total_cost:.4f}")
@@ -804,7 +848,7 @@ def _cmd_stats(args: list[str]) -> None:
             cache_tag = f"  cache:{r.cache_mode}"
             breakpoint_tag = f"  bp:{r.cache_breakpoints}" if r.cache_breakpoints else ""
             print(
-                f"    {ts}  {r.profile:<8} {r.tier:<10} {r.model:<35}"
+                f"    {ts}  {r.mode:<8} {r.tier:<10} {r.model:<35}"
                 f" {cost_str}  [{r.method}]{transport_tag}{cache_tag}{breakpoint_tag}"
                 f"{token_delta}{artifact_tag}{semantic_tag}{quality_tag}"
             )
@@ -1026,17 +1070,6 @@ def _setup_openai(args: list[str]) -> None:
     print(f"  Status: {status}")
 
 
-def _cmd_sessions(args: list[str]) -> None:
-    from uncommon_route.session import SessionStore
-    store = SessionStore()
-    stats = store.stats()
-    print(f"  Active sessions: {stats['count']}")
-    if stats["sessions"]:
-        for s in stats["sessions"]:
-            print(f"    {s['id']}  model={s['model']}  tier={s['tier']}  requests={s['requests']}  age={s['age_s']}s")
-    else:
-        print("  (no active sessions — sessions are in-memory, start `serve` first)")
-
 
 def main() -> None:
     args = sys.argv[1:]
@@ -1065,7 +1098,6 @@ def main() -> None:
         "provider": _cmd_provider,
         "config": _cmd_config,
         "stats": _cmd_stats,
-        "sessions": _cmd_sessions,
         "feedback": _cmd_feedback,
     }
 

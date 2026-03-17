@@ -1,4 +1,4 @@
-"""Persistent routing-config overrides for profile/tier model priorities."""
+"""Persistent routing-config overrides for mode/tier model priorities."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from uncommon_route.paths import data_dir
-from uncommon_route.router.config import DEFAULT_CONFIG
-from uncommon_route.router.types import RoutingConfig, RoutingProfile, Tier, TierConfig
+from uncommon_route.router.config import DEFAULT_CONFIG, get_mode_tiers
+from uncommon_route.router.types import RoutingConfig, RoutingMode, Tier, TierConfig
 
 _DATA_DIR = data_dir()
 
@@ -57,16 +57,8 @@ class InMemoryRoutingConfigStorage(RoutingConfigStorage):
         self._data = copy.deepcopy(data)
 
 
-def _profile_table(config: RoutingConfig, profile: RoutingProfile) -> dict[Tier, TierConfig]:
-    if profile is RoutingProfile.AUTO:
-        return config.tiers
-    if profile is RoutingProfile.FREE:
-        return config.free_tiers
-    if profile is RoutingProfile.ECO:
-        return config.eco_tiers
-    if profile is RoutingProfile.PREMIUM:
-        return config.premium_tiers
-    return config.agentic_tiers
+def _mode_table(config: RoutingConfig, mode: RoutingMode) -> dict[Tier, TierConfig]:
+    return get_mode_tiers(config, mode)
 
 
 def _normalize_fallback(primary: str, fallback: list[str]) -> list[str]:
@@ -81,15 +73,20 @@ def _normalize_fallback(primary: str, fallback: list[str]) -> list[str]:
     return normalized
 
 
+def _normalize_tier_name(tier_name: str) -> str:
+    normalized = str(tier_name).strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
+
+
 def _sanitize_overrides(raw: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
     result: dict[str, dict[str, dict[str, Any]]] = {}
-    profiles = raw.get("profiles")
-    if not isinstance(profiles, dict):
+    modes = raw.get("modes")
+    if not isinstance(modes, dict):
         return result
 
-    for profile_name, tier_map in profiles.items():
+    for mode_name, tier_map in modes.items():
         try:
-            profile = RoutingProfile(str(profile_name))
+            mode = RoutingMode(str(mode_name))
         except ValueError:
             continue
         if not isinstance(tier_map, dict):
@@ -97,7 +94,7 @@ def _sanitize_overrides(raw: dict[str, Any]) -> dict[str, dict[str, dict[str, An
         clean_tiers: dict[str, dict[str, Any]] = {}
         for tier_name, payload in tier_map.items():
             try:
-                tier = Tier(str(tier_name))
+                tier = Tier(_normalize_tier_name(str(tier_name)))
             except ValueError:
                 continue
             if not isinstance(payload, dict):
@@ -122,8 +119,16 @@ def _sanitize_overrides(raw: dict[str, Any]) -> dict[str, dict[str, dict[str, An
                 "hard_pin": hard_pin,
             }
         if clean_tiers:
-            result[profile.value] = clean_tiers
+            result[mode.value] = clean_tiers
     return result
+
+
+def _sanitize_default_mode(raw: dict[str, Any]) -> RoutingMode:
+    value = raw.get("default_mode", RoutingMode.AUTO.value)
+    try:
+        return RoutingMode(str(value))
+    except ValueError:
+        return RoutingMode.AUTO
 
 
 class RoutingConfigStore:
@@ -134,13 +139,15 @@ class RoutingConfigStore:
     ) -> None:
         self._storage = storage or FileRoutingConfigStorage()
         self._base_config = copy.deepcopy(base_config or DEFAULT_CONFIG)
-        self._overrides = _sanitize_overrides(self._storage.load())
+        raw = self._storage.load()
+        self._overrides = _sanitize_overrides(raw)
+        self._default_mode = _sanitize_default_mode(raw)
 
     def config(self) -> RoutingConfig:
         cfg: RoutingConfig = copy.deepcopy(self._base_config)
-        for profile_name, tier_map in self._overrides.items():
-            profile = RoutingProfile(profile_name)
-            table = _profile_table(cfg, profile)
+        for mode_name, tier_map in self._overrides.items():
+            mode = RoutingMode(mode_name)
+            table = _mode_table(cfg, mode)
             for tier_name, payload in tier_map.items():
                 tier = Tier(tier_name)
                 table[tier] = TierConfig(
@@ -152,10 +159,10 @@ class RoutingConfigStore:
 
     def export(self) -> dict[str, Any]:
         cfg = self.config()
-        profiles: dict[str, dict[str, Any]] = {}
-        for profile in RoutingProfile:
-            active = _profile_table(cfg, profile)
-            overridden_tiers = self._overrides.get(profile.value, {})
+        modes: dict[str, dict[str, Any]] = {}
+        for mode in RoutingMode:
+            active = _mode_table(cfg, mode)
+            overridden_tiers = self._overrides.get(mode.value, {})
             tier_rows: dict[str, Any] = {}
             for tier in Tier:
                 tc = active[tier]
@@ -166,16 +173,30 @@ class RoutingConfigStore:
                     "hard_pin": tc.hard_pin,
                     "selection_mode": "hard-pin" if tc.hard_pin else "adaptive",
                 }
-            profiles[profile.value] = {"tiers": tier_rows}
+            modes[mode.value] = {"tiers": tier_rows}
         return {
             "source": "local-file",
             "editable": True,
-            "profiles": profiles,
+            "default_mode": self._default_mode.value,
+            "modes": modes,
         }
+
+    def default_mode(self) -> RoutingMode:
+        return self._default_mode
+
+    def set_default_mode(self, mode: RoutingMode) -> dict[str, Any]:
+        self._default_mode = mode
+        self._persist()
+        return self.export()
+
+    def reset_default_mode(self) -> dict[str, Any]:
+        self._default_mode = RoutingMode.AUTO
+        self._persist()
+        return self.export()
 
     def set_tier(
         self,
-        profile: RoutingProfile,
+        mode: RoutingMode,
         tier: Tier,
         *,
         primary: str,
@@ -187,39 +208,43 @@ class RoutingConfigStore:
             raise ValueError("primary model is required")
         normalized_fallback = _normalize_fallback(normalized_primary, fallback)
 
-        default_tc = _profile_table(self._base_config, profile)[tier]
-        profile_overrides = self._overrides.setdefault(profile.value, {})
+        default_tc = _mode_table(self._base_config, mode)[tier]
+        mode_overrides = self._overrides.setdefault(mode.value, {})
         if (
             normalized_primary == default_tc.primary
             and normalized_fallback == list(default_tc.fallback)
             and bool(hard_pin) is bool(default_tc.hard_pin)
         ):
-            profile_overrides.pop(tier.value, None)
+            mode_overrides.pop(tier.value, None)
         else:
-            profile_overrides[tier.value] = {
+            mode_overrides[tier.value] = {
                 "primary": normalized_primary,
                 "fallback": normalized_fallback,
                 "hard_pin": bool(hard_pin),
             }
 
-        if not profile_overrides:
-            self._overrides.pop(profile.value, None)
+        if not mode_overrides:
+            self._overrides.pop(mode.value, None)
         self._persist()
         return self.export()
 
-    def reset_tier(self, profile: RoutingProfile, tier: Tier) -> dict[str, Any]:
-        profile_overrides = self._overrides.get(profile.value)
-        if profile_overrides is not None:
-            profile_overrides.pop(tier.value, None)
-            if not profile_overrides:
-                self._overrides.pop(profile.value, None)
+    def reset_tier(self, mode: RoutingMode, tier: Tier) -> dict[str, Any]:
+        mode_overrides = self._overrides.get(mode.value)
+        if mode_overrides is not None:
+            mode_overrides.pop(tier.value, None)
+            if not mode_overrides:
+                self._overrides.pop(mode.value, None)
             self._persist()
         return self.export()
 
     def reset(self) -> dict[str, Any]:
         self._overrides = {}
+        self._default_mode = RoutingMode.AUTO
         self._persist()
         return self.export()
 
     def _persist(self) -> None:
-        self._storage.save({"profiles": self._overrides})
+        self._storage.save({
+            "default_mode": self._default_mode.value,
+            "modes": self._overrides,
+        })

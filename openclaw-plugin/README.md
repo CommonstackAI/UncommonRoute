@@ -17,7 +17,7 @@ This plugin:
 - installs the Python `uncommon-route` package if needed
 - starts `uncommon-route serve`
 - registers the local provider with OpenClaw
-- exposes the virtual routing profiles like `uncommon-route/auto`
+- exposes the virtual routing modes like `uncommon-route/auto`
 
 ## Install
 
@@ -50,7 +50,7 @@ plugins:
 Common upstream choices:
 
 | Provider | URL |
-|---|---|
+| --- | --- |
 | [Parallax](https://github.com/GradientHQ/parallax) | `http://127.0.0.1:3001/v1` |
 | [Commonstack](https://commonstack.ai) | `https://api.commonstack.ai/v1` |
 | OpenAI | `https://api.openai.com/v1` |
@@ -62,23 +62,20 @@ Parallax is best treated as an experimental local upstream for now: its public d
 
 ## What You Get
 
+- a local OpenClaw provider backed by `http://127.0.0.1:8403/v1`
 - `uncommon-route/auto` for balanced smart routing
-- `uncommon-route/eco` for cheapest capable routing
-- `uncommon-route/premium` for quality-first routing
-- `uncommon-route/free` for free-first routing
-- `uncommon-route/agentic` for tool-heavy workflows
+- hardcoded additional virtual modes: `uncommon-route/fast` and `uncommon-route/best`
 
-The router also keeps a fallback chain, applies session-aware routing, and exposes a local dashboard at `http://127.0.0.1:8403/dashboard/`.
+The router also keeps a fallback chain, records local feedback, and exposes a local dashboard at `http://127.0.0.1:8403/dashboard/`.
 
 ## OpenClaw Commands
 
 | Command | Description |
-|---|---|
+| --- | --- |
 | `/route <prompt>` | Preview which model the router would pick |
 | `/spend status` | Show current spending and limits |
 | `/spend set hourly 5.00` | Set an hourly spend limit |
-| `/feedback ok\|weak\|strong` | Rate the last routing decision |
-| `/sessions` | Show active routing sessions |
+| `/feedback <signal>` | Use `ok`, `weak`, `strong`, `status`, or `rollback` to rate the last routing decision or inspect feedback state |
 
 ## Troubleshooting
 

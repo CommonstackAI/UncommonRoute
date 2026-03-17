@@ -1,107 +1,124 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import type { Mapping } from "../api";
-
-type Filter = "all" | "available" | "not_found";
+import { Card } from "./ui/Card";
+import { Search } from "lucide-react";
 
 interface Props {
   mapping: Mapping | null;
 }
 
+const PROVIDER_COLORS: Record<string, string> = {
+  anthropic: "bg-amber-500",
+  openai: "bg-emerald-500",
+  google: "bg-blue-500",
+  deepseek: "bg-violet-500",
+  "x-ai": "bg-slate-500",
+  minimax: "bg-rose-500",
+  moonshotai: "bg-sky-500",
+  qwen: "bg-orange-500",
+  "zai-org": "bg-lime-500",
+  zhipu: "bg-teal-500",
+};
+
 export default function Models({ mapping }: Props) {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [search, setSearch] = useState("");
+  const pool = mapping?.pool ?? [];
 
-  const discovered = mapping?.discovered ?? false;
-  const upCount = mapping?.upstream_model_count ?? 0;
-  const mapped = mapping?.mappings?.filter((r) => r.mapped).length ?? 0;
-  const unresolved = mapping?.unresolved?.length ?? 0;
-  const rows = mapping?.mappings ?? [];
+  const grouped = useMemo(() => {
+    const q = search.toLowerCase();
+    const filtered = pool.filter((m) => {
+      if (!q) return true;
+      return m.id.toLowerCase().includes(q) ||
+        (q === "free" && m.capabilities.free) ||
+        (q === "vision" && m.capabilities.vision) ||
+        (q === "reasoning" && m.capabilities.reasoning) ||
+        (q === "tools" && m.capabilities.tool_calling);
+    });
+    const groups: Record<string, typeof pool> = {};
+    for (const m of filtered) {
+      const p = m.provider || "unknown";
+      if (!groups[p]) groups[p] = [];
+      groups[p].push(m);
+    }
+    return groups;
+  }, [pool, search]);
 
-  const filtered = rows.filter((r) => {
-    if (filter === "available") return r.available === true;
-    if (filter === "not_found") return r.available === false;
-    return true;
-  });
+  const providers = Object.keys(grouped).sort();
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex items-baseline justify-between mb-10">
-        <h1 className="text-[18px] font-semibold text-white tracking-tight">Models</h1>
-        <div className="flex items-baseline gap-3 text-[13px] font-mono">
-          <span className="text-[#8b8b8e]">{upCount} upstream</span>
-          <span className="text-[#3a3a3d]">/</span>
-          <span className="text-[#8b8b8e]">{mapped} mapped</span>
-          <span className="text-[#3a3a3d]">/</span>
-          <span className={unresolved > 0 ? "text-red-400/80" : "text-[#8b8b8e]"}>{unresolved} unresolved</span>
-          {mapping?.provider && (
-            <>
-              <span className="text-[#3a3a3d]">/</span>
-              <span className="text-[#6e6e72]">{mapping.provider}{mapping.is_gateway ? " (gw)" : ""}</span>
-            </>
-          )}
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight text-[#111827]">Models</h1>
+          <p className="text-[13px] font-medium text-[#6B7280] mt-1">{pool.length} models from {new Set(pool.map(m => m.provider)).size} providers</p>
+        </div>
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#9CA3AF]" />
+          <input
+            type="text"
+            placeholder="Filter models..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-64 bg-white border border-black/[0.06] shadow-sm rounded-xl pl-9 pr-4 py-2 text-[13px] font-medium text-[#111827] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 transition-all"
+          />
         </div>
       </div>
 
-      {!discovered && (
-        <div className="mb-8 border border-white/[0.07] rounded-lg p-5 bg-white/[0.02]">
-          <p className="text-[14px] text-[#8b8b8e]">Discovery pending. Check upstream configuration.</p>
-        </div>
+      <AnimatePresence mode="popLayout">
+        {providers.map((p) => (
+          <motion.div key={p} layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} transition={{ duration: 0.2 }}>
+            <Card>
+              <div className="px-5 py-3 border-b border-black/[0.04] flex items-center justify-between bg-gray-50/50">
+                <div className="flex items-center gap-3">
+                  <div className={`h-2 w-2 rounded-full ${PROVIDER_COLORS[p] || "bg-gray-400"}`} />
+                  <h3 className="text-[13px] font-semibold text-[#111827] capitalize">{p}</h3>
+                </div>
+                <span className="text-[12px] font-medium text-[#9CA3AF]">{grouped[p].length}</span>
+              </div>
+              <AnimatePresence mode="popLayout">
+                {grouped[p].map((m) => {
+                  const coreName = m.id.split("/").pop() || m.id;
+                  const c = m.capabilities;
+                  return (
+                    <motion.div layout key={m.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
+                      className="px-5 py-3 border-b border-black/[0.03] last:border-0 flex items-center justify-between hover:bg-gray-50 transition-colors group"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="text-[13px] font-medium text-[#4B5563] group-hover:text-[#111827] transition-colors">{coreName}</div>
+                        <div className="flex gap-1.5">
+                          {c.reasoning && <Tag>Reasoning</Tag>}
+                          {c.vision && <Tag>Vision</Tag>}
+                          {c.tool_calling && <Tag>Tools</Tag>}
+                          {c.free && <Tag accent>Free</Tag>}
+                        </div>
+                      </div>
+                      <span className="text-[12px] font-mono font-medium text-[#9CA3AF] group-hover:text-[#6B7280] transition-colors">
+                        ${m.pricing.input.toFixed(2)} / ${m.pricing.output.toFixed(2)}
+                      </span>
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
+            </Card>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+      {providers.length === 0 && (
+        <div className="text-center py-20 text-[14px] font-medium text-[#9CA3AF]">No models match your search.</div>
       )}
-
-      {/* Filter */}
-      <div className="flex items-center gap-1 mb-5">
-        {(["all", "available", "not_found"] as Filter[]).map((f) => {
-          const count = f === "all" ? rows.length : f === "available" ? rows.filter(r => r.available).length : rows.filter(r => r.available === false).length;
-          return (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 text-[13px] rounded-lg transition-colors ${
-                filter === f
-                  ? "text-white bg-white/[0.08] font-medium"
-                  : "text-[#6e6e72] hover:text-[#b4b4b7] hover:bg-white/[0.03]"
-              }`}
-            >
-              {f === "all" ? "All" : f === "available" ? "Available" : "Not Found"}
-              <span className="ml-1.5 font-mono text-[12px] text-[#5a5a5d]">{count}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Table */}
-      <table className="w-full">
-        <thead>
-          <tr className="border-b border-white/[0.07]">
-            <th className="text-left text-[11px] font-medium text-[#5a5a5d] uppercase tracking-[0.06em] py-2">Internal Name</th>
-            <th className="text-left text-[11px] font-medium text-[#5a5a5d] uppercase tracking-[0.06em] py-2">Resolved (Upstream)</th>
-            <th className="text-right text-[11px] font-medium text-[#5a5a5d] uppercase tracking-[0.06em] py-2 w-24">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.map((r) => (
-            <tr
-              key={r.internal}
-              className={`border-b border-white/[0.04] transition-colors ${
-                r.available === false ? "bg-red-500/[0.04] hover:bg-red-500/[0.07]" : "hover:bg-white/[0.02]"
-              }`}
-            >
-              <td className="font-mono text-[12px] text-[#b4b4b7] py-3">{r.internal}</td>
-              <td className={`font-mono text-[12px] py-3 ${r.mapped ? "text-white/90" : "text-[#5a5a5d]"}`}>
-                {r.resolved}
-              </td>
-              <td className="text-right py-3">
-                {r.available === true && <span className="text-[11px] font-mono text-emerald-400/70">available</span>}
-                {r.available === false && <span className="text-[11px] font-mono text-red-400/70">not found</span>}
-                {r.available === null && <span className="text-[11px] font-mono text-[#4a4a4d]">unknown</span>}
-              </td>
-            </tr>
-          ))}
-          {filtered.length === 0 && (
-            <tr><td colSpan={3} className="py-10 text-center text-[13px] text-[#4a4a4d]">No models match filter</td></tr>
-          )}
-        </tbody>
-      </table>
     </div>
+  );
+}
+
+function Tag({ children, accent }: { children: React.ReactNode; accent?: boolean }) {
+  return (
+    <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider ${
+      accent
+        ? "bg-emerald-50 text-emerald-600 ring-1 ring-emerald-500/20"
+        : "bg-gray-100 text-[#6B7280] ring-1 ring-black/[0.04]"
+    }`}>
+      {children}
+    </span>
   );
 }

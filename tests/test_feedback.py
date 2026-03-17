@@ -13,7 +13,6 @@ from uncommon_route.feedback import (
 )
 from uncommon_route.proxy import create_app
 from uncommon_route.router.classifier import extract_features
-from uncommon_route.session import SessionConfig, SessionStore
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.stats import InMemoryRouteStatsStorage, RouteStats
 
@@ -26,13 +25,13 @@ class TestAdjustTier:
     def test_weak_moves_up(self) -> None:
         assert _adjust_tier("SIMPLE", "weak") == "MEDIUM"
         assert _adjust_tier("MEDIUM", "weak") == "COMPLEX"
-        assert _adjust_tier("COMPLEX", "weak") == "REASONING"
+        assert _adjust_tier("REASONING", "weak") == "COMPLEX"
 
-    def test_weak_caps_at_reasoning(self) -> None:
-        assert _adjust_tier("REASONING", "weak") == "REASONING"
+    def test_weak_caps_at_complex(self) -> None:
+        assert _adjust_tier("COMPLEX", "weak") == "COMPLEX"
+        assert _adjust_tier("REASONING", "weak") == "COMPLEX"
 
     def test_strong_moves_down(self) -> None:
-        assert _adjust_tier("REASONING", "strong") == "COMPLEX"
         assert _adjust_tier("COMPLEX", "strong") == "MEDIUM"
         assert _adjust_tier("MEDIUM", "strong") == "SIMPLE"
 
@@ -78,20 +77,20 @@ class TestFeedbackCollector:
 
     def test_no_change_at_boundary(self) -> None:
         fc = FeedbackCollector()
-        fc.capture("req1", _dummy_features(), "REASONING")
+        fc.capture("req1", _dummy_features(), "COMPLEX")
         result = fc.submit("req1", "weak")
         assert result.ok
         assert result.action == "no_change"
 
-    def test_buffer_ttl(self) -> None:
+    def test_buffer_persists_indefinitely(self) -> None:
         t = time.time()
-        fc = FeedbackCollector(buffer_ttl_s=60, now_fn=lambda: t)
+        fc = FeedbackCollector(now_fn=lambda: t)
         fc.capture("old", _dummy_features(), "SIMPLE")
         assert fc.pending_count == 1
-        fc._now = lambda: t + 120  # advance past TTL
+        fc._now = lambda: t + 30 * 86_400  # 30 days later
         fc.capture("new", _dummy_features(), "MEDIUM")
-        assert fc.pending_count == 1
-        assert "old" not in fc._buffer
+        assert fc.pending_count == 2
+        assert "old" in fc._buffer
 
     def test_rate_limiting(self) -> None:
         t = time.time()
@@ -105,20 +104,6 @@ class TestFeedbackCollector:
         result = fc.submit("c", "weak")
         assert not result.ok
         assert result.action == "rate_limited"
-
-    def test_learn_from_escalation(self) -> None:
-        fc = FeedbackCollector()
-        feats = _dummy_features()
-        updated = fc.learn_from_escalation(feats, "SIMPLE", "MEDIUM")
-        assert updated
-        assert fc.total_updates == 1
-
-    def test_escalation_rate_limited(self) -> None:
-        t = time.time()
-        fc = FeedbackCollector(max_updates_per_hour=1, now_fn=lambda: t)
-        feats = _dummy_features()
-        fc.learn_from_escalation(feats, "SIMPLE", "MEDIUM")
-        assert not fc.learn_from_escalation(feats, "SIMPLE", "MEDIUM")
 
     def test_status(self) -> None:
         fc = FeedbackCollector()
@@ -143,7 +128,6 @@ class TestFeedbackCollector:
 def fb_client() -> TestClient:
     app = create_app(
         upstream="http://127.0.0.1:1/fake",
-        session_store=SessionStore(SessionConfig(enabled=True, timeout_s=300)),
         spend_control=SpendControl(storage=InMemorySpendControlStorage()),
         route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
         feedback=FeedbackCollector(),
@@ -197,6 +181,71 @@ class TestFeedbackEndpoint:
         assert data["ok"]
         assert data["action"] == "updated"
         assert data["total_updates"] >= 1
+
+    def test_feedback_result_persists_in_recent(self, fb_client: TestClient) -> None:
+        resp = fb_client.post("/v1/chat/completions", json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        rid = resp.headers["x-uncommon-route-request-id"]
+
+        fb = fb_client.post("/v1/feedback", json={
+            "request_id": rid, "signal": "weak",
+        })
+        assert fb.status_code == 200
+
+        recent = fb_client.get("/v1/stats/recent").json()
+        assert recent[0]["request_id"] == rid
+        assert recent[0]["feedback_pending"] is False
+        assert recent[0]["feedback_action"] == "updated"
+        assert recent[0]["feedback_signal"] == "weak"
+        assert recent[0]["feedback_to_tier"] != ""
+
+    def test_recent_hides_closed_feedback_rows(self) -> None:
+        feedback = FeedbackCollector()
+        app = create_app(
+            upstream="http://127.0.0.1:1/fake",
+            spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
+            feedback=feedback,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/v1/chat/completions", json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        rid = resp.headers["x-uncommon-route-request-id"]
+        assert feedback.has_pending(rid) is True
+
+        feedback._buffer.clear()
+
+        recent = client.get("/v1/stats/recent").json()
+        assert recent == []
+
+    def test_stats_reset_clears_pending_feedback(self) -> None:
+        feedback = FeedbackCollector()
+        app = create_app(
+            upstream="http://127.0.0.1:1/fake",
+            spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
+            feedback=feedback,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/v1/chat/completions", json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        rid = resp.headers["x-uncommon-route-request-id"]
+        assert feedback.has_pending(rid) is True
+        assert client.get("/health").json()["feedback"]["pending"] == 1
+
+        reset = client.post("/v1/stats", json={"action": "reset"})
+        assert reset.status_code == 200
+        assert reset.json()["feedback_cleared"] == 1
+        assert client.get("/health").json()["feedback"]["pending"] == 0
+        assert client.get("/v1/stats/recent").json() == []
 
     def test_feedback_expired_request(self, fb_client: TestClient) -> None:
         fb = fb_client.post("/v1/feedback", json={

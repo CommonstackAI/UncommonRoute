@@ -27,7 +27,12 @@ from uncommon_route.router.types import (
 )
 from bench.dataset import DATASET
 
-TIERS = [Tier.SIMPLE, Tier.MEDIUM, Tier.COMPLEX, Tier.REASONING]
+TIERS = [Tier.SIMPLE, Tier.MEDIUM, Tier.COMPLEX]
+
+
+def _collapse_tier(tier: str) -> str:
+    normalized = str(tier).strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
 
 
 def _accuracy(config: ScoringConfig) -> tuple[float, float, dict[str, float]]:
@@ -35,8 +40,8 @@ def _accuracy(config: ScoringConfig) -> tuple[float, float, dict[str, float]]:
     results = []
     for tc in DATASET:
         r = classify(tc.prompt, tc.system_prompt, config)
-        resolved = r.tier.value if r.tier else "MEDIUM"
-        results.append({"expected": tc.expected_tier, "resolved": resolved})
+        resolved = _collapse_tier(r.tier.value if r.tier else "MEDIUM")
+        results.append({"expected": _collapse_tier(tc.expected_tier), "resolved": resolved})
 
     total = len(results)
     correct = sum(1 for r in results if r["expected"] == r["resolved"])
@@ -64,19 +69,18 @@ def _grid_search_boundaries(base_config: ScoringConfig, fine: bool = False) -> S
 
     sm_range = [round(x * step, 3) for x in range(-2, 8)]
     mc_range = [round(x * step + 0.06, 3) for x in range(0, 12)]
-    cr_range = [round(x * step + 0.20, 3) for x in range(0, 12)]
 
     best_score = 0.0
     best_config = base_config
-    total = len(sm_range) * len(mc_range) * len(cr_range)
+    total = len(sm_range) * len(mc_range)
 
     print(f"  搜索 tier boundaries ({total} 组合)...")
 
-    for sm, mc, cr in itertools.product(sm_range, mc_range, cr_range):
-        if sm >= mc or mc >= cr:
+    for sm, mc in itertools.product(sm_range, mc_range):
+        if sm >= mc:
             continue
         cfg = copy.deepcopy(base_config)
-        cfg.tier_boundaries = TierBoundaries(simple_medium=sm, medium_complex=mc, complex_reasoning=cr)
+        cfg.tier_boundaries = TierBoundaries(simple_medium=sm, medium_complex=mc)
         acc, wf1, _ = _accuracy(cfg)
         score = wf1  # optimize for weighted F1
         if score > best_score:
@@ -84,7 +88,7 @@ def _grid_search_boundaries(base_config: ScoringConfig, fine: bool = False) -> S
             best_config = cfg
 
     b = best_config.tier_boundaries
-    print(f"  最优 boundaries: SM={b.simple_medium} MC={b.medium_complex} CR={b.complex_reasoning} → wF1={best_score:.3f}")
+    print(f"  最优 boundaries: SM={b.simple_medium} MC={b.medium_complex} → wF1={best_score:.3f}")
     return best_config
 
 
@@ -152,7 +156,6 @@ def main() -> None:
         print(f"    TierBoundaries(")
         print(f"        simple_medium={cfg.tier_boundaries.simple_medium},")
         print(f"        medium_complex={cfg.tier_boundaries.medium_complex},")
-        print(f"        complex_reasoning={cfg.tier_boundaries.complex_reasoning},")
         print(f"    )")
         print(f"    confidence_steepness={cfg.confidence_steepness}")
         print(f"    confidence_threshold={cfg.confidence_threshold}")
@@ -163,7 +166,6 @@ def main() -> None:
             "tier_boundaries": {
                 "simple_medium": cfg.tier_boundaries.simple_medium,
                 "medium_complex": cfg.tier_boundaries.medium_complex,
-                "complex_reasoning": cfg.tier_boundaries.complex_reasoning,
             },
             "confidence_steepness": cfg.confidence_steepness,
             "confidence_threshold": cfg.confidence_threshold,

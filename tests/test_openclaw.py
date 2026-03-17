@@ -11,7 +11,6 @@ from uncommon_route import openclaw_install, openclaw_status, openclaw_uninstall
 from uncommon_route.openclaw import (
     _PROVIDER_ID,
     _build_provider_block,
-    _load_config,
     install,
     status,
     uninstall,
@@ -100,15 +99,13 @@ class TestBuildProviderBlock:
         block = _build_provider_block(8403)
         assert block["models"][0]["id"] == "uncommon-route/auto"
 
-    def test_virtual_profiles_are_registered(self) -> None:
+    def test_virtual_modes_are_registered(self) -> None:
         block = _build_provider_block(8403)
-        ids = [m["id"] for m in block["models"][:5]]
+        ids = [m["id"] for m in block["models"][:3]]
         assert ids == [
             "uncommon-route/auto",
-            "uncommon-route/eco",
-            "uncommon-route/premium",
-            "uncommon-route/free",
-            "uncommon-route/agentic",
+            "uncommon-route/fast",
+            "uncommon-route/best",
         ]
 
     def test_model_costs(self) -> None:

@@ -523,7 +523,7 @@ def estimate_output_budget(prompt: str, tier: str) -> int:
         return OutputBudget.SHORT
 
     if _LONG_SIGNALS.search(lower):
-        return OutputBudget.LONG if tier != "REASONING" else OutputBudget.EXTENDED
+        return OutputBudget.LONG
 
     code = score_code_markers(prompt)
     enum = score_enumeration_density(prompt)
@@ -535,6 +535,5 @@ def estimate_output_budget(prompt: str, tier: str) -> int:
         "SIMPLE": OutputBudget.SHORT,
         "MEDIUM": OutputBudget.MEDIUM,
         "COMPLEX": OutputBudget.LONG,
-        "REASONING": OutputBudget.LONG,
     }
     return tier_defaults.get(tier, OutputBudget.MEDIUM)

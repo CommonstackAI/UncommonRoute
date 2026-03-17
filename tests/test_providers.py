@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from uncommon_route.providers import (
-    PROVIDER_MODELS,
     ProvidersConfig,
     ProviderEntry,
     add_provider,
     load_providers,
     remove_provider,
-    save_providers,
     select_preferred_model,
 )
 
@@ -126,24 +123,25 @@ class TestRouteWithBYOK:
         decision = route("what is 2+2", user_keyed_models=keyed)
         # deepseek/deepseek-chat is in SIMPLE/MEDIUM fallback, should be preferred
         assert decision.model == "deepseek/deepseek-chat"
-        assert "byok-preferred" in decision.reasoning
+        assert "byok-preferred" in decision.method
 
     def test_route_without_byok_uses_default(self) -> None:
         from uncommon_route import route
         decision = route("what is 2+2")
-        assert "byok-preferred" not in decision.reasoning
+        assert "byok-preferred" not in decision.method
 
     def test_route_byok_reasoning_tier(self) -> None:
         from uncommon_route import route
         keyed = {"deepseek/deepseek-reasoner"}
         decision = route("prove that sqrt(2) is irrational", user_keyed_models=keyed)
         assert decision.model == "deepseek/deepseek-reasoner"
-        assert "byok-preferred" in decision.reasoning
+        assert "byok-preferred" in decision.method
 
 
 class TestCLI:
     def test_provider_list_empty(self) -> None:
-        import subprocess, sys
+        import subprocess
+        import sys
         r = subprocess.run(
             [sys.executable, "-m", "uncommon_route.cli", "provider", "list"],
             capture_output=True, text=True,
@@ -152,7 +150,8 @@ class TestCLI:
         assert "No providers" in r.stdout
 
     def test_provider_help(self) -> None:
-        import subprocess, sys
+        import subprocess
+        import sys
         r = subprocess.run(
             [sys.executable, "-m", "uncommon_route.cli", "--help"],
             capture_output=True, text=True,

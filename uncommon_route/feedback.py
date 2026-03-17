@@ -10,20 +10,27 @@ Design: zero user disruption.
 
 Safety rails:
   - Max 100 model updates per hour (prevents abuse / runaway feedback)
-  - Context buffer auto-expires after 1 hour
+  - Context buffer persisted to disk (survives restarts)
   - Online weights saved to separate file (base model never overwritten)
   - Rollback to base model in one call
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 FeedbackSignal = Literal["weak", "strong", "ok"]
 
-TIER_ORDER = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"]
+TIER_ORDER = ["SIMPLE", "MEDIUM", "COMPLEX"]
+
+
+def _normalize_tier(tier: str) -> str:
+    normalized = str(tier).strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
 
 
 @dataclass
@@ -32,7 +39,7 @@ class RequestContext:
     tier: str
     timestamp: float
     model: str = ""
-    profile: str = "auto"
+    mode: str = "auto"
 
 
 @dataclass
@@ -54,14 +61,13 @@ class FeedbackCollector:
 
     def __init__(
         self,
-        buffer_ttl_s: int = 3600,
         max_updates_per_hour: int = 100,
         save_every: int = 10,
         model_experience: Any = None,
         now_fn: Any = None,
+        buffer_path: Path | None = None,
     ) -> None:
         self._buffer: dict[str, RequestContext] = {}
-        self._buffer_ttl_s = buffer_ttl_s
         self._max_hourly = max_updates_per_hour
         self._save_every = save_every
         self._model_experience = model_experience
@@ -69,6 +75,9 @@ class FeedbackCollector:
         self._update_ts: list[float] = []
         self._total_updates: int = 0
         self._since_save: int = 0
+        self._buffer_path = buffer_path
+        if self._buffer_path:
+            self._load_buffer()
 
     # ─── Public API ───
 
@@ -79,18 +88,18 @@ class FeedbackCollector:
         tier: str,
         *,
         model: str = "",
-        profile: str = "auto",
+        mode: str = "auto",
     ) -> None:
         """Buffer compact features for a routed request (no raw prompts stored)."""
-        self._cleanup_buffer()
         compact = {k: v for k, v in features.items() if not k.startswith("ngram_")}
         self._buffer[request_id] = RequestContext(
             features=compact,
-            tier=tier,
+            tier=_normalize_tier(tier),
             timestamp=self._now(),
             model=model,
-            profile=profile,
+            mode=mode,
         )
+        self._save_buffer()
 
     def rebind_request(
         self,
@@ -98,23 +107,26 @@ class FeedbackCollector:
         *,
         tier: str | None = None,
         model: str | None = None,
-        profile: str | None = None,
+        mode: str | None = None,
     ) -> None:
         ctx = self._buffer.get(request_id)
         if ctx is None:
             return
         self._buffer[request_id] = RequestContext(
             features=ctx.features,
-            tier=tier or ctx.tier,
+            tier=_normalize_tier(tier or ctx.tier),
             timestamp=ctx.timestamp,
             model=model or ctx.model,
-            profile=profile or ctx.profile,
+            mode=mode or ctx.mode,
         )
+        self._save_buffer()
 
     def submit(self, request_id: str, signal: FeedbackSignal) -> FeedbackResult:
         """Process explicit user feedback for a previous request."""
-        self._cleanup_buffer()
         ctx = self._buffer.pop(request_id, None)
+        if ctx is not None:
+            self._save_buffer()
+
         if ctx is None:
             return FeedbackResult(
                 ok=False, action="expired",
@@ -125,7 +137,7 @@ class FeedbackCollector:
         if self._model_experience is not None and ctx.model:
             self._model_experience.record_feedback(
                 ctx.model,
-                ctx.profile,
+                ctx.mode,
                 ctx.tier,
                 signal,
             )
@@ -158,21 +170,7 @@ class FeedbackCollector:
 
     def has_pending(self, request_id: str) -> bool:
         """Check if feedback can still be submitted for a request."""
-        self._cleanup_buffer()
         return request_id in self._buffer
-
-    def learn_from_escalation(
-        self,
-        features: dict[str, float],
-        original_tier: str,
-        escalated_tier: str,
-    ) -> bool:
-        """Auto-learn from 3-strike escalation. Returns True if updated."""
-        if not self._rate_ok():
-            return False
-        compact = {k: v for k, v in features.items() if not k.startswith("ngram_")}
-        self._do_update(compact, escalated_tier)
-        return True
 
     def rollback(self) -> bool:
         """Reset to base model, discard online weights."""
@@ -208,9 +206,14 @@ class FeedbackCollector:
             "total_online_updates": self._total_updates,
             "updates_last_hour": hourly,
             "online_model_active": self.online_model_active,
-            "buffer_ttl_s": self._buffer_ttl_s,
             "max_updates_per_hour": self._max_hourly,
         }
+
+    def clear_pending(self) -> int:
+        cleared = len(self._buffer)
+        self._buffer.clear()
+        self._save_buffer()
+        return cleared
 
     # ─── Internals ───
 
@@ -233,17 +236,51 @@ class FeedbackCollector:
         hourly = sum(1 for t in self._update_ts if now - t < 3600)
         return hourly < self._max_hourly
 
-    def _cleanup_buffer(self) -> None:
-        now = self._now()
-        expired = [k for k, v in self._buffer.items() if now - v.timestamp > self._buffer_ttl_s]
-        for k in expired:
-            del self._buffer[k]
+    def _save_buffer(self) -> None:
+        if not self._buffer_path:
+            return
+        try:
+            self._buffer_path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                rid: {
+                    "features": ctx.features,
+                    "tier": ctx.tier,
+                    "timestamp": ctx.timestamp,
+                    "model": ctx.model,
+                    "mode": ctx.mode,
+                }
+                for rid, ctx in self._buffer.items()
+            }
+            self._buffer_path.write_text(json.dumps(data))
+        except Exception:
+            pass
+
+    def _load_buffer(self) -> None:
+        if not self._buffer_path:
+            return
+        try:
+            if self._buffer_path.exists():
+                data = json.loads(self._buffer_path.read_text())
+                for rid, entry in data.items():
+                    mode = entry.get("mode")
+                    if not mode:
+                        continue
+                    self._buffer[rid] = RequestContext(
+                        features=entry["features"],
+                        tier=_normalize_tier(entry["tier"]),
+                        timestamp=entry["timestamp"],
+                        model=entry.get("model", ""),
+                        mode=str(mode),
+                    )
+        except Exception:
+            pass
 
 
 def _adjust_tier(current: str, signal: FeedbackSignal) -> str:
-    idx = TIER_ORDER.index(current) if current in TIER_ORDER else 1
+    normalized = _normalize_tier(current)
+    idx = TIER_ORDER.index(normalized) if normalized in TIER_ORDER else 1
     if signal == "weak":
         return TIER_ORDER[min(idx + 1, len(TIER_ORDER) - 1)]
     if signal == "strong":
         return TIER_ORDER[max(idx - 1, 0)]
-    return current
+    return normalized

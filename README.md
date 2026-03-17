@@ -7,64 +7,49 @@
 <p><strong>Route prompts by difficulty, not habit.</strong></p>
 
 <p>
-UncommonRoute is a local LLM router that sits between your client and your model provider.
-It sends easy requests to cheaper models, hard requests to stronger models, and keeps a fallback chain ready when the first choice fails.
+UncommonRoute is a local LLM router that sits between your client and your upstream API.
+Easy turns go cheap, hard turns go strong, and fallback chains are ready when the first choice fails.
 </p>
 
 <p>
-Built for real tools like <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, the <strong>OpenAI SDK</strong>, and <strong>OpenClaw</strong>.
-</p>
-
-<p>
-Held-out routing benchmark: <strong>92.3% accuracy</strong> ·
-Average routing latency: <strong>~0.5ms</strong> ·
-Simulated coding-session savings vs always-Opus: <strong>67%</strong>
+Built for <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, the <strong>OpenAI SDK</strong>, and <strong>OpenClaw</strong>.
 </p>
 
 <p>
 <a href="#quick-start"><strong>Quick Start</strong></a> ·
-<a href="#connect-your-client"><strong>Connect Your Client</strong></a> ·
-<a href="#agent-quick-reference"><strong>Agent Quick Reference</strong></a> ·
-<a href="#how-routing-works"><strong>How Routing Works</strong></a>
+<a href="#how-routing-works"><strong>How It Works</strong></a> ·
+<a href="#configuration-that-actually-matters"><strong>Configuration</strong></a> ·
+<a href="#detailed-benchmarks"><strong>Benchmarks</strong></a>
 </p>
 
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>&nbsp;
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge" alt="MIT"></a>&nbsp;
-<img src="https://img.shields.io/badge/Tests-169_passing-16a34a?style=for-the-badge&logo=pytest&logoColor=white" alt="169 tests">&nbsp;
-<a href="#connect-your-client"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
-<a href="#connect-your-client"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
-<a href="#connect-your-client"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
+<img src="https://img.shields.io/badge/Tests-281_passing-16a34a?style=for-the-badge&logo=pytest&logoColor=white" alt="281 passing tests">&nbsp;
+<a href="#quick-start"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
+<a href="#quick-start"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
+<a href="#quick-start"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
 <a href="https://openclaw.ai"><img src="https://img.shields.io/badge/OpenClaw-Plugin-e11d48?style=for-the-badge" alt="OpenClaw"></a>
 
 </div>
 
 ---
 
-## Why This Exists
+## The Expensive Default
 
-Most AI tools send every request to the same model.
+Most AI tools make one bad assumption: every request deserves the same model.
 
-That is simple, but it is usually wasteful:
+That works until your workflow starts spending premium-model money on:
 
-- "What is 2+2?" does not need the same model as "Design a fault-tolerant distributed database".
-- Tool-heavy agent loops often spend most of their time on boring middle steps.
-- Switching your whole workflow to the most expensive model is easy, but expensive.
+- "what is 2+2?"
+- tool selection
+- log summarization
+- boring middle turns in an agent loop
 
-UncommonRoute fixes that by making one local decision per request:
-
-1. Classify how difficult the request is.
-2. Pick a model for that difficulty and routing profile.
-3. Keep fallbacks ready if the upstream rejects or fails.
-
-You keep one local endpoint. The router handles the model choice.
-
----
-
-## The 15-Second Mental Model
+UncommonRoute is the small local layer that changes that default.
 
 ```text
 Your client
-  (Codex / Claude Code / Cursor / OpenAI SDK)
+  (Codex / Claude Code / Cursor / OpenAI SDK / OpenClaw)
             |
             v
      UncommonRoute
@@ -72,40 +57,36 @@ Your client
             |
             v
     Your upstream API
- (Parallax / Commonstack / OpenAI / Ollama / vLLM / ...)
+ (Commonstack / OpenAI / Ollama / vLLM / Parallax / ...)
 ```
 
-Examples: [Parallax](https://github.com/GradientHQ/parallax), [Commonstack](https://commonstack.ai/), OpenAI, Ollama, vLLM.
+It does not host models. It makes a fast local routing decision, forwards the request to your chosen upstream, and keeps enough fallback logic around to recover when upstream model names or availability do not line up cleanly.
 
-Important terms:
+---
 
-| Term | Plain-English meaning |
-|---|---|
-| **Client** | The thing you already use, like Codex or Claude Code |
-| **Upstream** | The real model API that generates responses |
-| **Profile** | A routing strategy like `auto`, `eco`, or `premium` |
-| **Tier** | The difficulty bucket: `SIMPLE`, `MEDIUM`, `COMPLEX`, `REASONING` |
-| **Virtual model** | A special model name like `uncommon-route/auto` that means "pick for me" |
+## Why It Is Worth Trying
 
-> **The most important beginner fact:** UncommonRoute does **not** host models. It routes requests to an upstream provider that you choose.
+The pitch is simple: keep one local endpoint, let the router decide when a strong model is actually worth paying for.
+
+- **92.3% held-out routing accuracy** on 763 hand-written prompts across 15 languages and 35 categories
+- **67% lower simulated cost** on a 131-request coding session versus always using `anthropic/claude-opus-4.6`
+- **~0.5ms average routing latency**
+- **281 passing tests**
+
+One benchmark snapshot:
+
+| Scenario | Total cost |
+| --- | ---: |
+| Always `anthropic/claude-opus-4.6` | `$1.7529` |
+| UncommonRoute | `$0.5801` |
+
+That is the core story of the project: spend premium-model money where it changes the answer, not where it just burns the budget.
 
 ---
 
 ## Quick Start
 
-If you are brand new, follow these steps in order.
-
-### 0. What you need
-
-- Python 3.11 or newer
-- A terminal
-- For real chat responses: one upstream API
-
-Good upstream choices:
-
-- [**Commonstack**](https://commonstack.ai/) if you want one key that can reach multiple providers
-- **OpenAI** if you already use OpenAI directly
-- [**Parallax**](https://github.com/GradientHQ/parallax) / **Ollama / vLLM** if you want to route to a local OpenAI-compatible server
+If you are brand new, do these in order.
 
 ### 1. Install
 
@@ -119,9 +100,9 @@ Or use the installer:
 curl -fsSL https://anjieyang.github.io/uncommon-route/install | bash
 ```
 
-### 2. Try the router locally first
+### 2. Prove the router works locally first
 
-This step does **not** need an API key.
+This step does **not** need a real upstream or API key.
 
 ```bash
 uncommon-route route "write a Python function that validates email addresses"
@@ -132,16 +113,16 @@ What this proves:
 
 - the package is installed
 - the local classifier works
-- the router can choose a tier and model
+- the router can produce a tier, model choice, and fallback chain
 
 What this does **not** prove:
 
 - your upstream is configured
-- your client can talk through the proxy
+- your client is connected through the proxy
 
-### 3. Configure an upstream
+### 3. Point it at a real upstream
 
-Pick one example and export the environment variables.
+Pick one example and export the variables.
 
 ```bash
 # Commonstack: one key, many providers
@@ -156,18 +137,18 @@ export UNCOMMON_ROUTE_API_KEY="sk-..."
 ```
 
 ```bash
-# Parallax scheduler endpoint (experimental local OpenAI-style upstream)
-export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:3001/v1"
+# Local OpenAI-compatible servers (Ollama, vLLM, etc.)
+export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:11434/v1"
 ```
 
 ```bash
-# Other local OpenAI-compatible servers (Ollama, vLLM, etc.)
-export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:11434/v1"
+# Parallax scheduler endpoint (experimental)
+export UNCOMMON_ROUTE_UPSTREAM="http://127.0.0.1:3001/v1"
 ```
 
 If your upstream does not need a key, you can skip `UNCOMMON_ROUTE_API_KEY`.
 
-Parallax is listed as experimental here: its public docs and source clearly expose `POST /v1/chat/completions`, but I could not find a public `/v1/models` route, so UncommonRoute model discovery may be limited.
+Parallax is still best treated as experimental here: public docs clearly expose `POST /v1/chat/completions`, but public `/v1/models` support is less obvious, so discovery-driven routing may be limited.
 
 ### 4. Start the proxy
 
@@ -175,53 +156,27 @@ Parallax is listed as experimental here: its public docs and source clearly expo
 uncommon-route serve
 ```
 
-If your upstream is configured, you should see a banner with:
+If the upstream is configured, the startup banner shows:
 
 - the upstream host
 - the local proxy URL
 - the dashboard URL
 - a quick health-check command
 
-If your upstream is **not** configured yet, the banner tells you exactly which `export` commands to run next.
+If the upstream is missing, the banner tells you exactly which environment variables to set next.
 
-### 5. Verify that it is healthy
+### 5. Connect the client you already use
 
-```bash
-uncommon-route doctor
-curl http://127.0.0.1:8403/health
-```
-
-`doctor` is the first command to run when anything feels off.
-
-If you are using a local upstream like Ollama or vLLM, make sure that local server is already running before you expect `doctor` to pass the reachability check.
-
-### 6. Connect your client
-
-Pick the client you already use:
-
-| If you use | Do this |
-|---|---|
-| **Codex** | `uncommon-route setup codex` |
-| **Claude Code** | `uncommon-route setup claude-code` |
-| **OpenAI SDK / Cursor** | `uncommon-route setup openai` |
-| **OpenClaw** | `openclaw plugins install @anjieyang/uncommon-route` |
-
-Each `setup` command prints the exact next step for your shell or client.
-
----
-
-## Connect Your Client
-
-You only need one of these sections.
+Pick the path that matches your workflow.
 
 <details>
-<summary><strong>Codex</strong> · OpenAI-compatible local routing for Codex</summary>
+<summary><strong>Codex</strong> · OpenAI-compatible local routing</summary>
 
 ```bash
 uncommon-route setup codex
 ```
 
-That command prints the exact shell config to add. Manually, the important part is:
+Manual version:
 
 ```bash
 export OPENAI_BASE_URL="http://localhost:8403/v1"
@@ -235,7 +190,7 @@ uncommon-route serve
 codex
 ```
 
-For smart routing, use:
+For smart routing, set:
 
 ```text
 model = "uncommon-route/auto"
@@ -244,13 +199,13 @@ model = "uncommon-route/auto"
 </details>
 
 <details>
-<summary><strong>Claude Code</strong> · Anthropic-style local routing for Claude Code</summary>
+<summary><strong>Claude Code</strong> · Anthropic-style local routing</summary>
 
 ```bash
 uncommon-route setup claude-code
 ```
 
-Manually, the important part is:
+Manual version:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://localhost:8403"
@@ -264,7 +219,7 @@ uncommon-route serve
 claude
 ```
 
-Claude Code talks to the Anthropic-style `/v1/messages` endpoint. UncommonRoute converts formats and handles smart routing automatically.
+Claude Code talks to `/v1/messages`. UncommonRoute accepts Anthropic-style requests, routes them, and converts the response shape back transparently.
 
 </details>
 
@@ -291,7 +246,7 @@ response = client.chat.completions.create(
 )
 ```
 
-Cursor users can point "OpenAI Base URL" to `http://localhost:8403/v1`.
+For Cursor, point "OpenAI Base URL" to `http://localhost:8403/v1`.
 
 </details>
 
@@ -300,101 +255,289 @@ Cursor users can point "OpenAI Base URL" to `http://localhost:8403/v1`.
 
 ```bash
 openclaw plugins install @anjieyang/uncommon-route
+openclaw gateway restart
 ```
 
-The plugin handles dependency installation, proxy startup, and registration.
+The plugin starts the proxy for you and registers a local OpenClaw provider.
+
+Example plugin config:
+
+```yaml
+plugins:
+  entries:
+    "@anjieyang/uncommon-route":
+      port: 8403
+      upstream: "https://api.commonstack.ai/v1"
+      spendLimits:
+        hourly: 5.00
+        daily: 20.00
+```
+
+If your upstream needs authentication, set `UNCOMMON_ROUTE_API_KEY` in the environment where OpenClaw runs.
 
 </details>
 
+### 6. Verify end to end
+
+```bash
+uncommon-route doctor
+curl http://127.0.0.1:8403/health
+```
+
+When something feels off, `uncommon-route doctor` should almost always be the first command you run.
+
 ---
 
-## Agent Quick Reference
+## How Routing Works
 
-If you are wiring UncommonRoute into another tool, script, or agent loop, this is the minimum contract to know.
+You do not need to understand every internal detail to use the project, but the mental model matters.
+
+### 1. Every request is classified into one of three tiers
+
+| Tier | Typical requests |
+| --- | --- |
+| `SIMPLE` | greetings, short lookups, basic translation |
+| `MEDIUM` | code tasks, explanations, summaries |
+| `COMPLEX` | multi-constraint design and implementation work |
+
+There is no fixed per-tier default model anymore. By default, the selector scores the discovered model pool for the active mode, so the chosen model can change as pricing, availability, capabilities, and feedback change.
+
+### 2. Routing mode changes the style of decision
+
+| Mode | What it optimizes for |
+| --- | --- |
+| `auto` | balanced default |
+| `fast` | lighter, faster, and more cost-aware |
+| `best` | highest quality |
+
+These show up as virtual model IDs:
+
+- `uncommon-route/auto`
+- `uncommon-route/fast`
+- `uncommon-route/best`
+
+### 3. The selector scores the real pool, not a static shortlist
+
+The router considers:
+
+- estimated token cost
+- observed latency and reliability
+- cache affinity
+- explicit user feedback
+- BYOK-backed model preference
+- free/local biases
+- capability requirements like tool use or vision
+
+If the upstream exposes `/v1/models`, UncommonRoute builds a live model pool and pricing map from that reality instead of pretending the world is static.
+
+### 4. Session IDs still exist, but routing is no longer sticky
+
+Session IDs are still derived per task, but they do **not** pin model selection anymore.
+
+Today they mainly help:
+
+- group cache keys
+- scope composition checkpoints
+- tag stats and debug traces
+- rehydrate `artifact://...` context for the right task
+
+### 5. Tool-heavy steps are cheaper than they look
+
+A real agent workflow is not one giant reasoning turn.
+
+There are many low-value middle steps:
+
+- tool selection
+- tool-result follow-up
+- ordinary chat turns between heavier steps
+
+UncommonRoute can detect those patterns and avoid spending the strongest reasoning model on turns that do not need it.
+
+---
+
+## Watch It Work
+
+After starting the proxy, open:
+
+```text
+http://127.0.0.1:8403/dashboard/
+```
+
+The dashboard shows:
+
+- request counts, latency, cost, and savings
+- mode, tier, and model distribution
+- upstream transport and cache behavior
+- live routing configuration and default-mode overrides
+- primary upstream and BYOK provider connections
+- recent traffic, spend limits, and usage
+- recent feedback state and submitted feedback results
+
+Useful commands around the dashboard:
+
+```bash
+uncommon-route doctor
+uncommon-route serve --daemon
+uncommon-route stop
+uncommon-route logs
+uncommon-route logs --follow
+uncommon-route config show
+uncommon-route stats
+uncommon-route stats history
+```
+
+Background mode writes to:
+
+- `~/.uncommon-route/serve.pid`
+- `~/.uncommon-route/serve.log`
+
+---
+
+## Configuration That Actually Matters
+
+### Core environment variables
+
+| Variable | Meaning |
+| --- | --- |
+| `UNCOMMON_ROUTE_UPSTREAM` | Upstream OpenAI-compatible API URL |
+| `UNCOMMON_ROUTE_API_KEY` | API key for the upstream provider |
+| `UNCOMMON_ROUTE_PORT` | Local proxy port (`8403` by default) |
+| `UNCOMMON_ROUTE_COMPOSITION_CONFIG` | Path to a composition-policy JSON file |
+| `UNCOMMON_ROUTE_COMPOSITION_CONFIG_JSON` | Inline composition-policy JSON |
+
+### Primary upstream and live connections
+
+The effective primary upstream is resolved in this order:
+
+1. CLI flags like `uncommon-route serve --upstream ...`
+2. Environment variables like `UNCOMMON_ROUTE_UPSTREAM` and `UNCOMMON_ROUTE_API_KEY`
+3. File-backed settings saved from the dashboard or `PUT /v1/connections`
+
+Dashboard/API-managed primary connection values are stored at:
+
+```text
+~/.uncommon-route/connections.json
+```
+
+### Bring Your Own Key (BYOK)
+
+If you want the router to prefer models backed by your own provider keys:
+
+```bash
+uncommon-route provider add openai sk-your-openai-key
+uncommon-route provider add anthropic sk-ant-your-key
+uncommon-route provider list
+uncommon-route provider models
+```
+
+Provider config is stored at:
+
+```text
+~/.uncommon-route/providers.json
+```
+
+Important behavior today:
+
+- `provider add` stores a known model set for that provider
+- key verification uses `/models` when possible
+- `GET /v1/models` still exposes only UncommonRoute virtual models, not your full upstream catalog
+
+If you need a specific upstream model right now, do one of these:
+
+- send that explicit non-virtual model ID directly
+- pin it with `uncommon-route config set-tier ...`
+- inspect the provider-backed set with `uncommon-route provider models`
+
+The optional `--plan` field is metadata only. It is shown in `provider list`, but it does not replace an API key or unlock models by itself.
+
+### Live routing config
+
+```bash
+uncommon-route config show
+uncommon-route config set-default-mode fast
+uncommon-route config set-tier auto SIMPLE moonshot/kimi-k2.5 --fallback google/gemini-2.5-flash-lite,deepseek/deepseek-chat
+uncommon-route config set-tier best COMPLEX anthropic/claude-opus-4.6 --fallback anthropic/claude-sonnet-4.6 --strategy hard-pin
+uncommon-route config reset-tier auto SIMPLE
+```
+
+The default mode is used when a request omits `model`. Explicit model IDs still pass through unchanged.
+
+Use `--strategy hard-pin` when you want a tier to stay on the configured primary model unless that model actually fails upstream.
+
+Routing overrides are stored at:
+
+```text
+~/.uncommon-route/routing_config.json
+```
+
+### Spend control
+
+```bash
+uncommon-route spend set per_request 0.10
+uncommon-route spend set hourly 5.00
+uncommon-route spend set daily 20.00
+uncommon-route spend set session 3.00
+uncommon-route spend status
+uncommon-route spend history
+```
+
+When a limit is hit, the proxy returns HTTP `429` with `reset_in_seconds`.
+
+Spend data is stored at:
+
+```text
+~/.uncommon-route/spending.json
+```
+
+---
+
+## Integration Reference
+
+This is the compact lookup section for SDK authors, agent builders, and people wiring UncommonRoute into other tools.
 
 ### Base URLs
 
 | Client type | Base URL |
-|---|---|
-| **OpenAI-compatible clients** | `http://127.0.0.1:8403/v1` |
-| **Anthropic-style clients** | `http://127.0.0.1:8403` |
+| --- | --- |
+| OpenAI-compatible clients | `http://127.0.0.1:8403/v1` |
+| Anthropic-style clients | `http://127.0.0.1:8403` |
 
-### Virtual routing profiles
+### Virtual model IDs
 
-| Model ID | What it means |
-|---|---|
-| `uncommon-route/auto` | Balanced default |
-| `uncommon-route/eco` | Cheapest capable model first |
-| `uncommon-route/premium` | Quality-first routing |
-| `uncommon-route/free` | Free-first, then cheapest capable fallback |
-| `uncommon-route/agentic` | Tool-heavy workflow routing |
-
-### Useful commands for scripts
-
-```bash
-uncommon-route route --json --no-feedback "summarize this log file"
-uncommon-route doctor
-uncommon-route stats
-uncommon-route logs --follow
-```
-
-### Useful response headers
-
-- `x-uncommon-route-model`
-- `x-uncommon-route-tier`
-- `x-uncommon-route-profile`
-- `x-uncommon-route-step`
-- `x-uncommon-route-reasoning`
+| Model ID | Meaning |
+| --- | --- |
+| `uncommon-route/auto` | balanced default |
+| `uncommon-route/fast` | lighter and faster |
+| `uncommon-route/best` | highest quality |
 
 ### Useful endpoints
 
 | Endpoint | Why you would use it |
-|---|---|
-| `GET /health` | Basic liveness and config status |
-| `GET /v1/models` | Virtual models exposed by the router |
-| `GET /v1/models/mapping` | Internal model names mapped to upstream names |
-| `GET /v1/stats` | Routing analytics summary |
-| `POST /v1/stats` | Reset routing analytics |
-| `GET /v1/stats/recent` | Recent routed requests and feedback state |
-| `GET /v1/selector` | Inspect selector state and live routing preferences |
-| `POST /v1/selector` | Preview routing for a prompt or request body |
-| `GET /dashboard/` | Human-friendly monitoring UI |
+| --- | --- |
+| `GET /health` | liveness, config status, model-discovery status |
+| `GET /v1/models` | virtual models exposed by the router |
+| `GET /v1/models/mapping` | internal-to-upstream model mapping and pool view |
+| `GET /v1/connections` / `PUT /v1/connections` | inspect or update the primary runtime connection |
+| `GET /v1/routing-config` / `POST /v1/routing-config` | inspect or change routing mode/tier overrides |
+| `GET /v1/stats` / `POST /v1/stats` | routing summary or reset |
+| `GET /v1/stats/recent` | recent routed requests with feedback state |
+| `GET /v1/selector` / `POST /v1/selector` | inspect selector state or preview a routing decision |
+| `GET /v1/feedback` / `POST /v1/feedback` | inspect feedback state, submit signals, or rollback |
+| `GET /dashboard/` | human-friendly monitoring UI |
 
-### Success criteria
+### Useful response headers
 
-Your integration is "live" when all of these are true:
+On **routed** requests that use a virtual model, headers can include:
 
-- `uncommon-route doctor` shows the upstream and key are configured
-- `GET /health` returns `{"status": "ok", ...}`
-- routed requests include `x-uncommon-route-model` and `x-uncommon-route-tier`
+- `x-uncommon-route-model`
+- `x-uncommon-route-tier`
+- `x-uncommon-route-mode`
+- `x-uncommon-route-step`
+- `x-uncommon-route-reasoning`
 
----
+On passthrough requests with explicit non-virtual model IDs, do not assume all of those routing headers will exist.
 
-## Everyday Usage
-
-<details>
-<summary><strong>CLI</strong> · Inspect routing locally without sending a real upstream request</summary>
-
-Use the CLI when you want to inspect routing locally without sending a real request upstream.
-
-```bash
-uncommon-route route "what is 2+2"
-uncommon-route route --json --no-feedback "design a distributed database"
-uncommon-route debug "explain quicksort"
-```
-
-What each command is for:
-
-- `route`: get the chosen tier, model, savings estimate, and fallback chain
-- `route --json`: same information in machine-readable form
-- `debug`: see the feature breakdown behind the classification
-
-</details>
-
-<details>
-<summary><strong>Python SDK</strong> · Call the router directly inside Python</summary>
-
-Use the SDK when you want routing decisions directly inside Python.
+### Python SDK example
 
 ```python
 from uncommon_route import classify, route
@@ -409,246 +552,13 @@ print(result.tier)
 print(result.signals)
 ```
 
-</details>
-
-<details>
-<summary><strong>HTTP Proxy</strong> · Put UncommonRoute in front of real clients and apps</summary>
-
-Use the proxy when you want real applications to send requests through UncommonRoute.
-
-```bash
-uncommon-route serve --port 8403
-```
-
-OpenAI-compatible example:
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://127.0.0.1:8403/v1",
-    api_key="not-needed",
-)
-
-response = client.chat.completions.create(
-    model="uncommon-route/auto",
-    messages=[{"role": "user", "content": "hello"}],
-)
-```
-
-Non-virtual model names are passed through unchanged, so you can still target a specific model when you want to.
-
-</details>
-
----
-
-## Dashboard And Diagnostics
-
-After starting the proxy, open:
-
-```text
-http://127.0.0.1:8403/dashboard/
-```
-
-The dashboard shows:
-
-- request counts, latency, cost, and savings
-- tier and model distribution
-- upstream transport and cache behavior
-- live routing configuration
-- active sessions
-- spend limits and recent usage
-
-Useful local commands:
-
-```bash
-uncommon-route doctor
-uncommon-route serve --daemon
-uncommon-route stop
-uncommon-route logs
-uncommon-route logs --follow
-uncommon-route sessions
-uncommon-route stats
-```
-
-Background mode writes to:
-
-- PID: `~/.uncommon-route/serve.pid`
-- Logs: `~/.uncommon-route/serve.log`
-
----
-
-## Configuration
-
-### Core Environment Variables
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `UNCOMMON_ROUTE_UPSTREAM` | — | Upstream OpenAI-compatible API URL |
-| `UNCOMMON_ROUTE_API_KEY` | — | API key for the upstream provider |
-| `UNCOMMON_ROUTE_PORT` | `8403` | Local proxy port |
-| `UNCOMMON_ROUTE_DISABLED` | `false` | Disable routing and act as passthrough |
-| `UNCOMMON_ROUTE_COMPOSITION_CONFIG` | — | Path to a composition-policy JSON file |
-| `UNCOMMON_ROUTE_COMPOSITION_CONFIG_JSON` | — | Inline composition-policy JSON |
-
-### Bring Your Own Key (BYOK)
-
-If you have direct API keys for providers and want the router to prefer those models, register them:
-
-```bash
-uncommon-route provider add openai sk-your-openai-key
-uncommon-route provider add anthropic sk-ant-your-key
-uncommon-route provider list
-```
-
-BYOK keys are verified on add when possible. Provider config is stored at:
-
-```text
-~/.uncommon-route/providers.json
-```
-
-### Live Routing Config
-
-You can override the default model table per profile and tier:
-
-```bash
-uncommon-route config show
-uncommon-route config set-tier auto SIMPLE moonshot/kimi-k2.5 --fallback google/gemini-2.5-flash-lite,deepseek/deepseek-chat
-uncommon-route config set-tier premium COMPLEX anthropic/claude-opus-4.6 --fallback anthropic/claude-sonnet-4.6 --mode hard-pin
-uncommon-route config reset-tier auto SIMPLE
-```
-
-Use `--mode hard-pin` when you want a tier to stay on the configured primary model unless that model actually fails upstream.
-
-### Spend Control
-
-Set safety limits to stop runaway cost:
-
-```bash
-uncommon-route spend set per_request 0.10
-uncommon-route spend set hourly 5.00
-uncommon-route spend set daily 20.00
-uncommon-route spend set session 3.00
-uncommon-route spend status
-uncommon-route spend history
-```
-
-When a limit is hit, the proxy returns HTTP `429` with `reset_in_seconds`.
-
-Spending data is stored at:
-
-```text
-~/.uncommon-route/spending.json
-```
-
----
-
-## How Routing Works
-
-You do not need to understand every internal detail to use the tool, but this mental model helps.
-
-### 1. Each request is placed into one of four tiers
-
-| Tier | Typical requests | Default primary |
-|---|---|---|
-| `SIMPLE` | greetings, short lookups, basic translation | `moonshot/kimi-k2.5` |
-| `MEDIUM` | code tasks, explanations, summaries | `moonshot/kimi-k2.5` |
-| `COMPLEX` | multi-constraint design and implementation work | `google/gemini-3.1-pro` |
-| `REASONING` | proofs, derivations, hard mathematical reasoning | `xai/grok-4-1-fast-reasoning` |
-
-### 2. The routing profile chooses the style of decision
-
-| Profile | Best for |
-|---|---|
-| `auto` | balanced default |
-| `eco` | lowest expected cost |
-| `premium` | quality-first |
-| `free` | free-first, then cheapest capable fallback |
-| `agentic` | tool-heavy workflows |
-
-### 3. A local selector chooses a model and fallback chain
-
-The selector considers:
-
-- profile preferences
-- estimated token cost
-- observed latency and reliability
-- cache affinity
-- explicit user feedback
-- BYOK and free/local biases
-
-### 4. Sessions reduce unnecessary switching
-
-By default, sessions:
-
-- hold on to an already-adequate model within a task
-- upgrade when a task becomes harder
-- avoid needless downgrade churn
-- expire after 30 minutes of inactivity
-
-### 5. Agentic steps are treated differently
-
-Tool-heavy workflows often contain cheap middle steps.
-
-UncommonRoute detects cases like:
-
-- tool selection
-- tool-result follow-up
-- general chat turns
-
-That allows it to use cheaper tool-capable models for boring steps and save stronger reasoning models for the turns that actually need them.
-
----
-
-## Common Problems
-
-If you are new, these are the mistakes people hit most often.
-
-### "`route` works, but my app still cannot get responses"
-
-`uncommon-route route ...` is a local routing decision. It does not call your upstream.
-
-If real chat requests fail:
-
-- check `UNCOMMON_ROUTE_UPSTREAM`
-- check `UNCOMMON_ROUTE_API_KEY` if your provider needs one
-- run `uncommon-route doctor`
-
-### "Codex cannot connect"
-
-For OpenAI-style tools, `OPENAI_BASE_URL` must end with `/v1`:
-
-```bash
-export OPENAI_BASE_URL="http://localhost:8403/v1"
-```
-
-### "Claude Code cannot connect"
-
-For Anthropic-style tools, `ANTHROPIC_BASE_URL` should point at the router root, not `/v1`:
-
-```bash
-export ANTHROPIC_BASE_URL="http://localhost:8403"
-```
-
-### "I do not know which command to run first"
-
-Start here:
-
-```bash
-uncommon-route doctor
-```
-
-That one command usually tells you what is missing.
-
 ---
 
 ## Advanced Features
 
-Once the basics are working, these are the features that make the router more powerful.
+### Model discovery and mapping
 
-### Model Mapping
-
-Different upstreams use different model IDs. UncommonRoute fetches `/v1/models`, maps internal names to upstream names, and retries through the fallback chain if the first model is unavailable.
+Different upstreams use different model IDs. UncommonRoute fetches `/v1/models`, builds a live pool when possible, maps internal IDs to what the upstream actually serves, and records learned aliases when fallbacks prove a better match.
 
 Useful commands:
 
@@ -657,7 +567,7 @@ uncommon-route doctor
 curl http://127.0.0.1:8403/v1/models/mapping
 ```
 
-### Composition Pipeline
+### Composition pipeline
 
 Very large tool outputs are not always forwarded verbatim.
 
@@ -675,7 +585,7 @@ Artifacts are stored under:
 ~/.uncommon-route/artifacts/
 ```
 
-Useful response headers:
+Useful headers for these flows:
 
 - `x-uncommon-route-input-before`
 - `x-uncommon-route-input-after`
@@ -685,13 +595,15 @@ Useful response headers:
 - `x-uncommon-route-checkpoints`
 - `x-uncommon-route-rehydrated`
 
-### Anthropic-Native Transport
+### Anthropic-native transport
 
 When routing lands on an Anthropic-family model and the upstream supports it, UncommonRoute can preserve Anthropic-native transport and caching semantics while still serving OpenAI-style clients normally.
 
-### Local Training
+### Local training
 
-The classifier is local, not a SaaS black box. You can retrain it on your own benchmark data:
+The classifier is local. You can retrain it on your own benchmark data.
+
+From the repo root:
 
 ```bash
 python - <<'PY'
@@ -700,39 +612,91 @@ train_and_save_model("bench/data/train.jsonl")
 PY
 ```
 
+Online feedback updates are stored separately at:
+
+```text
+~/.uncommon-route/model_online.json
+```
+
 ---
 
-## Benchmarks
+## Troubleshooting
+
+### "`route` works, but my app still cannot get responses"
+
+`uncommon-route route ...` is a local routing decision. It does **not** call your upstream.
+
+If real requests fail, check:
+
+- `UNCOMMON_ROUTE_UPSTREAM`
+- `UNCOMMON_ROUTE_API_KEY` if your provider needs one
+- `uncommon-route doctor`
+
+### "Codex or Cursor cannot connect"
+
+For OpenAI-style tools, `OPENAI_BASE_URL` must end with `/v1`:
+
+```bash
+export OPENAI_BASE_URL="http://localhost:8403/v1"
+```
+
+### "Claude Code cannot connect"
+
+For Anthropic-style tools, `ANTHROPIC_BASE_URL` should point at the router root, not `/v1`:
+
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8403"
+```
+
+### "My local upstream still fails discovery"
+
+Some local or experimental servers expose `POST /chat/completions` but not a clean `/models` endpoint. In that case, passthrough may still work while live discovery stays limited. `uncommon-route doctor` will tell you whether discovery succeeded.
+
+### "I do not know what to run first"
+
+Run:
+
+```bash
+uncommon-route doctor
+```
+
+That one command usually tells you what is missing.
+
+---
+
+## Detailed Benchmarks
 
 Two questions matter:
 
 1. Does the router classify difficulty correctly?
 2. Does that save real money in a realistic coding session?
 
-### Held-Out Routing Benchmark
+### Held-out routing benchmark
 
 Evaluated on **763 hand-written prompts** across **15 languages** and **35 categories**.
 
 | Metric | UncommonRoute | ClawRouter | NotDiamond (cost) |
-|---|---|---|---|
+| --- | ---: | ---: | ---: |
 | Accuracy | **92.3%** | 52.6% | 46.1% |
 | Weighted F1 | **92.3%** | 47.0% | 38.0% |
 | Latency / request | **0.5ms** | 0.6ms | 37.6ms |
 | MEDIUM F1 | **88.7%** | 43.6% | 6.2% |
-| REASONING F1 | **97.8%** | 61.7% | 0.0% |
+| COMPLEX F1 | **97.8%** | 61.7% | 0.0% |
 
-### Real Cost Simulation
+### Real cost simulation
 
 Simulated on a **131-request agent coding session** and compared against always sending every request to `anthropic/claude-opus-4.6`.
 
 | Metric | Always Opus | UncommonRoute |
-|---|---|---|
+| --- | ---: | ---: |
 | Total cost | $1.7529 | **$0.5801** |
 | Cost saved | — | **67%** |
 | Quality retained | 100% | **93.5%** |
 | Routing accuracy | — | **90.8%** |
 
-### Reproduce The Benchmarks
+### Reproduce the benchmark run
+
+If you also have the companion `router-bench/` directory checked out next to this repo, run:
 
 ```bash
 cd ../router-bench && python -m router_bench.run
@@ -740,26 +704,38 @@ cd ../router-bench && python -m router_bench.run
 
 ---
 
-## Project Structure
+## Turn It Off Or Remove It
 
-```text
-├── uncommon_route/           # Core package
-│   ├── router/               # Classifier + selector + model table
-│   ├── proxy.py              # ASGI proxy (OpenAI + Anthropic endpoints)
-│   ├── session.py            # Session persistence + escalation
-│   ├── spend_control.py      # Spending limits
-│   ├── providers.py          # BYOK provider management
-│   ├── feedback.py           # Online feedback loop
-│   ├── composition.py        # Tool-result compaction / checkpointing
-│   ├── artifacts.py          # Local artifact storage
-│   ├── stats.py              # Routing analytics
-│   └── static/               # Built dashboard assets
-├── frontend/dashboard/       # Dashboard source
-├── openclaw-plugin/          # OpenClaw integration
-├── tests/                    # Unit + integration + end-to-end tests
-├── bench/                    # Benchmark data and training scripts
-├── scripts/install.sh        # Installer
-└── pyproject.toml            # Packaging and dependencies
+If you want to stop using UncommonRoute:
+
+```bash
+# If you started it in background mode
+uncommon-route stop
+
+# Remove the Python package
+pip uninstall uncommon-route
+```
+
+If you started `uncommon-route serve` in the foreground, stop it with `Ctrl+C`.
+
+Stopping `serve` only stops the local proxy. It does **not** automatically restore your previous client config. If your client still points at `http://localhost:8403` or `http://localhost:8403/v1`, it will keep trying localhost until you restore the original settings.
+
+Typical rollback commands:
+
+```bash
+unset UNCOMMON_ROUTE_UPSTREAM
+unset UNCOMMON_ROUTE_API_KEY
+unset OPENAI_BASE_URL
+unset ANTHROPIC_BASE_URL
+```
+
+If you installed the OpenClaw integration, also remove that registration:
+
+```bash
+openclaw plugins uninstall @anjieyang/uncommon-route
+
+# Or, if you used the config-patch fallback instead of the plugin:
+uncommon-route openclaw uninstall
 ```
 
 ---
@@ -770,8 +746,10 @@ cd ../router-bench && python -m router_bench.run
 git clone https://github.com/anjieyang/UncommonRoute.git
 cd UncommonRoute
 pip install -e ".[dev]"
-python -m pytest tests/ -v
+python -m pytest tests -v
 ```
+
+The current test suite is `281 passed` on the latest local run.
 
 ---
 

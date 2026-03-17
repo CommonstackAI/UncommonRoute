@@ -1,29 +1,35 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 body {
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.04), transparent 24%),
-    linear-gradient(180deg, #0f1012 0%, #0b0c0f 100%);
-  color: #dcdcde;
-  font-family: "Inter", system-ui, sans-serif;
+  background-color: #F9FAFB;
+  color: #111827;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-  background: rgba(59, 130, 246, 0.3);
-  color: #fff;
+  background: rgba(99, 102, 241, 0.2);
+  color: #111827;
 }
 
-input, select, textarea {
-  outline: none;
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
-input:focus, select:focus, textarea:focus {
-  border-color: rgba(255,255,255,0.2);
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
 }

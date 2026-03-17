@@ -1,11 +1,10 @@
-"""End-to-end tests for all six usage modes.
+"""End-to-end tests for the primary usage surfaces.
 
-1. CLI routing        — subprocess: uncommon-route route / debug
-2. Python SDK         — import route(), classify(), SpendControl, SessionStore
-3. HTTP Proxy         — start ASGI app, hit endpoints with httpx
-4. OpenClaw           — install / status / uninstall config patch
-5. Session management — sticky routing, escalation via proxy
-6. Spend control      — set limits, get blocked at 429, history
+1. CLI routing   — subprocess: uncommon-route route / debug
+2. Python SDK    — import route(), classify(), SpendControl
+3. HTTP Proxy    — start ASGI app, hit endpoints with httpx
+4. OpenClaw      — install / status / uninstall config patch
+5. Spend control — set limits, get blocked at 429, history
 """
 
 from __future__ import annotations
@@ -14,30 +13,47 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from uncommon_route.proxy import create_app
 from uncommon_route.proxy import VERSION as PROXY_VERSION
-from uncommon_route.session import SessionConfig, SessionStore
+from uncommon_route.router.config import DEFAULT_MODEL_PRICING
+from uncommon_route.router.types import ModelPricing
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 
 PYTHON = sys.executable
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+# Patched pricing so nvidia/gpt-oss-120b has non-zero cost (for spend-block tests)
+_SPEND_TEST_PRICING = dict(DEFAULT_MODEL_PRICING)
+_SPEND_TEST_PRICING["nvidia/gpt-oss-120b"] = ModelPricing(0.10, 0.40)
 CLI_MODULE = [PYTHON, "-m", "uncommon_route.cli"]
+
+
+def run_cli(args: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    merged_env = dict(os.environ)
+    merged_env["PYTHONPATH"] = str(PACKAGE_ROOT)
+    if env:
+        merged_env.update(env)
+    return subprocess.run(
+        [*CLI_MODULE, *args],
+        capture_output=True,
+        text=True,
+        cwd=PACKAGE_ROOT,
+        env=merged_env,
+    )
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 @pytest.fixture
 def proxy_client() -> TestClient:
-    """Full proxy with session + spend, fake upstream."""
-    ss = SessionStore(SessionConfig(enabled=True, timeout_s=300))
+    """Full proxy with spend control, fake upstream."""
     sc = SpendControl(storage=InMemorySpendControlStorage())
-    app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
+    app = create_app(upstream="http://127.0.0.1:1/fake", spend_control=sc)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -53,60 +69,69 @@ def _isolate_openclaw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestCLI:
     def test_version(self) -> None:
-        r = subprocess.run([*CLI_MODULE, "--version"], capture_output=True, text=True)
+        r = run_cli(["--version"])
         assert r.returncode == 0
         assert PROXY_VERSION in r.stdout
 
     def test_help(self) -> None:
-        r = subprocess.run([*CLI_MODULE, "--help"], capture_output=True, text=True)
+        r = run_cli(["--help"])
         assert r.returncode == 0
         assert "uncommon-route" in r.stdout
         assert "openclaw" in r.stdout
         assert "spend" in r.stdout
 
     def test_route_text(self) -> None:
-        r = subprocess.run(
-            [*CLI_MODULE, "route", "what is 2+2"],
-            capture_output=True, text=True,
-        )
+        r = run_cli(["route", "what is 2+2"])
         assert r.returncode == 0
         assert "Model:" in r.stdout
         assert "Tier:" in r.stdout
         assert "SIMPLE" in r.stdout
 
     def test_route_json(self) -> None:
-        r = subprocess.run(
-            [*CLI_MODULE, "route", "--json", "explain quicksort in detail"],
-            capture_output=True, text=True,
-        )
+        r = run_cli(["route", "--json", "explain quicksort in detail"])
         assert r.returncode == 0
         data = json.loads(r.stdout)
+        assert data["mode"] == "auto"
         assert "model" in data
         assert "tier" in data
         assert "confidence" in data
         assert "latency_ms" in data
 
-    def test_route_complex_prompt(self) -> None:
-        r = subprocess.run(
-            [*CLI_MODULE, "route", "--json",
-             "Design a distributed consensus algorithm that handles Byzantine faults "
-             "with formal correctness proofs and implement it in Rust"],
-            capture_output=True, text=True,
-        )
+    def test_route_mode_flag(self) -> None:
+        r = run_cli(["route", "--json", "--mode", "fast", "explain quicksort in detail"])
+        assert r.returncode == 0
         data = json.loads(r.stdout)
-        assert data["tier"] in ("COMPLEX", "REASONING")
+        assert data["mode"] == "fast"
+
+    def test_route_uses_persisted_default_mode(self, tmp_path: Path) -> None:
+        env = {"UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route")}
+
+        set_mode = run_cli(["config", "set-default-mode", "best", "--json"], env=env)
+        assert set_mode.returncode == 0
+        assert json.loads(set_mode.stdout)["default_mode"] == "best"
+
+        routed = run_cli(["route", "--json", "hello"], env=env)
+        assert routed.returncode == 0
+        assert json.loads(routed.stdout)["mode"] == "best"
+
+    def test_route_complex_prompt(self) -> None:
+        r = run_cli([
+            "route",
+            "--json",
+            "Design a distributed consensus algorithm that handles Byzantine faults "
+            "with formal correctness proofs and implement it in Rust",
+        ])
+        data = json.loads(r.stdout)
+        assert data["tier"] == "COMPLEX"
 
     def test_debug(self) -> None:
-        r = subprocess.run(
-            [*CLI_MODULE, "debug", "prove that sqrt(2) is irrational"],
-            capture_output=True, text=True,
-        )
+        r = run_cli(["debug", "prove that sqrt(2) is irrational"])
         assert r.returncode == 0
         assert "Structural Features:" in r.stdout
         assert "Keyword Features:" in r.stdout
 
     def test_route_no_prompt_fails(self) -> None:
-        r = subprocess.run([*CLI_MODULE, "route"], capture_output=True, text=True)
+        r = run_cli(["route"])
         assert r.returncode != 0
 
     def test_doctor_local_upstream_without_key(self) -> None:
@@ -115,12 +140,7 @@ class TestCLI:
         env.pop("UNCOMMON_ROUTE_API_KEY", None)
         env.pop("COMMONSTACK_API_KEY", None)
 
-        r = subprocess.run(
-            [*CLI_MODULE, "doctor"],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        r = run_cli(["doctor"], env=env)
 
         assert r.returncode == 0
         assert "✓ API key configured: (not needed for local upstream)" in r.stdout
@@ -136,6 +156,7 @@ class TestSDK:
         assert d.tier.value == "SIMPLE"
         assert 0 <= d.confidence <= 1
         assert d.savings >= 0
+        assert 0 <= d.complexity <= 1
 
     def test_classify(self) -> None:
         from uncommon_route import classify
@@ -151,21 +172,13 @@ class TestSDK:
             system_prompt="You are a helpful assistant. Respond in JSON format.",
         )
         # structured output → at least MEDIUM
-        assert d.tier.value in ("MEDIUM", "COMPLEX", "REASONING")
+        assert d.tier.value in ("MEDIUM", "COMPLEX")
 
     def test_select_model_and_fallback(self) -> None:
         from uncommon_route import route
         d = route("hello")
         assert len(d.fallback_chain) > 0
         assert d.fallback_chain[0].cost_estimate >= 0
-
-    def test_session_store_sdk(self) -> None:
-        from uncommon_route import SessionStore, SessionConfig
-        store = SessionStore(SessionConfig(enabled=True, timeout_s=60))
-        store.set("sdk-test", "model-x", "SIMPLE")
-        entry = store.get("sdk-test")
-        assert entry is not None
-        assert entry.model == "model-x"
 
     def test_spend_control_sdk(self) -> None:
         from uncommon_route import SpendControl, InMemorySpendControlStorage
@@ -193,7 +206,6 @@ class TestHTTPProxy:
         d = r.json()
         assert d["status"] == "ok"
         assert d["router"] == "uncommon-route"
-        assert "sessions" in d
         assert "spending" in d
 
     def test_models(self, proxy_client: TestClient) -> None:
@@ -219,7 +231,7 @@ class TestHTTPProxy:
         })
         assert r.status_code == 502
         assert r.headers["x-uncommon-route-model"] != ""
-        assert r.headers["x-uncommon-route-tier"] in ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING")
+        assert r.headers["x-uncommon-route-tier"] in ("SIMPLE", "MEDIUM", "COMPLEX")
 
     def test_passthrough_model(self, proxy_client: TestClient) -> None:
         r = proxy_client.post("/v1/chat/completions", json={
@@ -232,14 +244,13 @@ class TestHTTPProxy:
 
 # ── Mode 4: OpenClaw Integration ─────────────────────────────────────
 
+# Mode 5 (Session Management) removed: SessionConfig, SessionStore, /v1/sessions,
+# and route methods session-hold, session-upgrade, step-aware, escalated no longer exist.
+
 class TestOpenClawIntegration:
     def test_cli_openclaw_status(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """CLI `openclaw status` runs without error."""
-        r = subprocess.run(
-            [*CLI_MODULE, "openclaw", "status"],
-            capture_output=True, text=True,
-            env={**dict(__import__("os").environ), "HOME": str(tmp_path)},
-        )
+        r = run_cli(["openclaw", "status"], env={"HOME": str(tmp_path)})
         assert r.returncode == 0
         assert "not installed" in r.stdout or "registered" in r.stdout
 
@@ -255,72 +266,7 @@ class TestOpenClawIntegration:
         assert s["config_patched"] is False
 
 
-# ── Mode 5: Session Management ───────────────────────────────────────
-
-class TestSessionManagement:
-    def test_session_sticky_routing(self) -> None:
-        """Same session ID → same model across multiple requests."""
-        ss = SessionStore(SessionConfig(enabled=True, timeout_s=300))
-        sc = SpendControl(storage=InMemorySpendControlStorage())
-        app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
-        client = TestClient(app, raise_server_exceptions=False)
-
-        headers = {"x-session-id": "test-session-abc"}
-        body = {
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "hello"}],
-        }
-
-        r1 = client.post("/v1/chat/completions", json=body, headers=headers)
-        model1 = r1.headers.get("x-uncommon-route-model")
-        reasoning1 = r1.headers.get("x-uncommon-route-reasoning", "")
-
-        r2 = client.post("/v1/chat/completions", json=body, headers=headers)
-        model2 = r2.headers.get("x-uncommon-route-model")
-        reasoning2 = r2.headers.get("x-uncommon-route-reasoning", "")
-
-        assert model1 == model2
-        assert "session-hold" in reasoning2
-
-    def test_sessions_endpoint(self) -> None:
-        ss = SessionStore(SessionConfig(enabled=True, timeout_s=300))
-        sc = SpendControl(storage=InMemorySpendControlStorage())
-        app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
-        client = TestClient(app, raise_server_exceptions=False)
-
-        # Trigger a session
-        client.post("/v1/chat/completions", json={
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "hello"}],
-        }, headers={"x-session-id": "visible-session"})
-
-        r = client.get("/v1/sessions")
-        data = r.json()
-        assert data["count"] >= 1
-
-    def test_session_escalation_via_proxy(self) -> None:
-        """Three identical requests trigger tier escalation."""
-        ss = SessionStore(SessionConfig(enabled=True, timeout_s=300))
-        sc = SpendControl(storage=InMemorySpendControlStorage())
-        app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
-        client = TestClient(app, raise_server_exceptions=False)
-
-        headers = {"x-session-id": "escalation-test"}
-        body = {
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "same request repeated"}],
-        }
-
-        models = []
-        for _ in range(4):
-            r = client.post("/v1/chat/completions", json=body, headers=headers)
-            models.append(r.headers.get("x-uncommon-route-model"))
-
-        # First 3 should be same (sticky), 4th may escalate
-        assert models[0] == models[1] == models[2]
-
-
-# ── Mode 6: Spend Control ────────────────────────────────────────────
+# ── Mode 5: Spend Control ─────────────────────────────────────────────
 
 class TestSpendControlE2E:
     def test_set_limit_via_api(self, proxy_client: TestClient) -> None:
@@ -329,11 +275,11 @@ class TestSpendControlE2E:
         assert data["limits"]["hourly"] == 10.0
         assert data["remaining"]["hourly"] == 10.0
 
-    def test_spend_blocks_at_limit(self) -> None:
-        ss = SessionStore()
+    def test_spend_blocks_at_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("uncommon_route.proxy._get_pricing", lambda: _SPEND_TEST_PRICING)
         sc = SpendControl(storage=InMemorySpendControlStorage())
-        sc.set_limit("per_request", 0.0001)
-        app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
+        sc.set_limit("per_request", 0.00005)  # Below estimated ~0.0001 for "hello"
+        app = create_app(upstream="http://127.0.0.1:1/fake", spend_control=sc)
         client = TestClient(app, raise_server_exceptions=False)
 
         r = client.post("/v1/chat/completions", json={
@@ -345,24 +291,21 @@ class TestSpendControlE2E:
         assert err["type"] == "spend_limit_exceeded"
         assert "Per-request limit" in err["message"]
 
-    def test_spend_clear_and_retry(self) -> None:
-        ss = SessionStore()
+    def test_spend_clear_and_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("uncommon_route.proxy._get_pricing", lambda: _SPEND_TEST_PRICING)
         sc = SpendControl(storage=InMemorySpendControlStorage())
-        sc.set_limit("per_request", 0.0001)
-        app = create_app(upstream="http://127.0.0.1:1/fake", session_store=ss, spend_control=sc)
+        sc.set_limit("per_request", 0.00005)  # Below estimated ~0.0001 for "hello"
+        app = create_app(upstream="http://127.0.0.1:1/fake", spend_control=sc)
         client = TestClient(app, raise_server_exceptions=False)
 
-        # Blocked
         r1 = client.post("/v1/chat/completions", json={
             "model": "uncommon-route/auto",
             "messages": [{"role": "user", "content": "hello"}],
         })
         assert r1.status_code == 429
 
-        # Clear limit via API
         client.post("/v1/spend", json={"action": "clear", "window": "per_request"})
 
-        # Now allowed (upstream fake → 502, but not 429)
         r2 = client.post("/v1/chat/completions", json={
             "model": "uncommon-route/auto",
             "messages": [{"role": "user", "content": "hello"}],
@@ -370,11 +313,7 @@ class TestSpendControlE2E:
         assert r2.status_code != 429
 
     def test_cli_spend_status(self, tmp_path: Path) -> None:
-        r = subprocess.run(
-            [*CLI_MODULE, "spend", "status"],
-            capture_output=True, text=True,
-            env={**dict(__import__("os").environ), "HOME": str(tmp_path)},
-        )
+        r = run_cli(["spend", "status"], env={"HOME": str(tmp_path)})
         assert r.returncode == 0
         assert "Spending Limits" in r.stdout or "no limits" in r.stdout
 

@@ -1,49 +1,48 @@
 import { useCallback, useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   fetchHealth,
-  fetchRoutingConfig,
   fetchStats,
   fetchMapping,
-  fetchSessions,
   fetchSpend,
   type Health,
-  type RoutingConfigState,
   type Stats,
   type Mapping,
-  type Session,
   type Spend,
 } from "./api";
 import Sidebar from "./components/Sidebar";
-import Overview from "./components/Overview";
-import Routing from "./components/Routing";
-import RoutingConfig from "./components/RoutingConfig";
+import Home from "./components/Home";
+import Activity from "./components/Activity";
 import Models from "./components/Models";
-import Sessions from "./components/Sessions";
 import SpendPanel from "./components/Spend";
 import Feedback from "./components/Feedback";
+import Connections from "./components/Connections";
+import Routing from "./components/Routing";
 
-type Page = "overview" | "routing" | "config" | "models" | "sessions" | "spend" | "feedback";
+type Page = "home" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections";
+
+const pageVariants = {
+  initial: { opacity: 0, y: 10 },
+  animate: { opacity: 1, y: 0, transition: { duration: 0.3, ease: "easeOut" as const } },
+  exit: { opacity: 0, transition: { duration: 0.15 } },
+};
 
 export default function App() {
-  const [page, setPage] = useState<Page>("overview");
+  const [page, setPage] = useState<Page>("home");
   const [health, setHealth] = useState<Health | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [mapping, setMapping] = useState<Mapping | null>(null);
-  const [sessions, setSessions] = useState<{ count: number; sessions: Session[] } | null>(null);
   const [spend, setSpend] = useState<Spend | null>(null);
-  const [routingConfig, setRoutingConfig] = useState<RoutingConfigState | null>(null);
   const [ready, setReady] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [h, st, m, ss, sp, rc] = await Promise.all([
-      fetchHealth(), fetchStats(), fetchMapping(), fetchSessions(), fetchSpend(), fetchRoutingConfig(),
+    const [h, st, m, sp] = await Promise.all([
+      fetchHealth(), fetchStats(), fetchMapping(), fetchSpend(),
     ]);
     if (h) { setHealth(h); setReady(true); }
     if (st) setStats(st);
     if (m) setMapping(m);
-    if (ss) setSessions(ss);
     if (sp) setSpend(sp);
-    if (rc) setRoutingConfig(rc);
   }, []);
 
   useEffect(() => {
@@ -76,15 +75,25 @@ export default function App() {
         feedbackPending={feedbackPending}
       />
 
-      <main className="ml-[220px] min-h-screen">
-        <div className="max-w-4xl px-10 py-10">
-          {page === "overview" && <Overview stats={stats} health={health} />}
-          {page === "routing" && <Routing stats={stats} />}
-          {page === "config" && <RoutingConfig data={routingConfig} onRefresh={refresh} />}
-          {page === "models" && <Models mapping={mapping} />}
-          {page === "sessions" && <Sessions data={sessions} />}
-          {page === "spend" && <SpendPanel spend={spend} onRefresh={refresh} />}
-          {page === "feedback" && <Feedback />}
+      <main className="ml-[240px] min-h-screen relative">
+        <div className="px-10 py-10 max-w-[1200px] mx-auto">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={page}
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+            >
+              {page === "home" && <Home stats={stats} health={health} />}
+              {page === "routing" && <Routing onRefresh={refresh} />}
+              {page === "activity" && <Activity stats={stats} />}
+              {page === "models" && <Models mapping={mapping} />}
+              {page === "connections" && <Connections initialConnection={health?.connections ?? null} onRefresh={refresh} />}
+              {page === "budget" && <SpendPanel spend={spend} onRefresh={refresh} />}
+              {page === "feedback" && <Feedback />}
+            </motion.div>
+          </AnimatePresence>
         </div>
       </main>
     </div>

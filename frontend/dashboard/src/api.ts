@@ -2,7 +2,7 @@ export interface Health {
   status: string;
   version: string;
   upstream: string;
-  sessions: { count: number; sessions: Session[] };
+  connections?: ConnectionState;
   spending: {
     limits: Record<string, number>;
     spent: Record<string, number>;
@@ -15,11 +15,13 @@ export interface Health {
     is_gateway: boolean;
     discovered: boolean;
     upstream_models: number;
+    pool_size: number;
     unresolved: string[];
+    pricing_source: string;
   };
   stats: { total_requests: number };
   feedback: { pending: number; total_updates: number; online_model: boolean };
-  routing_config?: { source: string; editable: boolean };
+  routing_config?: { source: string; editable: boolean; default_mode: string };
 }
 
 export interface TierStats {
@@ -52,6 +54,7 @@ export interface Stats {
   total_cache_breakpoints: number;
   total_input_tokens_before: number;
   total_input_tokens_after: number;
+  by_mode: Record<string, number>;
   by_tier: Record<string, TierStats>;
   by_model: Record<string, ModelStats>;
   by_transport: Record<string, ModelStats>;
@@ -60,11 +63,22 @@ export interface Stats {
   by_method: Record<string, number>;
 }
 
-export interface MappingRow {
-  internal: string;
-  resolved: string;
-  mapped: boolean;
-  available: boolean | null;
+export interface PoolModel {
+  id: string;
+  provider: string;
+  owned_by: string;
+  pricing: {
+    input: number;
+    output: number;
+    cached_input: number | null;
+    cache_write: number | null;
+  };
+  capabilities: {
+    tool_calling: boolean;
+    vision: boolean;
+    reasoning: boolean;
+    free: boolean;
+  };
 }
 
 export interface Mapping {
@@ -72,16 +86,10 @@ export interface Mapping {
   is_gateway: boolean;
   discovered: boolean;
   upstream_model_count: number;
-  mappings: MappingRow[];
+  pool_size: number;
+  pool: PoolModel[];
   unresolved: string[];
-}
-
-export interface Session {
-  id: string;
-  model: string;
-  tier: string;
-  requests: number;
-  age_s: number;
+  pricing_source: string;
 }
 
 export interface Spend {
@@ -99,14 +107,58 @@ export interface RoutingTierConfig {
   selection_mode: "adaptive" | "hard-pin";
 }
 
-export interface RoutingProfileConfig {
+export interface RoutingModeConfig {
   tiers: Record<string, RoutingTierConfig>;
 }
 
 export interface RoutingConfigState {
   source: string;
   editable: boolean;
-  profiles: Record<string, RoutingProfileConfig>;
+  default_mode: string;
+  modes: Record<string, RoutingModeConfig>;
+}
+
+export interface ConnectionState {
+  source: string;
+  upstream_source: string;
+  api_key_source: string;
+  editable: boolean;
+  upstream: string;
+  has_api_key: boolean;
+  api_key_preview: string;
+  provider: string;
+  is_gateway: boolean;
+  discovered: boolean;
+  upstream_model_count: number;
+  pool_size: number;
+  unresolved: string[];
+  pricing_source: string;
+}
+
+export interface ProviderRecord {
+  name: string;
+  base_url: string;
+  models: string[];
+  model_count: number;
+  plan: string;
+  has_api_key: boolean;
+  api_key_preview: string;
+}
+
+export interface ProvidersState {
+  count: number;
+  providers: ProviderRecord[];
+}
+
+export interface ProviderVerificationResult {
+  ok: boolean;
+  detail: string;
+  provider: {
+    name: string;
+    base_url: string;
+    model_count: number;
+    api_key_preview: string;
+  };
 }
 
 async function get<T>(path: string): Promise<T | null> {
@@ -119,12 +171,79 @@ async function get<T>(path: string): Promise<T | null> {
 }
 
 export const fetchHealth = () => get<Health>("/health");
+export const fetchConnections = () => get<ConnectionState>("/v1/connections");
+export const fetchProviders = () => get<ProvidersState>("/v1/providers");
 export const fetchStats = () => get<Stats>("/v1/stats");
 export const fetchMapping = () => get<Mapping>("/v1/models/mapping");
-export const fetchSessions = () =>
-  get<{ count: number; sessions: Session[] }>("/v1/sessions");
 export const fetchSpend = () => get<Spend>("/v1/spend");
 export const fetchRoutingConfig = () => get<RoutingConfigState>("/v1/routing-config");
+
+export async function updateConnections(
+  upstream: string,
+  apiKey: string,
+): Promise<ConnectionState | null> {
+  try {
+    const res = await fetch("/v1/connections", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upstream, api_key: apiKey }),
+    });
+    return res.ok ? ((await res.json()) as ConnectionState) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveProvider(input: {
+  name: string;
+  apiKey: string;
+  baseUrl?: string;
+  models?: string[];
+  plan?: string;
+  verify?: boolean;
+}): Promise<ProvidersState | null> {
+  try {
+    const res = await fetch("/v1/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: input.name,
+        api_key: input.apiKey,
+        base_url: input.baseUrl ?? "",
+        models: input.models ?? [],
+        plan: input.plan ?? "",
+        verify: input.verify ?? false,
+      }),
+    });
+    return res.ok ? ((await res.json()) as ProvidersState) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteProvider(name: string): Promise<ProvidersState | null> {
+  try {
+    const res = await fetch(`/v1/providers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    return res.ok ? ((await res.json()) as ProvidersState) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyProvider(name: string): Promise<ProviderVerificationResult | null> {
+  try {
+    const res = await fetch(`/v1/providers/${encodeURIComponent(name)}/verify`, {
+      method: "POST",
+    });
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text) as ProviderVerificationResult;
+  } catch {
+    return null;
+  }
+}
 
 export async function setSpendLimit(
   window: string,
@@ -156,7 +275,7 @@ export async function clearSpendLimit(window: string): Promise<boolean> {
 }
 
 export async function setRoutingTier(
-  profile: string,
+  mode: string,
   tier: string,
   primary: string,
   fallback: string[],
@@ -166,7 +285,20 @@ export async function setRoutingTier(
     const res = await fetch("/v1/routing-config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "set-tier", profile, tier, primary, fallback, selection_mode: selectionMode }),
+      body: JSON.stringify({ action: "set-tier", mode, tier, primary, fallback, selection_mode: selectionMode }),
+    });
+    return res.ok ? ((await res.json()) as RoutingConfigState) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setDefaultRoutingMode(mode: string): Promise<RoutingConfigState | null> {
+  try {
+    const res = await fetch("/v1/routing-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "set-default-mode", mode }),
     });
     return res.ok ? ((await res.json()) as RoutingConfigState) : null;
   } catch {
@@ -175,14 +307,14 @@ export async function setRoutingTier(
 }
 
 export async function resetRoutingTier(
-  profile: string,
+  mode: string,
   tier: string,
 ): Promise<RoutingConfigState | null> {
   try {
     const res = await fetch("/v1/routing-config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "reset-tier", profile, tier }),
+      body: JSON.stringify({ action: "reset-tier", mode, tier }),
     });
     return res.ok ? ((await res.json()) as RoutingConfigState) : null;
   } catch {
@@ -206,6 +338,7 @@ export async function resetRoutingConfig(): Promise<RoutingConfigState | null> {
 export interface RecentRequest {
   request_id: string;
   timestamp: number;
+  mode: string;
   model: string;
   tier: string;
   method: string;
@@ -216,7 +349,18 @@ export interface RecentRequest {
   cache_family: string;
   cache_breakpoints: number;
   prompt_preview: string;
+  complexity: number;
+  constraint_tags: string[];
+  hint_tags: string[];
+  answer_depth: string;
   feedback_pending: boolean;
+  feedback_signal: string;
+  feedback_ok: boolean;
+  feedback_action: string;
+  feedback_from_tier: string;
+  feedback_to_tier: string;
+  feedback_reason: string;
+  feedback_submitted_at: number;
 }
 
 export interface FeedbackResult {
@@ -241,7 +385,9 @@ export async function submitFeedback(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ request_id: requestId, signal }),
     });
-    return res.ok ? ((await res.json()) as FeedbackResult) : null;
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text) as FeedbackResult;
   } catch {
     return null;
   }

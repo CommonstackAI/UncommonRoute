@@ -19,7 +19,6 @@ from uncommon_route.anthropic_compat import (
     OpenAIToAnthropicStreamConverter,
 )
 from uncommon_route.proxy import create_app
-from uncommon_route.session import SessionConfig, SessionStore
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 
 
@@ -565,7 +564,7 @@ class TestStreamConverter:
         converter.feed(_make_oai_sse({
             "choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}],
         }))
-        first = converter.finish()
+        converter.finish()
         second = converter.finish()
         assert second == []
 
@@ -616,11 +615,9 @@ class TestAnthropicToOpenAIStreamConverter:
 
 @pytest.fixture
 def messages_client() -> TestClient:
-    session_store = SessionStore(SessionConfig(enabled=True, timeout_s=300))
     spend_control = SpendControl(storage=InMemorySpendControlStorage())
     app = create_app(
         upstream="http://127.0.0.1:1/fake",
-        session_store=session_store,
         spend_control=spend_control,
     )
     return TestClient(app, raise_server_exceptions=False)
@@ -662,7 +659,8 @@ class TestMessagesEndpoint:
 
     def test_spend_limit_returns_anthropic_error(self) -> None:
         sc = SpendControl(storage=InMemorySpendControlStorage())
-        sc.set_limit("per_request", 0.0001)
+        sc.set_limit("session", 0.001)
+        sc.record(0.01)
         app = create_app(
             upstream="http://127.0.0.1:1/fake",
             spend_control=sc,
@@ -747,8 +745,8 @@ class TestMessagesEndpoint:
             body = captured["body"]
             assert isinstance(body, dict)
             assert body["model"] == "anthropic/claude-sonnet-4.6"
-            assert body["system"][-1]["cache_control"] == {"type": "ephemeral"}
-            assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert body["system"][-1]["cache_control"]["type"] == "ephemeral"
+            assert body["tools"][-1]["cache_control"]["type"] == "ephemeral"
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "env-key-123"
@@ -866,8 +864,8 @@ class TestNativeAnthropicTransportForChatCompletions:
             assert captured["url"] == "https://api.commonstack.ai/v1/messages"
             body = captured["body"]
             assert isinstance(body, dict)
-            assert body["system"][-1]["cache_control"] == {"type": "ephemeral"}
-            assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert body["system"][-1]["cache_control"]["type"] == "ephemeral"
+            assert body["tools"][-1]["cache_control"]["type"] == "ephemeral"
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "env-key-123"

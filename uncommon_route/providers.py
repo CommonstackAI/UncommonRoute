@@ -30,7 +30,6 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from uncommon_route.paths import data_dir
 
@@ -266,8 +265,8 @@ def cmd_provider(args: list[str]) -> None:
                 print(f"  Key verified: {detail}")
             else:
                 print(f"  Warning: key verification failed — {detail}")
-                print(f"  The key was saved but may not work. Check with: uncommon-route doctor")
-        print(f"  These models will be prioritized when routing to their tier")
+                print("  The key was saved but may not work. Check with: uncommon-route doctor")
+        print("  These models will be prioritized when routing to their tier")
 
     elif sub == "remove":
         if len(args) < 2:

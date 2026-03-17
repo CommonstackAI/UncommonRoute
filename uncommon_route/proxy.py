@@ -1,8 +1,9 @@
 """OpenAI-compatible proxy server for UncommonRoute.
 
 Accepts /v1/chat/completions, runs route() for virtual model names
-(uncommon-route/auto, eco, premium, free), replaces the model field,
-and forwards to a configurable upstream OpenAI-compatible API.
+(`uncommon-route/auto`, `uncommon-route/fast`, `uncommon-route/best`),
+replaces the model field, and forwards to a configurable upstream
+OpenAI-compatible API.
 
 Non-routing model names are passed through unchanged.
 
@@ -18,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -28,6 +30,7 @@ from collections.abc import AsyncGenerator as _LifespanGen
 from contextlib import asynccontextmanager
 
 import httpx
+
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -53,27 +56,29 @@ from uncommon_route.router.config import (
     DEFAULT_CONFIG,
     DEFAULT_MODEL_PRICING,
     VIRTUAL_MODEL_IDS,
-    get_tier_configs,
-    routing_profile_from_model,
+    routing_mode_from_model,
     virtual_model_entries,
 )
 from uncommon_route.router.structural import estimate_tokens, estimate_output_budget
-from uncommon_route.router.types import RequestRequirements, RoutingProfile, Tier
+from uncommon_route.router.types import ModelPricing, RequestRequirements, RoutingMode, Tier, WorkloadHints
 from uncommon_route.semantic import SemanticCallResult, SemanticCompressor
 from uncommon_route.semantic import SideChannelTaskConfig, score_semantic_quality
-from uncommon_route.session import (
-    SessionStore,
-    derive_session_id,
-    get_session_id,
-    hash_request_content,
-)
+from uncommon_route.session import derive_session_id
 from uncommon_route.spend_control import SpendControl
 from uncommon_route.stats import RouteRecord, RouteStats
 from uncommon_route.feedback import FeedbackCollector
 from uncommon_route.model_experience import ModelExperienceStore
-from uncommon_route.providers import ProvidersConfig, load_providers
+from uncommon_route.paths import data_dir
+from uncommon_route.providers import (
+    ProvidersConfig,
+    add_provider,
+    load_providers,
+    remove_provider,
+    verify_key,
+)
 from uncommon_route.model_map import ModelMapper
 from uncommon_route.routing_config_store import RoutingConfigStore
+from uncommon_route.connections_store import ConnectionsStore, mask_api_key, resolve_primary_connection
 from uncommon_route.anthropic_compat import (
     anthropic_to_openai_request,
     anthropic_to_openai_response,
@@ -84,10 +89,12 @@ from uncommon_route.anthropic_compat import (
     OpenAIToAnthropicStreamConverter,
 )
 
+logger = logging.getLogger("uncommon-route")
+_debug_log = logging.getLogger("uncommon_route.debug_routing")
+
 VERSION = "0.2.9"
-DEFAULT_UPSTREAM = os.environ.get("UNCOMMON_ROUTE_UPSTREAM", "")
+DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
-VIRTUAL_MODEL = VIRTUAL_MODEL_IDS[RoutingProfile.AUTO]
 
 _SETUP_GUIDE = """\
 No upstream API configured. UncommonRoute is a routing layer — it needs an upstream LLM API to forward requests to.
@@ -117,6 +124,17 @@ _WRAPPER_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _WRAPPER_TAGS = {"system-reminder", "assistant-reminder", "user-prompt-submit-hook"}
+
+_CURRENT_MSG_MARKER_RE = re.compile(
+    r"\[Current\s+message\s*[-–—]\s*respond\s+to\s+this\]",
+    re.IGNORECASE,
+)
+_HISTORY_CONTEXT_MARKER_RE = re.compile(
+    r"^\[(?:Chat\s+messages\s+since\s+your\s+last\s+reply|Previous\s+conversation|Conversation\s+history)\s*[-–—]\s*for\s+context\]",
+    re.IGNORECASE,
+)
+_SENDER_PREFIX_RE = re.compile(r"^(?:User|Human|Assistant|Tool(?::[^\n]*)?):\s*", re.IGNORECASE)
+
 _WRAPPER_MARKERS = (
     "the following skills are available for use with the skill tool",
     "as you answer the user's questions, you can use the following context",
@@ -132,9 +150,17 @@ _WRAPPER_MARKERS = (
 )
 
 
+_active_pricing: dict[str, ModelPricing] = {}
+
+
+def _get_pricing() -> dict[str, ModelPricing]:
+    """Return live pricing when available, otherwise static fallback."""
+    return _active_pricing or DEFAULT_MODEL_PRICING
+
+
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Compute dollar cost from token counts using the model pricing table."""
-    mp = DEFAULT_MODEL_PRICING.get(model)
+    mp = _get_pricing().get(model)
     if mp is None:
         return 0.0
     return (input_tokens / 1_000_000) * mp.input_price + (output_tokens / 1_000_000) * mp.output_price
@@ -145,7 +171,7 @@ def _estimate_baseline_cost(input_tokens: int, output_tokens: int) -> float:
 
 
 def _estimate_cost_from_usage(model: str, usage: UsageMetrics) -> float | None:
-    pricing = DEFAULT_MODEL_PRICING.get(model)
+    pricing = _get_pricing().get(model)
     if pricing is None:
         return None
     return estimate_usage_cost(
@@ -158,14 +184,14 @@ def _estimate_cost_from_usage(model: str, usage: UsageMetrics) -> float | None:
 
 
 def _parse_usage_cost(content: bytes, model: str) -> float | None:
-    usage = parse_usage_metrics(content, model, DEFAULT_MODEL_PRICING)
+    usage = parse_usage_metrics(content, model, _get_pricing())
     if usage is None:
         return None
     return usage.actual_cost if usage.actual_cost is not None else _estimate_cost_from_usage(model, usage)
 
 
 def _parse_usage_performance(content: bytes) -> tuple[float | None, float | None]:
-    usage = parse_usage_metrics(content, "", DEFAULT_MODEL_PRICING)
+    usage = parse_usage_metrics(content, "", _get_pricing())
     if usage is None:
         return None, None
     return usage.ttft_ms, usage.tps
@@ -218,8 +244,35 @@ def _strip_wrapper_prefix(text: str) -> str:
     return remaining.strip()
 
 
+def _extract_current_message(text: str) -> str | None:
+    """Extract the actual user message from bracket-marker history context.
+
+    Frameworks like OpenClaw wrap conversation history and the current message
+    into a single user content string:
+
+        [Chat messages since your last reply - for context]
+        User: previous message
+        Assistant: previous reply
+
+        [Current message - respond to this]
+        User: hi
+
+    This function returns the text after the current-message marker, stripped
+    of any sender prefix like "User: ".  Returns None if no marker is found.
+    """
+    match = _CURRENT_MSG_MARKER_RE.search(text)
+    if not match:
+        return None
+    after = text[match.end():].strip()
+    after = _SENDER_PREFIX_RE.sub("", after).strip()
+    return after if after else None
+
+
 def _extract_user_prompt_text(value: Any) -> str:
     if isinstance(value, str):
+        current = _extract_current_message(value)
+        if current:
+            return current
         cleaned = _strip_wrapper_prefix(value)
         if cleaned:
             return cleaned
@@ -230,6 +283,10 @@ def _extract_user_prompt_text(value: Any) -> str:
             if not isinstance(item, dict) or item.get("type") not in {"text", "input_text"}:
                 continue
             raw = str(item.get("text", ""))
+            current = _extract_current_message(raw)
+            if current:
+                parts.append(current)
+                continue
             cleaned = _strip_wrapper_prefix(raw)
             if cleaned:
                 parts.append(cleaned)
@@ -246,14 +303,43 @@ def _extract_prompt(body: dict) -> tuple[str, str | None, int]:
     prompt = ""
     system_prompt: str | None = None
 
+    if _debug_log.isEnabledFor(logging.DEBUG):
+        _debug_log.debug(
+            "=== REQUEST STRUCTURE === messages=%d roles=%s",
+            len(messages),
+            [m.get("role") for m in messages],
+        )
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            raw_text = _content_text(content) if not isinstance(content, str) else content
+            _debug_log.debug(
+                "  msg[%d] role=%s content_type=%s len=%d preview=%.200s",
+                i, role, type(content).__name__, len(raw_text), raw_text[:200],
+            )
+
     for msg in reversed(messages):
         if msg.get("role") == "user" and not prompt:
-            candidate = _extract_user_prompt_text(msg.get("content", ""))
+            raw_content = msg.get("content", "")
+            candidate = _extract_user_prompt_text(raw_content)
+            if _debug_log.isEnabledFor(logging.DEBUG):
+                raw_text = _content_text(raw_content) if not isinstance(raw_content, str) else raw_content
+                _debug_log.debug(
+                    "  LAST USER MSG: raw_len=%d extracted_len=%d raw_preview=%.300s extracted=%.300s",
+                    len(raw_text), len(candidate), raw_text[:300], candidate[:300],
+                )
             if candidate:
                 prompt = candidate
         if msg.get("role") == "system" and system_prompt is None:
             text = _content_text(msg.get("content", ""))
             system_prompt = text if text else None
+
+    if _debug_log.isEnabledFor(logging.DEBUG):
+        _debug_log.debug(
+            "  EXTRACTED: prompt_len=%d prompt=%.200s system_len=%d",
+            len(prompt), prompt[:200],
+            len(system_prompt) if system_prompt else 0,
+        )
 
     return prompt, system_prompt, max_tokens
 
@@ -276,8 +362,7 @@ def _build_debug_response(prompt: str, system_prompt: str | None, routing_config
         "",
         f"Tier Boundaries: SIMPLE <{tier_boundaries.simple_medium:.2f}"
         f" | MEDIUM <{tier_boundaries.medium_complex:.2f}"
-        f" | COMPLEX <{tier_boundaries.complex_reasoning:.2f}"
-        f" | REASONING >={tier_boundaries.complex_reasoning:.2f}",
+        f" | COMPLEX >={tier_boundaries.medium_complex:.2f}",
     ]
 
     if decision.fallback_chain:
@@ -345,14 +430,30 @@ class UpstreamSemanticCompressor:
         self,
         *,
         upstream_chat: str,
+        primary_api_key: str,
         providers_config: ProvidersConfig,
         model_mapper: ModelMapper,
         composition_policy: CompositionPolicy,
     ) -> None:
         self._upstream_chat = upstream_chat
+        self._primary_api_key = primary_api_key
         self._providers = providers_config
         self._mapper = model_mapper
         self._policy = composition_policy
+
+    def rebind_primary(
+        self,
+        *,
+        upstream_chat: str,
+        primary_api_key: str,
+        model_mapper: ModelMapper,
+    ) -> None:
+        self._upstream_chat = upstream_chat
+        self._primary_api_key = primary_api_key
+        self._mapper = model_mapper
+
+    def rebind_providers(self, providers_config: ProvidersConfig) -> None:
+        self._providers = providers_config
 
     async def summarize_tool_result(
         self,
@@ -519,43 +620,24 @@ class UpstreamSemanticCompressor:
             headers["authorization"] = f"Bearer {provider_entry.api_key}"
         else:
             auth = request.headers.get("authorization")
-            env_key = (
-                os.environ.get("UNCOMMON_ROUTE_API_KEY", "")
-                or os.environ.get("COMMONSTACK_API_KEY", "")
-            )
             if auth:
                 headers["authorization"] = auth
-            elif env_key:
-                headers["authorization"] = f"Bearer {env_key}"
+            elif self._primary_api_key:
+                headers["authorization"] = f"Bearer {self._primary_api_key}"
         return target_chat_url, headers, upstream_model
 
 
 _OPENCLAW_SESSION_HEADER = "x-openclaw-session-key"
 
 
-def _resolve_session(
-    request: Request,
-    body: dict,
-    session_store: SessionStore,
-) -> str | None:
-    """Resolve session ID from header or message content.
-
-    Checks (in order): configured header (x-session-id), OpenClaw's
-    session header (x-openclaw-session-key), then derives from the first
-    user message as a last resort.
-    """
+def _resolve_session_id(request: Request, body: dict) -> str | None:
+    """Derive a session ID for cache keys and composition (not routing)."""
     raw_headers = {k: v for k, v in request.headers.items()}
-    sid = get_session_id(raw_headers, session_store.config.header_name)
-    if sid:
-        return sid
-    sid = get_session_id(raw_headers, _OPENCLAW_SESSION_HEADER)
+    sid = raw_headers.get("x-session-id") or raw_headers.get(_OPENCLAW_SESSION_HEADER)
     if sid:
         return sid
     messages = body.get("messages", [])
     return derive_session_id(messages)
-
-
-_TIER_RANK: dict[str, int] = {"SIMPLE": 0, "MEDIUM": 1, "COMPLEX": 2, "REASONING": 3}
 
 
 def _classify_step(body: dict) -> tuple[str, list[str]]:
@@ -616,18 +698,26 @@ def _has_vision_content(value: Any) -> bool:
     return False
 
 
-def _extract_requirements(body: dict, step_type: str) -> RequestRequirements:
+def _extract_requirements(body: dict, step_type: str) -> tuple[RequestRequirements, WorkloadHints]:
     messages = body.get("messages", [])
     raw_tools = body.get("tools") or body.get("customTools") or []
     has_vision = any(_has_vision_content(msg.get("content")) for msg in messages if isinstance(msg, dict))
     needs_tool_calling = bool(raw_tools)
     is_agentic = step_type != "general" or needs_tool_calling
-    return RequestRequirements(
+    response_format = body.get("response_format")
+    wants_structured_output = isinstance(response_format, dict) or (
+        isinstance(response_format, str) and response_format.strip().lower() in {"json", "json_schema"}
+    )
+    requirements = RequestRequirements(
         needs_tool_calling=needs_tool_calling,
         needs_vision=has_vision,
         prefers_reasoning=False,
-        is_agentic=is_agentic,
     )
+    hints = WorkloadHints(
+        is_agentic=is_agentic,
+        needs_structured_output=wants_structured_output,
+    )
+    return requirements, hints
 
 
 def _tool_selection_tier_cap(prompt: str, step_type: str) -> Tier | None:
@@ -765,37 +855,37 @@ def _set_route_strategy_headers(
         _set_header(headers, "x-uncommon-route-cache-key", cache_plan.prompt_cache_key)
 
 
-def _selection_profiles_payload(config) -> dict[str, dict[str, float]]:
+def _selection_modes_payload(config) -> dict[str, dict[str, float]]:
     return {
-        profile.value: {
-            "editorial": weights.editorial,
-            "cost": weights.cost,
-            "latency": weights.latency,
-            "reliability": weights.reliability,
-            "feedback": weights.feedback,
-            "cache_affinity": weights.cache_affinity,
-            "byok": weights.byok,
-            "free_bias": weights.free_bias,
-            "local_bias": weights.local_bias,
-            "reasoning_bias": weights.reasoning_bias,
+        mode.value: {
+            "editorial": mode_config.selection.editorial,
+            "cost": mode_config.selection.cost,
+            "latency": mode_config.selection.latency,
+            "reliability": mode_config.selection.reliability,
+            "feedback": mode_config.selection.feedback,
+            "cache_affinity": mode_config.selection.cache_affinity,
+            "byok": mode_config.selection.byok,
+            "free_bias": mode_config.selection.free_bias,
+            "local_bias": mode_config.selection.local_bias,
+            "reasoning_bias": mode_config.selection.reasoning_bias,
         }
-        for profile, weights in config.selection_profiles.items()
+        for mode, mode_config in config.modes.items()
     }
 
 
-def _bandit_profiles_payload(config) -> dict[str, dict[str, object]]:
+def _bandit_modes_payload(config) -> dict[str, dict[str, object]]:
     return {
-        profile.value: {
-            "enabled": cfg.enabled,
-            "reward_weight": cfg.reward_weight,
-            "exploration_weight": cfg.exploration_weight,
-            "warmup_pulls": cfg.warmup_pulls,
-            "min_samples_for_guardrail": cfg.min_samples_for_guardrail,
-            "min_reliability": cfg.min_reliability,
-            "max_cost_ratio": cfg.max_cost_ratio,
-            "enabled_tiers": [tier.value for tier in cfg.enabled_tiers],
+        mode.value: {
+            "enabled": mode_config.bandit.enabled,
+            "reward_weight": mode_config.bandit.reward_weight,
+            "exploration_weight": mode_config.bandit.exploration_weight,
+            "warmup_pulls": mode_config.bandit.warmup_pulls,
+            "min_samples_for_guardrail": mode_config.bandit.min_samples_for_guardrail,
+            "min_reliability": mode_config.bandit.min_reliability,
+            "max_cost_ratio": mode_config.bandit.max_cost_ratio,
+            "enabled_tiers": [tier.value for tier in mode_config.bandit.enabled_tiers],
         }
-        for profile, cfg in config.bandit_profiles.items()
+        for mode, mode_config in config.modes.items()
     }
 
 
@@ -835,45 +925,31 @@ def _serialize_fallback_chain(fallback_chain: list[Any]) -> list[dict[str, objec
     ]
 
 
-def _parse_profile_value(value: str) -> RoutingProfile:
-    return RoutingProfile(str(value).strip().lower())
+def _parse_mode_value(value: str) -> RoutingMode:
+    return RoutingMode(str(value).strip().lower())
 
 
 def _parse_tier_value(value: str) -> Tier:
     return Tier(str(value).strip().upper())
 
 
-def _preview_session_escalation(
-    session_entry: Any,
-    tier_configs: dict[str, dict[str, Any]],
-) -> tuple[str, str] | None:
-    tier_order = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"]
-    try:
-        idx = tier_order.index(session_entry.tier)
-    except ValueError:
-        return None
-    if idx >= len(tier_order) - 1:
-        return None
-    next_tier = tier_order[idx + 1]
-    next_cfg = tier_configs.get(next_tier)
-    if not next_cfg:
-        return None
-    return str(next_cfg["primary"]), next_tier
-
-
-def _normalize_selector_body(body: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def _normalize_selector_body(
+    body: dict[str, Any],
+    *,
+    default_mode: RoutingMode = RoutingMode.AUTO,
+) -> tuple[dict[str, Any] | None, str | None]:
     payload = dict(body)
     model = str(payload.get("model") or "").strip().lower()
-    profile_value = payload.get("profile")
-    if profile_value is not None and not model:
+    mode_value = payload.get("mode")
+    if mode_value is not None and not model:
         try:
-            model = VIRTUAL_MODEL_IDS[_parse_profile_value(str(profile_value))]
+            model = VIRTUAL_MODEL_IDS[_parse_mode_value(str(mode_value))]
         except ValueError:
-            return None, "Invalid profile"
+            return None, "Invalid mode"
         payload["model"] = model
     if payload.get("messages"):
         if not payload.get("model"):
-            payload["model"] = VIRTUAL_MODEL_IDS[RoutingProfile.AUTO]
+            payload["model"] = VIRTUAL_MODEL_IDS[default_mode]
         return payload, None
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -885,13 +961,12 @@ def _normalize_selector_body(body: dict[str, Any]) -> tuple[dict[str, Any] | Non
     messages.append({"role": "user", "content": prompt})
     payload["messages"] = messages
     if not payload.get("model"):
-        payload["model"] = VIRTUAL_MODEL_IDS[RoutingProfile.AUTO]
+        payload["model"] = VIRTUAL_MODEL_IDS[default_mode]
     return payload, None
 
 
 def create_app(
-    upstream: str = DEFAULT_UPSTREAM,
-    session_store: SessionStore | None = None,
+    upstream: str | None = DEFAULT_UPSTREAM,
     spend_control: SpendControl | None = None,
     providers_config: ProvidersConfig | None = None,
     route_stats: RouteStats | None = None,
@@ -902,24 +977,25 @@ def create_app(
     semantic_compressor: SemanticCompressor | None = None,
     model_experience: ModelExperienceStore | None = None,
     routing_config_store: RoutingConfigStore | None = None,
+    connections_store: ConnectionsStore | None = None,
 ) -> Starlette:
-    """Create the ASGI application wired to the given upstream base URL.
-
-    Args:
-        upstream: Base URL for the upstream OpenAI-compatible API.
-        session_store: Optional SessionStore for sticky sessions.
-        spend_control: Optional SpendControl for spending limits.
-        providers_config: Optional BYOK provider config for user-keyed models.
-        route_stats: Optional RouteStats for per-request analytics.
-        feedback: Optional FeedbackCollector for online learning.
-        model_mapper: Optional ModelMapper for upstream model name translation.
-    """
-    _sessions = session_store or SessionStore()
+    """Create the ASGI application wired to the given upstream base URL."""
+    _cli_upstream_override = str(upstream or "").strip() or None
+    _connections_store = connections_store or ConnectionsStore()
+    _effective_connection = resolve_primary_connection(
+        cli_upstream=_cli_upstream_override,
+        store=_connections_store,
+    )
+    upstream = _effective_connection.upstream
+    _primary_api_key = _effective_connection.api_key
     _spend = spend_control or SpendControl()
     _providers = providers_config or load_providers()
     _stats = route_stats or RouteStats()
     _model_experience = model_experience or ModelExperienceStore()
-    _feedback = feedback or FeedbackCollector(model_experience=_model_experience)
+    _feedback = feedback or FeedbackCollector(
+        model_experience=_model_experience,
+        buffer_path=data_dir() / "feedback_buffer.json",
+    )
     if getattr(_feedback, "_model_experience", None) is None:
         _feedback._model_experience = _model_experience
     _mapper = model_mapper or ModelMapper(upstream)
@@ -929,53 +1005,182 @@ def create_app(
     _routing_store = routing_config_store or RoutingConfigStore()
     _routing_config = _routing_store.config()
 
-    upstream_chat = f"{upstream.rstrip('/')}/chat/completions"
-    if _semantic is None and upstream:
-        _semantic = UpstreamSemanticCompressor(
-            upstream_chat=upstream_chat,
-            providers_config=_providers,
-            model_mapper=_mapper,
-            composition_policy=_composition_policy,
+    def _upstream_chat_url(base_url: str) -> str:
+        return f"{str(base_url or '').rstrip('/')}/chat/completions"
+
+    def _build_semantic_compressor() -> SemanticCompressor | None:
+        if not upstream:
+            return semantic_compressor if semantic_compressor is not None and not isinstance(semantic_compressor, UpstreamSemanticCompressor) else None
+        if semantic_compressor is not None and not isinstance(semantic_compressor, UpstreamSemanticCompressor):
+            return semantic_compressor
+        compressor = _semantic if isinstance(_semantic, UpstreamSemanticCompressor) else None
+        if compressor is None:
+            compressor = UpstreamSemanticCompressor(
+                upstream_chat=_upstream_chat_url(upstream),
+                primary_api_key=_primary_api_key,
+                providers_config=_providers,
+                model_mapper=_mapper,
+                composition_policy=_composition_policy,
+            )
+        else:
+            compressor.rebind_primary(
+                upstream_chat=_upstream_chat_url(upstream),
+                primary_api_key=_primary_api_key,
+                model_mapper=_mapper,
+            )
+            compressor.rebind_providers(_providers)
+        return compressor
+
+    _semantic = _build_semantic_compressor()
+
+    def _refresh_active_pricing() -> None:
+        """Merge dynamic pricing (from discovery) with static fallback."""
+        nonlocal _routing_config
+        global _active_pricing
+        merged = dict(DEFAULT_MODEL_PRICING)
+        dynamic = _mapper.dynamic_pricing
+        if dynamic:
+            merged.update(dynamic)
+        _active_pricing = merged
+
+        import copy
+        updated = copy.deepcopy(_routing_store.config())
+        dynamic_caps = _mapper.dynamic_capabilities
+        if dynamic_caps:
+            merged_caps = dict(updated.model_capabilities)
+            merged_caps.update(dynamic_caps)
+            updated.model_capabilities = merged_caps
+        _routing_config = updated
+
+    def _reload_providers() -> ProvidersConfig:
+        nonlocal _providers, _semantic
+        _providers = load_providers()
+        if isinstance(_semantic, UpstreamSemanticCompressor):
+            _semantic.rebind_providers(_providers)
+        return _providers
+
+    def _current_connection_payload() -> dict[str, Any]:
+        effective = resolve_primary_connection(
+            cli_upstream=_cli_upstream_override,
+            store=_connections_store,
         )
+        return {
+            "source": effective.source,
+            "upstream_source": effective.upstream_source,
+            "api_key_source": effective.api_key_source,
+            "editable": effective.editable,
+            "upstream": upstream,
+            "has_api_key": bool(_primary_api_key),
+            "api_key_preview": mask_api_key(_primary_api_key),
+            "provider": _mapper.provider,
+            "is_gateway": _mapper.is_gateway,
+            "discovered": _mapper.discovered,
+            "upstream_model_count": _mapper.upstream_model_count,
+            "pool_size": _mapper.pool_size,
+            "unresolved": _mapper.unresolved_models(),
+            "pricing_source": "dynamic" if _mapper.discovered else "static",
+        }
+
+    async def _reload_primary_connection(
+        *,
+        next_upstream: str,
+        next_api_key: str,
+        persist: bool,
+    ) -> tuple[bool, dict[str, Any]]:
+        nonlocal upstream, _primary_api_key, _mapper, _semantic
+        candidate_upstream = str(next_upstream or "").strip()
+        candidate_api_key = str(next_api_key or "").strip()
+        candidate_mapper = ModelMapper(candidate_upstream)
+
+        if candidate_upstream:
+            count = await candidate_mapper.discover(candidate_api_key or None)
+            if count <= 0:
+                detail = candidate_mapper.provider
+                if detail != "unknown":
+                    detail = f"{detail} (discovery failed)"
+                return False, {
+                    "error": "Unable to validate upstream connection",
+                    "detail": detail or "discovery failed",
+                }
+
+        previous_upstream = upstream
+        previous_api_key = _primary_api_key
+        previous_mapper = _mapper
+        previous_semantic = _semantic
+
+        try:
+            upstream = candidate_upstream
+            _primary_api_key = candidate_api_key
+            _mapper = candidate_mapper
+            _semantic = _build_semantic_compressor()
+            _refresh_active_pricing()
+            if persist:
+                _connections_store.set_primary(
+                    upstream=candidate_upstream,
+                    api_key=candidate_api_key,
+                )
+            return True, _current_connection_payload()
+        except Exception as exc:  # noqa: BLE001
+            upstream = previous_upstream
+            _primary_api_key = previous_api_key
+            _mapper = previous_mapper
+            _semantic = previous_semantic
+            _refresh_active_pricing()
+            return False, {"error": "Failed to reload primary connection", "detail": str(exc)}
 
     async def _on_startup() -> None:
         if not upstream:
             return
-        api_key = (
-            os.environ.get("UNCOMMON_ROUTE_API_KEY", "")
-            or os.environ.get("COMMONSTACK_API_KEY", "")
-        ) or None
-        count = await _mapper.discover(api_key)
+        count = await _mapper.discover(_primary_api_key or None)
         if count > 0:
             gw_tag = " (gateway)" if _mapper.is_gateway else ""
             print(f"[UncommonRoute] Discovered {count} models from {_mapper.provider}{gw_tag}")
+            print(f"[UncommonRoute] Model pool: {count} models with live pricing + inferred capabilities")
+            _refresh_active_pricing()
             unresolved = _mapper.unresolved_models()
             if unresolved:
                 names = ", ".join(unresolved[:5])
                 extra = f" (+{len(unresolved) - 5} more)" if len(unresolved) > 5 else ""
-                print(f"[UncommonRoute] Warning: {len(unresolved)} internal model(s) not found upstream: {names}{extra}")
+                print(f"[UncommonRoute] Note: {len(unresolved)} legacy model(s) not matched upstream: {names}{extra}")
         elif _mapper.provider != "unknown":
-            print(f"[UncommonRoute] Warning: could not discover models from {_mapper.provider} — using static aliases")
+            print(f"[UncommonRoute] Warning: could not discover models from {_mapper.provider} — using static config")
+
+    _rediscovery_task = None
+
+    async def _rediscovery_loop() -> None:
+        """Periodically re-discover upstream models to track changes."""
+        import asyncio
+        interval = float(os.environ.get("UNCOMMON_ROUTE_REDISCOVERY_INTERVAL", "300"))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                count = await _mapper.discover(_primary_api_key or None)
+                if count > 0:
+                    _refresh_active_pricing()
+                    logger.info("Rediscovery: %d models from %s", count, _mapper.provider)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Rediscovery failed: %s", exc)
 
     def _selector_state(
         *,
-        bucket_profile: RoutingProfile | None = None,
+        bucket_mode: RoutingMode | None = None,
         bucket_tier: Tier | None = None,
     ) -> dict[str, Any]:
         current_config = _routing_config
         state: dict[str, Any] = {
-            "selection_profiles": _selection_profiles_payload(current_config),
-            "bandit_profiles": _bandit_profiles_payload(current_config),
+            "default_mode": _routing_store.default_mode().value,
+            "selection_modes": _selection_modes_payload(current_config),
+            "bandit_modes": _bandit_modes_payload(current_config),
             "experience": _model_experience.summary(),
         }
-        if bucket_profile is not None and bucket_tier is not None:
-            state["bucket"] = _model_experience.bucket_summary(bucket_profile, bucket_tier)
+        if bucket_mode is not None and bucket_tier is not None:
+            state["bucket"] = _model_experience.bucket_summary(bucket_mode, bucket_tier)
         return state
 
     def _build_selector_preview(body: dict[str, Any], request: Request) -> dict[str, Any]:
         model = str(body.get("model") or "").strip().lower()
-        routing_profile = routing_profile_from_model(model)
-        if routing_profile is None:
+        routing_mode = routing_mode_from_model(model)
+        if routing_mode is None:
             return {
                 "virtual": False,
                 "requested_model": model,
@@ -985,160 +1190,50 @@ def create_app(
             }
 
         prompt, system_prompt, max_tokens = _extract_prompt(body)
-        session_id = _resolve_session(request, body, _sessions)
-        cached_session = _sessions.get(session_id) if session_id else None
         step_type, tool_names = _classify_step(body)
-        requirements = _extract_requirements(body, step_type)
-        tier_cap = _tool_selection_tier_cap(prompt, step_type)
-        is_lightweight = step_type == "tool-result-followup"
+        requirements, hints = _extract_requirements(body, step_type)
         user_keyed = _providers.keyed_models() or None
         decision = route(
             prompt,
             system_prompt,
             max_tokens,
             config=_routing_config,
-            routing_profile=routing_profile,
+            routing_mode=routing_mode,
             request_requirements=requirements,
+            workload_hints=hints,
             user_keyed_models=user_keyed,
             model_experience=_model_experience,
-            tier_cap=tier_cap,
+            pricing=_get_pricing(),
+            available_models=_mapper.available_models if _mapper.discovered else None,
+            model_capabilities=_routing_config.model_capabilities,
         )
-
-        selected_model = decision.model
-        served_tier = decision.tier.value
-        decision_tier = decision.tier.value
-        profile_value = decision.profile.value
-        route_method = "cascade"
-        reasoning = decision.reasoning
-        if tier_cap is not None:
-            reasoning = f"{reasoning} | tool-selection-cap<={tier_cap.value}"
-        estimated_cost = decision.cost_estimate
-        session_preview: dict[str, Any] = {
-            "id": session_id,
-            "applied": False,
-            "action": "none",
-        }
-
-        active_tier_configs = {
-            tier.value: {
-                "primary": tc.primary,
-                "fallback": tc.fallback,
-                "hard_pin": tc.hard_pin,
-                "selection_mode": "hard-pin" if tc.hard_pin else "adaptive",
-            }
-            for tier, tc in get_tier_configs(
-                _routing_config,
-                decision.profile,
-                agentic=decision.profile is RoutingProfile.AGENTIC
-                or (decision.profile is RoutingProfile.AUTO and requirements.is_agentic),
-            ).items()
-        }
-        active_tier_config = get_tier_configs(
-            _routing_config,
-            decision.profile,
-            agentic=decision.profile is RoutingProfile.AGENTIC
-            or (decision.profile is RoutingProfile.AUTO and requirements.is_agentic),
-        )[decision.tier]
-        hard_pinned = active_tier_config.hard_pin
-
-        if cached_session:
-            session_preview["cached"] = {
-                "model": cached_session.model,
-                "tier": cached_session.tier,
-                "profile": cached_session.profile,
-                "requests": cached_session.request_count,
-                "strikes": cached_session.strikes,
-                "escalated": cached_session.escalated,
-            }
-
-        if cached_session and cached_session.profile == profile_value:
-            session_rank = _TIER_RANK.get(cached_session.tier, 1)
-            decision_rank = _TIER_RANK.get(decision.tier.value, 1)
-            if hard_pinned:
-                route_method = "hard-pin"
-                reasoning = f"{decision.reasoning} | hard-pin"
-                session_preview["applied"] = True
-                session_preview["action"] = "hard-pin"
-                session_preview["target"] = {"model": selected_model, "tier": served_tier}
-            elif is_lightweight:
-                route_method = "step-aware"
-                reasoning = f"{decision.reasoning} | {step_type}"
-                session_preview["action"] = "step-aware"
-            elif decision_rank > session_rank:
-                route_method = "session-upgrade"
-                reasoning = f"{decision.reasoning} | upgrade {cached_session.tier}->{decision_tier}"
-                session_preview["applied"] = True
-                session_preview["action"] = "upgrade"
-                session_preview["target"] = {"model": selected_model, "tier": served_tier}
-            else:
-                selected_model = cached_session.model
-                served_tier = cached_session.tier
-                route_method = "session-hold"
-                reasoning = (
-                    f"session-hold ({session_id[:8] if session_id else '?'}...)"
-                    f" {served_tier}>={decision.tier.value}"
-                )
-                full_text = f"{system_prompt or ''} {prompt}".strip()
-                estimated_cost = _estimate_cost(
-                    selected_model,
-                    estimate_tokens(full_text),
-                    min(max_tokens, estimate_output_budget(prompt, served_tier)),
-                )
-                session_preview["applied"] = True
-                session_preview["action"] = "hold"
-                session_preview["target"] = {"model": selected_model, "tier": served_tier}
-
-            if session_id and not is_lightweight and not hard_pinned:
-                content_hash = hash_request_content(prompt, tool_names or None)
-                previous_hash = cached_session.recent_hashes[-1] if cached_session.recent_hashes else ""
-                next_strikes = (cached_session.strikes + 1) if previous_hash == content_hash else 0
-                if next_strikes >= 2 and not cached_session.escalated:
-                    escalation = _preview_session_escalation(cached_session, active_tier_configs)
-                    if escalation is not None:
-                        esc_model, esc_tier = escalation
-                        selected_model = esc_model
-                        served_tier = esc_tier
-                        route_method = "escalated"
-                        reasoning = f"escalated {cached_session.tier}->{esc_tier}"
-                        estimated_cost = _estimate_cost(
-                            selected_model,
-                            estimate_tokens(f"{system_prompt or ''} {prompt}".strip()),
-                            min(max_tokens, estimate_output_budget(prompt, served_tier)),
-                        )
-                        session_preview["applied"] = True
-                        session_preview["action"] = "escalate"
-                        session_preview["target"] = {"model": selected_model, "tier": served_tier}
-                        session_preview["next_strikes"] = next_strikes
-        elif cached_session and cached_session.profile != profile_value:
-            session_preview["action"] = "profile-reset"
 
         return {
             "virtual": True,
             "requested_model": model,
-            "requested_profile": routing_profile.value,
-            "served_model": selected_model,
-            "decision_model": decision.model,
-            "served_tier": served_tier,
-            "decision_tier": decision_tier,
-            "profile": profile_value,
-            "method": route_method,
-            "reasoning": reasoning,
+            "requested_mode": routing_mode.value,
+            "served_model": decision.model,
+            "served_tier": decision.tier.value,
+            "mode": decision.mode.value,
+            "method": decision.method,
+            "reasoning": decision.reasoning,
             "confidence": round(decision.confidence, 6),
-            "estimated_cost": round(estimated_cost, 8),
+            "estimated_cost": round(decision.cost_estimate, 8),
             "savings": round(decision.savings, 6),
             "step_type": step_type,
             "requirements": {
                 "needs_tool_calling": requirements.needs_tool_calling,
                 "needs_vision": requirements.needs_vision,
                 "prefers_reasoning": requirements.prefers_reasoning,
-                "is_agentic": requirements.is_agentic,
+                "is_agentic": hints.is_agentic,
             },
-            "session": session_preview,
-            "active_tier_configs": active_tier_configs,
+            "constraint_tags": list(decision.constraints.tags()),
+            "hint_tags": list(decision.workload_hints.tags()),
+            "answer_depth": decision.answer_depth.value,
             "fallback_chain": _serialize_fallback_chain(decision.fallback_chain),
             "candidate_scores": _serialize_candidate_scores(decision.candidate_scores),
             "selector": _selector_state(
-                bucket_profile=decision.profile,
+                bucket_mode=decision.mode,
                 bucket_tier=decision.tier,
             ),
         }
@@ -1150,7 +1245,7 @@ def create_app(
             "router": "uncommon-route",
             "version": VERSION,
             "upstream": upstream,
-            "sessions": _sessions.stats(),
+            "connections": _current_connection_payload(),
             "spending": {
                 "limits": {k: v for k, v in vars(spend_status.limits).items() if v is not None},
                 "spent": spend_status.spent,
@@ -1166,6 +1261,7 @@ def create_app(
             "routing_config": {
                 "source": _routing_store.export().get("source", "local-file"),
                 "editable": _routing_store.export().get("editable", True),
+                "default_mode": _routing_store.default_mode().value,
             },
             "stats": {
                 "total_requests": _stats.count,
@@ -1190,7 +1286,9 @@ def create_app(
                 "is_gateway": _mapper.is_gateway,
                 "discovered": _mapper.discovered,
                 "upstream_models": _mapper.upstream_model_count,
+                "pool_size": _mapper.pool_size,
                 "unresolved": _mapper.unresolved_models(),
+                "pricing_source": "dynamic" if _mapper.discovered else "static",
             },
         })
 
@@ -1203,9 +1301,114 @@ def create_app(
             "is_gateway": _mapper.is_gateway,
             "discovered": _mapper.discovered,
             "upstream_model_count": _mapper.upstream_model_count,
+            "pool_size": _mapper.pool_size,
             "mappings": _mapper.mapping_table(),
+            "pool": _mapper.pool_table(),
             "unresolved": _mapper.unresolved_models(),
+            "pricing_source": "dynamic" if _mapper.discovered else "static",
         })
+
+    def _providers_payload() -> dict[str, Any]:
+        rows = []
+        for name in sorted(_providers.providers):
+            entry = _providers.providers[name]
+            rows.append({
+                "name": entry.name,
+                "base_url": entry.base_url,
+                "models": list(entry.models),
+                "model_count": len(entry.models),
+                "plan": entry.plan,
+                "has_api_key": bool(entry.api_key),
+                "api_key_preview": mask_api_key(entry.api_key),
+            })
+        return {
+            "count": len(rows),
+            "providers": rows,
+        }
+
+    async def handle_connections(request: Request) -> JSONResponse:
+        if request.method == "GET":
+            return JSONResponse(_current_connection_payload())
+
+        effective = resolve_primary_connection(
+            cli_upstream=_cli_upstream_override,
+            store=_connections_store,
+        )
+        if not effective.editable:
+            return JSONResponse({
+                "error": "Primary upstream is externally managed",
+                "source": effective.source,
+                "upstream_source": effective.upstream_source,
+                "api_key_source": effective.api_key_source,
+            }, status_code=409)
+
+        body = await request.json()
+        next_upstream = str(body.get("upstream", upstream)).strip()
+        next_api_key = str(body.get("api_key", _primary_api_key)).strip()
+        ok, payload = await _reload_primary_connection(
+            next_upstream=next_upstream,
+            next_api_key=next_api_key,
+            persist=True,
+        )
+        return JSONResponse(payload, status_code=200 if ok else 502)
+
+    async def handle_providers(request: Request) -> JSONResponse:
+        if request.method == "GET":
+            return JSONResponse(_providers_payload())
+
+        body = await request.json()
+        name = str(body.get("name", "")).strip().lower()
+        api_key = str(body.get("api_key", "")).strip()
+        if not name or not api_key:
+            return JSONResponse({"error": "Requires name and api_key"}, status_code=400)
+        base_url_raw = body.get("base_url")
+        plan = str(body.get("plan", "")).strip()
+        models_raw = body.get("models")
+        models = None
+        if isinstance(models_raw, list):
+            models = [str(item).strip() for item in models_raw if str(item).strip()]
+        base_url = str(base_url_raw).strip() if base_url_raw is not None else None
+
+        verification: dict[str, Any] | None = None
+        verify_requested = bool(body.get("verify", False))
+        if verify_requested and base_url:
+            verified, detail = verify_key(base_url, api_key)
+            verification = {"ok": verified, "detail": detail}
+
+        add_provider(
+            name,
+            api_key,
+            base_url=base_url,
+            models=models,
+            plan=plan,
+        )
+        _reload_providers()
+        payload = {"ok": True, **_providers_payload()}
+        if verification is not None:
+            payload["verification"] = verification
+        return JSONResponse(payload)
+
+    async def handle_provider_detail(request: Request) -> JSONResponse:
+        name = str(request.path_params["name"]).strip().lower()
+        if request.method == "DELETE":
+            removed = remove_provider(name)
+            _reload_providers()
+            return JSONResponse({"ok": True, "removed": removed, **_providers_payload()})
+
+        entry = _providers.providers.get(name)
+        if entry is None:
+            return JSONResponse({"error": "Provider not found"}, status_code=404)
+        verified, detail = verify_key(entry.base_url, entry.api_key)
+        return JSONResponse({
+            "ok": verified,
+            "detail": detail,
+            "provider": {
+                "name": entry.name,
+                "base_url": entry.base_url,
+                "model_count": len(entry.models),
+                "api_key_preview": mask_api_key(entry.api_key),
+            },
+        }, status_code=200 if verified else 502)
 
     _dashboard_mount = None
     try:
@@ -1240,17 +1443,14 @@ def create_app(
             return JSONResponse({"ok": True, "session_reset": True})
         return JSONResponse({"error": "Invalid action"}, status_code=400)
 
-    async def handle_sessions(request: Request) -> JSONResponse:
-        """GET /v1/sessions — list active sessions."""
-        return JSONResponse(_sessions.stats())
-
     async def handle_stats(request: Request) -> JSONResponse:
         """GET /v1/stats — route analytics. POST /v1/stats — reset."""
         if request.method == "POST":
             body = await request.json()
             if body.get("action") == "reset":
                 _stats.reset()
-                return JSONResponse({"ok": True, "reset": True})
+                cleared_feedback = _feedback.clear_pending()
+                return JSONResponse({"ok": True, "reset": True, "feedback_cleared": cleared_feedback})
             return JSONResponse({"error": "Invalid action"}, status_code=400)
         s = _stats.summary()
         return JSONResponse({
@@ -1283,7 +1483,7 @@ def create_app(
             "total_semantic_quality_fallbacks": s.total_semantic_quality_fallbacks,
             "total_checkpoints_created": s.total_checkpoints_created,
             "total_rehydrated_artifacts": s.total_rehydrated_artifacts,
-            "by_profile": s.by_profile,
+            "by_mode": s.by_mode,
             "by_decision_tier": s.by_decision_tier,
             "by_tier": {
                 tier: {
@@ -1317,34 +1517,37 @@ def create_app(
     async def handle_selector(request: Request) -> JSONResponse:
         """GET /v1/selector — selector state. POST /v1/selector — preview candidate choice."""
         if request.method == "GET":
-            profile_param = request.query_params.get("profile")
+            mode_param = request.query_params.get("mode")
             tier_param = request.query_params.get("tier")
-            if (profile_param and not tier_param) or (tier_param and not profile_param):
+            if (mode_param and not tier_param) or (tier_param and not mode_param):
                 return JSONResponse(
-                    {"error": "profile and tier must be provided together"},
+                    {"error": "mode and tier must be provided together"},
                     status_code=400,
                 )
-            if profile_param and tier_param:
+            if mode_param and tier_param:
                 try:
                     return JSONResponse(_selector_state(
-                        bucket_profile=_parse_profile_value(profile_param),
+                        bucket_mode=_parse_mode_value(mode_param),
                         bucket_tier=_parse_tier_value(tier_param),
                     ))
                 except ValueError:
                     return JSONResponse(
-                        {"error": "Invalid profile or tier"},
+                        {"error": "Invalid mode or tier"},
                         status_code=400,
                     )
             return JSONResponse(_selector_state())
 
         body = await request.json()
-        normalized_body, error = _normalize_selector_body(body)
+        normalized_body, error = _normalize_selector_body(
+            body,
+            default_mode=_routing_store.default_mode(),
+        )
         if normalized_body is None:
             return JSONResponse({"error": error or "Invalid selector payload"}, status_code=400)
         return JSONResponse(_build_selector_preview(normalized_body, request))
 
     async def handle_routing_config(request: Request) -> JSONResponse:
-        """GET /v1/routing-config — active routing profile/tier config. POST — update overrides."""
+        """GET /v1/routing-config — active routing mode/tier config. POST — update overrides."""
         nonlocal _routing_config
         if request.method == "GET":
             return JSONResponse(_routing_store.export())
@@ -1352,8 +1555,11 @@ def create_app(
         body = await request.json()
         action = str(body.get("action", "")).strip().lower()
         try:
-            if action == "set-tier":
-                profile = _parse_profile_value(str(body.get("profile", "")))
+            if action == "set-default-mode":
+                mode = _parse_mode_value(str(body.get("mode", "")))
+                payload = _routing_store.set_default_mode(mode)
+            elif action == "set-tier":
+                mode = _parse_mode_value(str(body.get("mode", "")))
                 tier = _parse_tier_value(str(body.get("tier", "")))
                 primary = str(body.get("primary", "")).strip()
                 fallback_raw = body.get("fallback", [])
@@ -1368,26 +1574,37 @@ def create_app(
                 else:
                     return JSONResponse({"error": "fallback must be a list or comma-separated string"}, status_code=400)
                 payload = _routing_store.set_tier(
-                    profile,
+                    mode,
                     tier,
                     primary=primary,
                     fallback=fallback,
                     hard_pin=hard_pin,
                 )
             elif action == "reset-tier":
-                profile = _parse_profile_value(str(body.get("profile", "")))
+                mode = _parse_mode_value(str(body.get("mode", "")))
                 tier = _parse_tier_value(str(body.get("tier", "")))
-                payload = _routing_store.reset_tier(profile, tier)
+                payload = _routing_store.reset_tier(mode, tier)
+            elif action == "reset-default-mode":
+                payload = _routing_store.reset_default_mode()
             elif action == "reset":
                 payload = _routing_store.reset()
             else:
                 return JSONResponse(
-                    {"error": "Invalid action", "allowed": ["set-tier", "reset-tier", "reset"]},
+                    {
+                        "error": "Invalid action",
+                        "allowed": [
+                            "set-default-mode",
+                            "set-tier",
+                            "reset-tier",
+                            "reset-default-mode",
+                            "reset",
+                        ],
+                    },
                     status_code=400,
                 )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        _routing_config = _routing_store.config()
+        _refresh_active_pricing()
         return JSONResponse(payload)
 
     async def handle_artifacts(request: Request) -> JSONResponse:
@@ -1421,6 +1638,16 @@ def create_app(
                 status_code=400,
             )
         result = _feedback.submit(request_id, signal)
+        if result.action != "expired":
+            _stats.record_feedback(
+                request_id,
+                signal=signal,
+                ok=result.ok,
+                action=result.action,
+                from_tier=result.from_tier,
+                to_tier=result.to_tier,
+                reason=result.reason,
+            )
         return JSONResponse({
             "ok": result.ok,
             "action": result.action,
@@ -1433,10 +1660,16 @@ def create_app(
     async def handle_recent(request: Request) -> JSONResponse:
         """GET /v1/stats/recent — recent routed requests with feedback status."""
         limit = int(request.query_params.get("limit", "30"))
-        records = _stats.recent(limit)
+        records = _stats.recent(max(limit * 3, limit))
+        visible_records: list[dict[str, Any]] = []
         for r in records:
-            r["feedback_pending"] = _feedback.has_pending(r["request_id"])
-        return JSONResponse(records)
+            has_result = bool(r.get("feedback_action"))
+            r["feedback_pending"] = (not has_result) and _feedback.has_pending(r["request_id"])
+            if has_result or r["feedback_pending"]:
+                visible_records.append(r)
+            if len(visible_records) >= limit:
+                break
+        return JSONResponse(visible_records)
 
     async def _handle_chat_core(
         body: dict,
@@ -1452,15 +1685,21 @@ def create_app(
                 {"error": {"message": msg, "type": "configuration_error"}},
                 status_code=503,
             )
+        upstream_chat = _upstream_chat_url(upstream)
 
         model = (body.get("model") or "").strip().lower()
         is_streaming = body.get("stream", False)
 
+        if not model:
+            default_mode = _routing_store.default_mode()
+            model = VIRTUAL_MODEL_IDS[default_mode]
+            body["model"] = model
+
         requested_model = model
-        routing_profile = routing_profile_from_model(model)
-        is_virtual = routing_profile is not None
+        routing_mode = routing_mode_from_model(model)
+        is_virtual = routing_mode is not None
         route_start = time.perf_counter_ns()
-        route_method: str = "cascade"
+        route_method: str = "pool"
         confidence = 0.0
         savings = 0.0
         estimated_cost = 0.0
@@ -1471,7 +1710,7 @@ def create_app(
         fallback_models: list[str] = []
         fallback_reason = ""
         step_type = "general"
-        profile_value = routing_profile.value if routing_profile else ""
+        mode_value = routing_mode.value if routing_mode else ""
         decision_tier = ""
         input_tokens_before = 0
         input_tokens_after = 0
@@ -1489,8 +1728,7 @@ def create_app(
         prompt, system_prompt, max_tokens = _extract_prompt(body)
         _pv = " ".join(prompt[:80].split())
         prompt_preview = (_pv + "...") if len(prompt) > 80 else _pv
-        session_id = _resolve_session(request, body, _sessions)
-        cached_session = _sessions.get(session_id) if session_id and is_virtual else None
+        session_id = _resolve_session_id(request, body)
         step_type, tool_names = _classify_step(body)
 
         if is_virtual:
@@ -1501,127 +1739,40 @@ def create_app(
                     return JSONResponse(openai_to_anthropic_response(debug_body, "uncommon-route/debug"))
                 return JSONResponse(debug_body)
 
-            requirements = _extract_requirements(body, step_type)
-            tier_cap = _tool_selection_tier_cap(prompt, step_type)
-            is_lightweight = step_type == "tool-result-followup"
-
-            # Always route — classifier decides tier based on current content
+            requirements, hints = _extract_requirements(body, step_type)
             user_keyed = _providers.keyed_models() or None
             decision = route(
                 prompt,
                 system_prompt,
                 max_tokens,
                 config=_routing_config,
-                routing_profile=routing_profile or RoutingProfile.AUTO,
+                routing_mode=routing_mode or RoutingMode.AUTO,
                 request_requirements=requirements,
+                workload_hints=hints,
                 user_keyed_models=user_keyed,
                 model_experience=_model_experience,
-                tier_cap=tier_cap,
+                pricing=_get_pricing(),
+                available_models=_mapper.available_models if _mapper.discovered else None,
+                model_capabilities=_routing_config.model_capabilities,
             )
             selected_model = decision.model
             tier_value = decision.tier.value
             decision_tier = tier_value
-            profile_value = decision.profile.value
-            active_tier_configs = {
-                tier.value: {
-                    "primary": tc.primary,
-                    "fallback": tc.fallback,
-                    "hard_pin": tc.hard_pin,
-                    "selection_mode": "hard-pin" if tc.hard_pin else "adaptive",
-                }
-                for tier, tc in get_tier_configs(
-                    _routing_config,
-                    decision.profile,
-                    agentic=decision.profile is RoutingProfile.AGENTIC
-                    or (decision.profile is RoutingProfile.AUTO and requirements.is_agentic),
-                ).items()
-            }
-            active_tier_config = get_tier_configs(
-                _routing_config,
-                decision.profile,
-                agentic=decision.profile is RoutingProfile.AGENTIC
-                or (decision.profile is RoutingProfile.AUTO and requirements.is_agentic),
-            )[decision.tier]
-            hard_pinned = active_tier_config.hard_pin
+            mode_value = decision.mode.value
+            if _debug_log.isEnabledFor(logging.DEBUG):
+                _debug_log.debug(
+                    "=== ROUTING DECISION === tier=%s model=%s confidence=%.2f "
+                    "prompt_tokens=%d prompt=%.100s reasoning=%s",
+                    tier_value, selected_model, decision.confidence,
+                    estimate_tokens(prompt), prompt[:100], decision.reasoning,
+                )
             reasoning = decision.reasoning
-            if tier_cap is not None:
-                reasoning = f"{reasoning} | tool-selection-cap<={tier_cap.value}"
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence
             savings = decision.savings
-            route_method = "cascade"
-
-            if cached_session and cached_session.profile == profile_value:
-                session_rank = _TIER_RANK.get(cached_session.tier, 1)
-                decision_rank = _TIER_RANK.get(decision.tier.value, 1)
-
-                if hard_pinned:
-                    route_method = "hard-pin"
-                    reasoning = f"{decision.reasoning} | hard-pin"
-                    if session_id:
-                        _sessions.set(session_id, selected_model, tier_value, profile=profile_value)
-                elif is_lightweight:
-                    # Tool-result steps: use classifier's decision (allow downgrade)
-                    route_method = "step-aware"
-                    reasoning = f"{decision.reasoning} | {step_type}"
-                elif decision_rank > session_rank:
-                    # Higher tier needed: upgrade session
-                    route_method = "session-upgrade"
-                    reasoning = f"{decision.reasoning} | upgrade {cached_session.tier}->{tier_value}"
-                    if session_id:
-                        _sessions.set(session_id, selected_model, tier_value, profile=profile_value)
-                else:
-                    # Same or lower tier on non-lightweight step: hold session model
-                    selected_model = cached_session.model
-                    tier_value = cached_session.tier
-                    route_method = "session-hold"
-                    reasoning = (
-                        f"session-hold ({session_id[:8] if session_id else '?'}...)"
-                        f" {tier_value}>={decision.tier.value}"
-                    )
-                    full_text = f"{system_prompt or ''} {prompt}".strip()
-                    input_toks = estimate_tokens(full_text)
-                    output_budget = estimate_output_budget(prompt, tier_value)
-                    estimated_cost = _estimate_cost(
-                        selected_model, input_toks, min(max_tokens, output_budget),
-                    )
-                    baseline_cost = _estimate_baseline_cost(input_toks, min(max_tokens, output_budget))
-
-                if session_id:
-                    _sessions.touch(session_id)
-
-                # Three-strike escalation (skip for lightweight steps — repeated
-                # tool results are expected, not a signal of model inadequacy)
-                if session_id and not is_lightweight and not hard_pinned:
-                    content_hash = hash_request_content(prompt, tool_names or None)
-                    should_escalate = _sessions.record_request_hash(session_id, content_hash)
-                    if should_escalate:
-                        esc = _sessions.escalate(session_id, active_tier_configs)
-                        if esc:
-                            original_tier = tier_value
-                            selected_model, tier_value = esc
-                            reasoning = f"escalated {original_tier}->{tier_value}"
-                            route_method = "escalated"
-                            esc_feats = extract_features(prompt, system_prompt)
-                            _feedback.learn_from_escalation(
-                                esc_feats, original_tier, tier_value,
-                            )
-                            full_text = f"{system_prompt or ''} {prompt}".strip()
-                            input_toks = estimate_tokens(full_text)
-                            output_budget = estimate_output_budget(prompt, tier_value)
-                            estimated_cost = _estimate_cost(
-                                selected_model, input_toks, min(max_tokens, output_budget),
-                            )
-                            baseline_cost = _estimate_baseline_cost(input_toks, min(max_tokens, output_budget))
-            else:
-                if session_id:
-                    _sessions.set(session_id, selected_model, tier_value, profile=profile_value)
-                if cached_session and cached_session.profile != profile_value:
-                    reasoning = (
-                        f"{decision.reasoning} | profile-reset"
-                        f" {cached_session.profile}->{profile_value}"
-                    )
+            route_method = "pool"
+            mode_value = decision.mode.value
 
             body["model"] = selected_model
             composition = await compose_messages_semantic(
@@ -1632,7 +1783,7 @@ def create_app(
                 session_id=session_id,
                 request=request,
                 step_type=step_type,
-                is_agentic=requirements.is_agentic,
+                is_agentic=hints.is_agentic,
             )
             body["messages"] = composition.messages
             input_tokens_before = composition.input_tokens_before
@@ -1671,7 +1822,7 @@ def create_app(
                 route_feats,
                 tier_value,
                 model=selected_model,
-                profile=profile_value,
+                mode=mode_value,
             )
             fallback_models = [
                 fb.model for fb in decision.fallback_chain
@@ -1680,7 +1831,7 @@ def create_app(
         else:
             selected_model = model
             tier_value = ""
-            profile_value = "passthrough"
+            mode_value = "passthrough"
             reasoning = "passthrough"
             route_method = "passthrough"
             full_text = f"{system_prompt or ''} {prompt}".strip()
@@ -1752,23 +1903,20 @@ def create_app(
                 cache_plan.cache_breakpoints,
             )
 
-        # Auth: BYOK key > env key > request header
-        env_key = (
-            os.environ.get("UNCOMMON_ROUTE_API_KEY", "")
-            or os.environ.get("COMMONSTACK_API_KEY", "")
-        )
+        # Auth: BYOK key > primary connection key > request header
+        primary_key = _primary_api_key
         if provider_entry:
             if native_anthropic_transport:
                 fwd_headers.pop("authorization", None)
                 fwd_headers["x-api-key"] = provider_entry.api_key
             else:
                 fwd_headers["authorization"] = f"Bearer {provider_entry.api_key}"
-        elif env_key:
+        elif primary_key:
             if native_anthropic_transport:
                 fwd_headers.pop("authorization", None)
-                fwd_headers["x-api-key"] = env_key
+                fwd_headers["x-api-key"] = primary_key
             else:
-                fwd_headers["authorization"] = f"Bearer {env_key}"
+                fwd_headers["authorization"] = f"Bearer {primary_key}"
         if native_anthropic_transport:
             if "x-api-key" not in fwd_headers and "authorization" in fwd_headers:
                 bearer = fwd_headers["authorization"]
@@ -1783,7 +1931,7 @@ def create_app(
 
         debug_headers: dict[str, str] = {}
         if is_virtual:
-            _set_header(debug_headers, "x-uncommon-route-profile", profile_value)
+            _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
             _set_header(debug_headers, "x-uncommon-route-request-id", request_id)
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
             _set_header(debug_headers, "x-uncommon-route-tier", tier_value)
@@ -1807,7 +1955,7 @@ def create_app(
             fmt_tag = f"  [{api_format}]" if api_format != "openai" else ""
             transport_name, cache_mode_name, _cache_family, _cache_breakpoints = _current_route_strategy()
             print(
-                f"[route] {profile_value}:{tier_value} → {selected_model}"
+                f"[route] {mode_value}:{tier_value} → {selected_model}"
                 f"  ${estimated_cost:.4f}  (in {input_tokens_before}->{input_tokens_after}"
                 f"  transport:{transport_name}"
                 f"  cache:{cache_mode_name}"
@@ -1834,7 +1982,7 @@ def create_app(
                     if is_virtual:
                         _model_experience.observe(
                             selected_model,
-                            profile_value,
+                            mode_value,
                             tier_value,
                             success=True,
                             ttft_ms=stream_ttft_ms,
@@ -1850,7 +1998,7 @@ def create_app(
                                 request_id,
                                 model=selected_model,
                                 tier=tier_value,
-                                profile=profile_value,
+                                mode=mode_value,
                             )
                         combined_cost = (
                             (stream_actual_cost if stream_actual_cost is not None else main_estimated_cost)
@@ -1864,7 +2012,7 @@ def create_app(
                         _stats.record(RouteRecord(
                             timestamp=time.time(),
                             requested_model=requested_model,
-                            profile=profile_value,
+                            mode=mode_value,
                             model=selected_model,
                             tier=tier_value,
                             decision_tier=decision_tier or tier_value,
@@ -1896,12 +2044,16 @@ def create_app(
                             step_type=step_type, fallback_reason=fallback_reason,
                             streaming=True,
                             request_id=request_id, prompt_preview=prompt_preview,
+                            complexity=decision.complexity if is_virtual else 0.33,
+                            constraint_tags=list(decision.constraints.tags()),
+                            hint_tags=list(decision.workload_hints.tags()),
+                            answer_depth=decision.answer_depth.value,
                         ))
                     else:
                         _stats.record(RouteRecord(
                             timestamp=time.time(),
                             requested_model=requested_model,
-                            profile=profile_value,
+                            mode=mode_value,
                             model=selected_model,
                             tier=tier_value,
                             decision_tier=decision_tier or tier_value,
@@ -1934,14 +2086,14 @@ def create_app(
                     if is_virtual:
                         _model_experience.observe(
                             selected_model,
-                            profile_value,
+                            mode_value,
                             tier_value,
                             success=False,
                         )
                         _stats.record(RouteRecord(
                             timestamp=time.time(),
                             requested_model=requested_model,
-                            profile=profile_value,
+                            mode=mode_value,
                             model=selected_model,
                             tier=tier_value,
                             decision_tier=decision_tier or tier_value,
@@ -1968,12 +2120,16 @@ def create_app(
                             step_type=step_type, fallback_reason=fallback_reason,
                             streaming=True,
                             request_id=request_id, prompt_preview=prompt_preview,
+                            complexity=decision.complexity if is_virtual else 0.33,
+                            constraint_tags=list(decision.constraints.tags()),
+                            hint_tags=list(decision.workload_hints.tags()),
+                            answer_depth=decision.answer_depth.value,
                         ))
                     else:
                         _stats.record(RouteRecord(
                             timestamp=time.time(),
                             requested_model=requested_model,
-                            profile=profile_value,
+                            mode=mode_value,
                             model=selected_model,
                             tier=tier_value,
                             decision_tier=decision_tier or tier_value,
@@ -2008,7 +2164,7 @@ def create_app(
                                 for ev in converter.finish():
                                     yield ev
                             _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, DEFAULT_MODEL_PRICING)
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                             )
                         except Exception:
                             _record_stream_failure()
@@ -2037,7 +2193,7 @@ def create_app(
                             for ev in converter.finish():
                                 yield ev
                             _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, DEFAULT_MODEL_PRICING)
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                             )
                         except Exception:
                             _record_stream_failure()
@@ -2060,7 +2216,7 @@ def create_app(
                             stream_chunks.append(chunk)
                             yield chunk
                         _record_stream_success(
-                            parse_stream_usage_metrics(stream_chunks, selected_model, DEFAULT_MODEL_PRICING)
+                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                         )
                     except Exception:
                         _record_stream_failure()
@@ -2119,9 +2275,9 @@ def create_app(
                         )
                     fb_headers = dict(fwd_headers)
                     if fb_native_anthropic:
-                        if env_key:
+                        if primary_key:
                             fb_headers.pop("authorization", None)
-                            fb_headers["x-api-key"] = env_key
+                            fb_headers["x-api-key"] = primary_key
                         elif "x-api-key" not in fb_headers and "authorization" in fb_headers:
                             bearer = fb_headers["authorization"]
                             if bearer.lower().startswith("bearer "):
@@ -2143,6 +2299,7 @@ def create_app(
                         route_method = "fallback"
                         fallback_reason = f"{original_model} unavailable -> {fb_resolved}"
                         reasoning = f"fallback: {fallback_reason}"
+                        _mapper.record_alias(original_model, fb_resolved)
                         cache_plan = fb_cache_plan
                         _set_header(debug_headers, "x-uncommon-route-model", selected_model)
                         _set_route_strategy_headers(
@@ -2156,7 +2313,7 @@ def create_app(
                                 request_id,
                                 model=selected_model,
                                 tier=tier_value,
-                                profile=profile_value,
+                                mode=mode_value,
                             )
                         print(f"[route] fallback → {fb_resolved}  ({original_model} unavailable)")
                         break
@@ -2166,7 +2323,7 @@ def create_app(
             tps: float | None = None
             usage_metrics: UsageMetrics | None = None
             if resp.status_code == 200:
-                usage_metrics = parse_usage_metrics(resp.content, selected_model, DEFAULT_MODEL_PRICING)
+                usage_metrics = parse_usage_metrics(resp.content, selected_model, _get_pricing())
                 if usage_metrics is not None:
                     actual_cost = (
                         usage_metrics.actual_cost
@@ -2184,7 +2341,7 @@ def create_app(
                 if resp.status_code == 200:
                     _model_experience.observe(
                         selected_model,
-                        profile_value,
+                        mode_value,
                         tier_value,
                         success=True,
                         ttft_ms=ttft_ms,
@@ -2200,12 +2357,12 @@ def create_app(
                             request_id,
                             model=selected_model,
                             tier=tier_value,
-                            profile=profile_value,
+                            mode=mode_value,
                         )
                 else:
                     _model_experience.observe(
                         selected_model,
-                        profile_value,
+                        mode_value,
                         tier_value,
                         success=False,
                     )
@@ -2221,7 +2378,7 @@ def create_app(
                 _stats.record(RouteRecord(
                     timestamp=time.time(),
                     requested_model=requested_model,
-                    profile=profile_value,
+                    mode=mode_value,
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
@@ -2252,12 +2409,16 @@ def create_app(
                     session_id=session_id, streaming=False,
                     step_type=step_type, fallback_reason=fallback_reason,
                     request_id=request_id, prompt_preview=prompt_preview,
+                    complexity=decision.complexity if is_virtual else 0.33,
+                    constraint_tags=list(decision.constraints.tags()),
+                    hint_tags=list(decision.workload_hints.tags()),
+                    answer_depth=decision.answer_depth.value,
                 ))
             else:
                 _stats.record(RouteRecord(
                     timestamp=time.time(),
                     requested_model=requested_model,
-                    profile=profile_value,
+                    mode=mode_value,
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
@@ -2284,6 +2445,7 @@ def create_app(
                     step_type=step_type,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
+                    complexity=decision.complexity if is_virtual else 0.33,
                 ))
 
             if api_format == "anthropic":
@@ -2346,14 +2508,14 @@ def create_app(
             if is_virtual:
                 _model_experience.observe(
                     selected_model,
-                    profile_value,
+                    mode_value,
                     tier_value,
                     success=False,
                 )
                 _stats.record(RouteRecord(
                     timestamp=time.time(),
                     requested_model=requested_model,
-                    profile=profile_value,
+                    mode=mode_value,
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
@@ -2380,6 +2542,9 @@ def create_app(
                     step_type=step_type, fallback_reason=fallback_reason,
                     streaming=is_streaming,
                     request_id=request_id, prompt_preview=prompt_preview,
+                    constraint_tags=list(decision.constraints.tags()),
+                    hint_tags=list(decision.workload_hints.tags()),
+                    answer_depth=decision.answer_depth.value,
                 ))
             msg = f"Upstream unreachable: {upstream_chat}"
             if api_format == "anthropic":
@@ -2393,14 +2558,14 @@ def create_app(
             if is_virtual:
                 _model_experience.observe(
                     selected_model,
-                    profile_value,
+                    mode_value,
                     tier_value,
                     success=False,
                 )
                 _stats.record(RouteRecord(
                     timestamp=time.time(),
                     requested_model=requested_model,
-                    profile=profile_value,
+                    mode=mode_value,
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
@@ -2427,6 +2592,9 @@ def create_app(
                     step_type=step_type, fallback_reason=fallback_reason,
                     streaming=is_streaming,
                     request_id=request_id, prompt_preview=prompt_preview,
+                    constraint_tags=list(decision.constraints.tags()),
+                    hint_tags=list(decision.workload_hints.tags()),
+                    answer_depth=decision.answer_depth.value,
                 ))
             msg = "Upstream request timed out"
             if api_format == "anthropic":
@@ -2446,25 +2614,36 @@ def create_app(
         preview_body = anthropic_to_openai_request(raw)
         body = preview_body
         requested_model = str(raw.get("model") or "").strip()
-        if requested_model and (routing_profile_from_model(requested_model) is not None or "/" in requested_model):
+        if requested_model and (routing_mode_from_model(requested_model) is not None or "/" in requested_model):
             body["model"] = requested_model
         else:
-            body["model"] = VIRTUAL_MODEL
+            body["model"] = VIRTUAL_MODEL_IDS[_routing_store.default_mode()]
         return await _handle_chat_core(body, request, api_format="anthropic")
 
     @asynccontextmanager
     async def _lifespan(app: Starlette) -> _LifespanGen[None, None]:
+        import asyncio
         await _on_startup()
-        yield
+        nonlocal _rediscovery_task
+        if upstream:
+            _rediscovery_task = asyncio.create_task(_rediscovery_loop())
+        try:
+            yield
+        finally:
+            if _rediscovery_task is not None:
+                _rediscovery_task.cancel()
 
     routes = [
         Route("/health", handle_health, methods=["GET"]),
+        Route("/v1/connections", handle_connections, methods=["GET", "PUT"]),
+        Route("/v1/providers", handle_providers, methods=["GET", "POST"]),
+        Route("/v1/providers/{name:str}", handle_provider_detail, methods=["DELETE"]),
+        Route("/v1/providers/{name:str}/verify", handle_provider_detail, methods=["POST"]),
         Route("/v1/models", handle_models, methods=["GET"]),
         Route("/v1/models/mapping", handle_models_mapping, methods=["GET"]),
         Route("/v1/chat/completions", handle_chat_completions, methods=["POST"]),
         Route("/v1/messages", handle_messages, methods=["POST"]),
         Route("/v1/spend", handle_spend, methods=["GET", "POST"]),
-        Route("/v1/sessions", handle_sessions, methods=["GET"]),
         Route("/v1/stats", handle_stats, methods=["GET", "POST"]),
         Route("/v1/selector", handle_selector, methods=["GET", "POST"]),
         Route("/v1/routing-config", handle_routing_config, methods=["GET", "POST"]),
@@ -2482,19 +2661,25 @@ def create_app(
 def serve(
     port: int = DEFAULT_PORT,
     host: str = "127.0.0.1",
-    upstream: str = DEFAULT_UPSTREAM,
-    session_store: SessionStore | None = None,
+    upstream: str | None = DEFAULT_UPSTREAM,
     spend_control: SpendControl | None = None,
     route_stats: RouteStats | None = None,
 ) -> None:
     """Start the proxy server (blocking)."""
     import uvicorn
 
+    if os.environ.get("UNCOMMON_ROUTE_DEBUG_ROUTING"):
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(message)s")
+        _debug_log.setLevel(logging.DEBUG)
+
     app = create_app(
         upstream=upstream,
-        session_store=session_store,
         spend_control=spend_control,
         route_stats=route_stats,
+    )
+    effective = resolve_primary_connection(
+        cli_upstream=str(upstream or "").strip() or None,
+        store=ConnectionsStore(),
     )
     base = f"http://{host}:{port}"
     bar = "─" * 45
@@ -2509,22 +2694,22 @@ def serve(
     print()
     print(f"  UncommonRoute v{VERSION}")
     print(f"  {bar}")
-    if upstream:
-        short = upstream.replace("https://", "").replace("http://", "").rstrip("/v1").rstrip("/")
+    if effective.upstream:
+        short = effective.upstream.replace("https://", "").replace("http://", "").rstrip("/v1").rstrip("/")
         print(f"  Upstream:    {short}")
         print(f"  Proxy:       {base}")
         if has_dashboard:
             print(f"  Dashboard:   {base}/dashboard/")
         print()
-        print(f"  Quick test:")
+        print("  Quick test:")
         print(f"    curl {base}/health")
     else:
-        print(f"  Upstream:    (not configured)")
+        print("  Upstream:    (not configured)")
         print()
-        print(f"  Get started:")
-        print(f'    export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"')
-        print(f'    export UNCOMMON_ROUTE_API_KEY="your-key"')
-        print(f"    uncommon-route serve")
+        print("  Get started:")
+        print('    export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"')
+        print('    export UNCOMMON_ROUTE_API_KEY="your-key"')
+        print("    uncommon-route serve")
     print(f"  {bar}")
     print(flush=True)
 

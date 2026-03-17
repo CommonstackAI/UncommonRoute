@@ -1,41 +1,40 @@
-"""UncommonRoute — local LLM router with 4-tier routing and local-first cost control."""
+"""UncommonRoute — local LLM router with mode-based routing and local-first cost control."""
 
 from uncommon_route.router.api import route
 from uncommon_route.router.types import (
+    AnswerDepth,
+    AnswerDepthConfig,
     BanditConfig,
     CandidateScore,
     FallbackOption,
+    HintAdjustments,
     ModelCapabilities,
     ModelPricing,
+    ModeConfig,
     RequestRequirements,
     RoutingConfig,
+    RoutingConstraints,
     RoutingDecision,
-    RoutingProfile,
+    RoutingMode,
     ScoringConfig,
     ScoringResult,
     SelectionWeights,
     Tier,
     TierConfig,
+    WorkloadHints,
 )
 from uncommon_route.router.config import (
     DEFAULT_CONFIG,
     DEFAULT_MODEL_PRICING,
     VIRTUAL_MODEL_IDS,
     get_bandit_config,
+    get_mode_config,
+    get_mode_tiers,
     get_selection_weights,
-    get_tier_configs,
 )
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.selector import get_fallback_chain, select_model
-from uncommon_route.session import (
-    DEFAULT_SESSION_CONFIG,
-    SessionConfig,
-    SessionEntry,
-    SessionStore,
-    derive_session_id,
-    get_session_id,
-    hash_request_content,
-)
+from uncommon_route.session import derive_session_id
 from uncommon_route.spend_control import (
     CheckResult,
     FileSpendControlStorage,
@@ -106,6 +105,16 @@ from uncommon_route.routing_config_store import (
     RoutingConfigStorage,
     RoutingConfigStore,
 )
+from uncommon_route.connections_store import (
+    ConnectionsStorage,
+    FileConnectionsStorage,
+    InMemoryConnectionsStorage,
+    ConnectionsStore,
+    PrimaryConnection,
+    EffectivePrimaryConnection,
+    resolve_primary_connection,
+    mask_api_key,
+)
 
 __all__ = [
     # Router
@@ -114,9 +123,15 @@ __all__ = [
     "select_model",
     "get_fallback_chain",
     "Tier",
-    "RoutingProfile",
+    "RoutingMode",
     "RoutingDecision",
     "RoutingConfig",
+    "RoutingConstraints",
+    "WorkloadHints",
+    "AnswerDepth",
+    "AnswerDepthConfig",
+    "HintAdjustments",
+    "ModeConfig",
     "ScoringConfig",
     "ScoringResult",
     "BanditConfig",
@@ -132,15 +147,10 @@ __all__ = [
     "VIRTUAL_MODEL_IDS",
     "get_bandit_config",
     "get_selection_weights",
-    "get_tier_configs",
+    "get_mode_config",
+    "get_mode_tiers",
     # Session
-    "SessionStore",
-    "SessionConfig",
-    "SessionEntry",
-    "DEFAULT_SESSION_CONFIG",
-    "get_session_id",
     "derive_session_id",
-    "hash_request_content",
     # Spend control
     "SpendControl",
     "SpendLimits",
@@ -194,6 +204,14 @@ __all__ = [
     "FileRoutingConfigStorage",
     "InMemoryRoutingConfigStorage",
     "RoutingConfigStore",
+    "ConnectionsStorage",
+    "FileConnectionsStorage",
+    "InMemoryConnectionsStorage",
+    "ConnectionsStore",
+    "PrimaryConnection",
+    "EffectivePrimaryConnection",
+    "resolve_primary_connection",
+    "mask_api_key",
     # Stats
     "RouteRecord",
     "RouteStats",

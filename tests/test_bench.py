@@ -22,9 +22,13 @@ MIN_TIER_F1: dict[str, float] = {
     "SIMPLE": 0.93,
     "MEDIUM": 0.90,
     "COMPLEX": 0.93,
-    "REASONING": 0.95,
 }
-TIERS = [Tier.SIMPLE, Tier.MEDIUM, Tier.COMPLEX, Tier.REASONING]
+TIERS = [Tier.SIMPLE, Tier.MEDIUM, Tier.COMPLEX]
+
+
+def _collapse_tier(tier: str) -> str:
+    normalized = str(tier).strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
 
 
 def _evaluate(dataset: list[TestCase]) -> list[dict]:
@@ -32,11 +36,11 @@ def _evaluate(dataset: list[TestCase]) -> list[dict]:
     results: list[dict] = []
     for tc in dataset:
         result = classify(tc.prompt, tc.system_prompt, cfg)
-        resolved = result.tier.value if result.tier else "MEDIUM"
+        resolved = _collapse_tier(result.tier.value if result.tier else "MEDIUM")
         results.append({
-            "expected": tc.expected_tier,
+            "expected": _collapse_tier(tc.expected_tier),
             "resolved": resolved,
-            "correct": resolved == tc.expected_tier,
+            "correct": resolved == _collapse_tier(tc.expected_tier),
             "confidence": result.confidence,
             "lang": tc.lang,
             "category": tc.category,
@@ -81,15 +85,15 @@ class TestBenchmarkAccuracy:
             )
 
     def test_no_extreme_confusion(self, eval_results: list[dict]) -> None:
-        """SIMPLE should never be classified as REASONING and vice versa."""
+        """SIMPLE should never be classified as COMPLEX and vice versa."""
         for e in eval_results:
             if e["expected"] == "SIMPLE":
-                assert e["resolved"] != "REASONING", (
-                    f"SIMPLE → REASONING: {e['category']} ({e['lang']})"
+                assert e["resolved"] != "COMPLEX", (
+                    f"SIMPLE → COMPLEX: {e['category']} ({e['lang']})"
                 )
-            if e["expected"] == "REASONING":
+            if e["expected"] == "COMPLEX":
                 assert e["resolved"] != "SIMPLE", (
-                    f"REASONING → SIMPLE: {e['category']} ({e['lang']})"
+                    f"COMPLEX → SIMPLE: {e['category']} ({e['lang']})"
                 )
 
 
@@ -113,12 +117,12 @@ class TestClassifierSmoke:
             "write-behind caching with configurable flush intervals, "
             "and a RESTful management API with role-based access control."
         )
-        assert classify(prompt).tier in (Tier.COMPLEX, Tier.REASONING)
+        assert classify(prompt).tier == Tier.COMPLEX
 
-    def test_math_proof_is_reasoning(self) -> None:
+    def test_math_proof_is_complex(self) -> None:
         assert classify(
             "Prove that √2 is irrational using proof by contradiction"
-        ).tier == Tier.REASONING
+        ).tier == Tier.COMPLEX
 
     def test_chinese_greeting(self) -> None:
         result = classify("你好")

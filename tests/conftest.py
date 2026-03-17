@@ -10,13 +10,7 @@ from uncommon_route.model_experience import (
 )
 from uncommon_route.providers import ProvidersConfig
 from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, RoutingConfigStore
-from uncommon_route.session import SessionConfig, SessionStore
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
-
-
-@pytest.fixture
-def session_store() -> SessionStore:
-    return SessionStore(SessionConfig(enabled=True, timeout_s=60, header_name="x-session-id"))
 
 
 @pytest.fixture

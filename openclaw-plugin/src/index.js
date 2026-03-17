@@ -10,7 +10,7 @@
  *     → ensures `uncommon-route` Python package is installed (pipx/uv/pip)
  *     → spawns `uncommon-route serve` as a managed subprocess
  *     → registerProvider pointing at localhost proxy
- *     → registerCommand for /route, /spend, /sessions
+ *     → registerCommand for /route, /spend, /feedback
  */
 
 import { spawn, execSync } from "node:child_process";
@@ -25,10 +25,8 @@ const PY_PACKAGE = "uncommon-route";
 
 const MODELS = [
   { id: "uncommon-route/auto", name: "UncommonRoute Auto", reasoning: false, input: 0, output: 0, ctx: 200_000, max: 16_384 },
-  { id: "uncommon-route/eco", name: "UncommonRoute Eco", reasoning: false, input: 0, output: 0, ctx: 200_000, max: 16_384 },
-  { id: "uncommon-route/premium", name: "UncommonRoute Premium", reasoning: true, input: 0, output: 0, ctx: 200_000, max: 16_384 },
-  { id: "uncommon-route/free", name: "UncommonRoute Free", reasoning: false, input: 0, output: 0, ctx: 200_000, max: 16_384 },
-  { id: "uncommon-route/agentic", name: "UncommonRoute Agentic", reasoning: true, input: 0, output: 0, ctx: 200_000, max: 16_384 },
+  { id: "uncommon-route/fast", name: "UncommonRoute Fast", reasoning: false, input: 0, output: 0, ctx: 200_000, max: 16_384 },
+  { id: "uncommon-route/best", name: "UncommonRoute Best", reasoning: true, input: 0, output: 0, ctx: 200_000, max: 16_384 },
   { id: "moonshot/kimi-k2.5", name: "Kimi K2.5", reasoning: false, input: 0.60, output: 3.00, ctx: 128_000, max: 8_192 },
   { id: "google/gemini-3.1-pro", name: "Gemini 3.1 Pro", reasoning: false, input: 2.00, output: 12.00, ctx: 200_000, max: 16_384 },
   { id: "xai/grok-4-1-fast-reasoning", name: "Grok 4.1 Fast", reasoning: true, input: 0.20, output: 0.50, ctx: 200_000, max: 16_384 },
@@ -347,23 +345,6 @@ const plugin = {
         }
 
         return { text: "Usage: `/feedback [ok|weak|strong|status|rollback]`\n• **ok** — tier was correct\n• **weak** — model was too weak, should route to harder tier\n• **strong** — model was overkill, should route to easier tier" };
-      },
-    });
-
-    api.registerCommand({
-      name: "sessions",
-      description: "View active routing sessions",
-      acceptsArgs: false,
-      requireAuth: false,
-      handler: async () => {
-        const data = await fetchJson(`http://127.0.0.1:${port}/v1/sessions`);
-        if (!data) return { text: "Proxy not running.", isError: true };
-        if (data.count === 0) return { text: "No active sessions" };
-        const lines = [`**Active Sessions** (${data.count})`, ""];
-        for (const s of data.sessions) {
-          lines.push(`• \`${s.id}\`  model=${s.model}  tier=${s.tier}  requests=${s.requests}  age=${s.age_s}s`);
-        }
-        return { text: lines.join("\n") };
       },
     });
 

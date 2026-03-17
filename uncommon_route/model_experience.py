@@ -10,17 +10,23 @@ from pathlib import Path
 from typing import Literal
 
 from uncommon_route.paths import data_dir
-from uncommon_route.router.types import RoutingProfile, Tier
+from uncommon_route.router.types import RoutingMode, Tier
 
 FeedbackSignal = Literal["weak", "strong", "ok"]
 
 _DATA_DIR = data_dir()
 
 
+def _normalize_tier_label(tier: Tier | str) -> str:
+    raw = tier.value if isinstance(tier, Tier) else str(tier)
+    normalized = raw.strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
+
+
 @dataclass
 class ModelExperienceRecord:
     model: str
-    profile: str
+    mode: str
     tier: str
     requests: int = 0
     successes: int = 0
@@ -110,7 +116,7 @@ class ModelExperienceStore:
     def observe(
         self,
         model: str,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
         *,
         success: bool,
@@ -122,7 +128,7 @@ class ModelExperienceStore:
         cache_write_tokens: int = 0,
         input_cost_multiplier: float | None = None,
     ) -> None:
-        record = self._get_or_create(model, profile, tier)
+        record = self._get_or_create(model, mode, tier)
         record.requests += 1
         if success:
             record.successes += 1
@@ -166,11 +172,11 @@ class ModelExperienceStore:
     def record_feedback(
         self,
         model: str,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
         signal: FeedbackSignal,
     ) -> None:
-        record = self._get_or_create(model, profile, tier)
+        record = self._get_or_create(model, mode, tier)
         delta = {
             "ok": 0.14,
             "weak": -0.22,
@@ -190,10 +196,10 @@ class ModelExperienceStore:
     def snapshot(
         self,
         model: str,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
     ) -> CandidateExperience:
-        record = self._records.get(self._key(model, profile, tier))
+        record = self._records.get(self._key(model, mode, tier))
         if record is None:
             return CandidateExperience()
         ttft_score = 0.5
@@ -223,15 +229,15 @@ class ModelExperienceStore:
 
     def bucket_pulls(
         self,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
     ) -> int:
-        profile_value = profile.value if isinstance(profile, RoutingProfile) else str(profile)
-        tier_value = tier.value if isinstance(tier, Tier) else str(tier)
+        mode_value = mode.value if isinstance(mode, RoutingMode) else str(mode)
+        tier_value = _normalize_tier_label(tier)
         return sum(
             record.requests
             for record in self._records.values()
-            if record.profile == profile_value and record.tier == tier_value
+            if record.mode == mode_value and record.tier == tier_value
         )
 
     def count(self) -> int:
@@ -244,7 +250,7 @@ class ModelExperienceStore:
         ]
         return {
             "records": len(self._records),
-            "active_buckets": len({(record.profile, record.tier) for record in self._records.values()}),
+            "active_buckets": len({(record.mode, record.tier) for record in self._records.values()}),
             "top_feedback_models": [
                 self._serialize_summary_record(record)
                 for record in sorted(
@@ -283,17 +289,17 @@ class ModelExperienceStore:
 
     def bucket_summary(
         self,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
         *,
         limit: int = 12,
     ) -> dict[str, object]:
-        profile_value = profile.value if isinstance(profile, RoutingProfile) else str(profile)
-        tier_value = tier.value if isinstance(tier, Tier) else str(tier)
+        mode_value = mode.value if isinstance(mode, RoutingMode) else str(mode)
+        tier_value = _normalize_tier_label(tier)
         records = [
             record
             for record in self._records.values()
-            if record.profile == profile_value and record.tier == tier_value
+            if record.mode == mode_value and record.tier == tier_value
         ]
         ranked = sorted(
             records,
@@ -308,7 +314,7 @@ class ModelExperienceStore:
             reverse=True,
         )
         return {
-            "profile": profile_value,
+            "mode": mode_value,
             "tier": tier_value,
             "count": len(records),
             "models": [
@@ -320,16 +326,16 @@ class ModelExperienceStore:
     def _get_or_create(
         self,
         model: str,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
     ) -> ModelExperienceRecord:
-        key = self._key(model, profile, tier)
+        key = self._key(model, mode, tier)
         record = self._records.get(key)
         if record is None:
             record = ModelExperienceRecord(
                 model=model,
-                profile=profile.value if isinstance(profile, RoutingProfile) else str(profile),
-                tier=tier.value if isinstance(tier, Tier) else str(tier),
+                mode=mode.value if isinstance(mode, RoutingMode) else str(mode),
+                tier=_normalize_tier_label(tier),
             )
             self._records[key] = record
         return record
@@ -345,12 +351,12 @@ class ModelExperienceStore:
     def _key(
         self,
         model: str,
-        profile: RoutingProfile | str,
+        mode: RoutingMode | str,
         tier: Tier | str,
     ) -> str:
-        profile_value = profile.value if isinstance(profile, RoutingProfile) else str(profile)
-        tier_value = tier.value if isinstance(tier, Tier) else str(tier)
-        return f"{profile_value}|{tier_value}|{model}"
+        mode_value = mode.value if isinstance(mode, RoutingMode) else str(mode)
+        tier_value = _normalize_tier_label(tier)
+        return f"{mode_value}|{tier_value}|{model}"
 
     def _save(self) -> None:
         self._storage.save([asdict(record) for record in self._records.values()])
@@ -362,8 +368,8 @@ class ModelExperienceStore:
             try:
                 record = ModelExperienceRecord(
                     model=str(raw.get("model", "")),
-                    profile=str(raw.get("profile", "")),
-                    tier=str(raw.get("tier", "")),
+                    mode=str(raw.get("mode", "")),
+                    tier=_normalize_tier_label(str(raw.get("tier", ""))),
                     requests=int(raw.get("requests", 0)),
                     successes=int(raw.get("successes", 0)),
                     failures=int(raw.get("failures", 0)),
@@ -383,13 +389,17 @@ class ModelExperienceStore:
                 )
             except (TypeError, ValueError):
                 continue
-            self._records[self._key(record.model, record.profile, record.tier)] = record
+            if not record.mode:
+                continue
+            key = self._key(record.model, record.mode, record.tier)
+            existing = self._records.get(key)
+            self._records[key] = self._merge_records(existing, record) if existing else record
 
     def _serialize_summary_record(self, record: ModelExperienceRecord) -> dict[str, object]:
         return {
             "model": record.model,
-            "profile": record.profile,
-            "tier": record.tier,
+            "mode": record.mode,
+            "tier": _normalize_tier_label(record.tier),
             "feedback": round(0.5 + (record.preference_ewma * 0.5), 3),
             "reward": round(record.reward_ewma, 3),
             "reliability": round(record.success_ewma, 3),
@@ -402,6 +412,58 @@ class ModelExperienceStore:
             "last_feedback_at": round(record.last_feedback_at, 3),
             "last_feedback_signal": record.last_feedback_signal,
         }
+
+    def _merge_records(
+        self,
+        current: ModelExperienceRecord,
+        incoming: ModelExperienceRecord,
+    ) -> ModelExperienceRecord:
+        current_weight = max(current.requests, 1)
+        incoming_weight = max(incoming.requests, 1)
+
+        def _weighted(a: float, b: float, wa: int, wb: int) -> float:
+            return ((a * wa) + (b * wb)) / max(wa + wb, 1)
+
+        return ModelExperienceRecord(
+            model=current.model or incoming.model,
+            mode=current.mode or incoming.mode,
+            tier=_normalize_tier_label(current.tier or incoming.tier),
+            requests=current.requests + incoming.requests,
+            successes=current.successes + incoming.successes,
+            failures=current.failures + incoming.failures,
+            success_ewma=_weighted(current.success_ewma, incoming.success_ewma, current_weight, incoming_weight),
+            ttft_ms_ewma=_weighted(current.ttft_ms_ewma, incoming.ttft_ms_ewma, current_weight, incoming_weight),
+            tps_ewma=_weighted(current.tps_ewma, incoming.tps_ewma, current_weight, incoming_weight),
+            preference_ewma=_weighted(
+                current.preference_ewma,
+                incoming.preference_ewma,
+                max(current.feedback_count, 1),
+                max(incoming.feedback_count, 1),
+            ),
+            cache_hit_ratio_ewma=_weighted(current.cache_hit_ratio_ewma, incoming.cache_hit_ratio_ewma, current_weight, incoming_weight),
+            cache_write_ratio_ewma=_weighted(current.cache_write_ratio_ewma, incoming.cache_write_ratio_ewma, current_weight, incoming_weight),
+            input_cost_multiplier_ewma=_weighted(
+                current.input_cost_multiplier_ewma,
+                incoming.input_cost_multiplier_ewma,
+                current_weight,
+                incoming_weight,
+            ),
+            reward_ewma=_weighted(
+                current.reward_ewma,
+                incoming.reward_ewma,
+                max(current.reward_count, 1),
+                max(incoming.reward_count, 1),
+            ),
+            reward_count=current.reward_count + incoming.reward_count,
+            feedback_count=current.feedback_count + incoming.feedback_count,
+            last_used_at=max(current.last_used_at, incoming.last_used_at),
+            last_feedback_at=max(current.last_feedback_at, incoming.last_feedback_at),
+            last_feedback_signal=(
+                incoming.last_feedback_signal
+                if incoming.last_feedback_at >= current.last_feedback_at
+                else current.last_feedback_signal
+            ),
+        )
 
 
 def _reward_from_observation(

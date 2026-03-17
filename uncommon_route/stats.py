@@ -17,13 +17,19 @@ from typing import Any, Literal
 
 from uncommon_route.paths import data_dir
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING
+from uncommon_route.router.types import ModelPricing
 
 RETENTION_S = 7 * 86_400  # 7 days
 MAX_RECORDS = 10_000
 
-RouteMethod = Literal["cascade", "session-hold", "session-upgrade", "step-aware", "escalated", "fallback", "hard-pin", "passthrough"]
+RouteMethod = Literal["pool", "fallback", "passthrough", "override"]
 
 _DATA_DIR = data_dir()
+
+
+def _normalize_tier_label(tier: str) -> str:
+    normalized = str(tier).strip().upper()
+    return "COMPLEX" if normalized == "REASONING" else normalized
 
 
 @dataclass
@@ -36,7 +42,7 @@ class RouteRecord:
     estimated_cost: float
     baseline_cost: float = 0.0
     requested_model: str = ""
-    profile: str = "auto"
+    mode: str = "auto"
     decision_tier: str = ""
     actual_cost: float | None = None
     savings: float = 0.0
@@ -68,6 +74,17 @@ class RouteRecord:
     streaming: bool = False
     request_id: str = ""
     prompt_preview: str = ""
+    complexity: float = 0.33
+    constraint_tags: list[str] | None = None
+    hint_tags: list[str] | None = None
+    answer_depth: str = "standard"
+    feedback_signal: str = ""
+    feedback_ok: bool = False
+    feedback_action: str = ""
+    feedback_from_tier: str = ""
+    feedback_to_tier: str = ""
+    feedback_reason: str = ""
+    feedback_submitted_at: float = 0.0
 
 
 @dataclass
@@ -94,8 +111,9 @@ class StatsSummary:
     by_transport: dict[str, ModelSummary]
     by_cache_mode: dict[str, ModelSummary]
     by_cache_family: dict[str, ModelSummary]
-    by_profile: dict[str, int]
+    by_mode: dict[str, int]
     by_method: dict[str, int]
+    complexity_distribution: dict[str, int]
     avg_confidence: float
     avg_savings: float
     avg_latency_us: float
@@ -195,8 +213,14 @@ def _baseline_cost(r: RouteRecord) -> float:
     return 0.0
 
 
+def _get_stats_pricing() -> dict[str, ModelPricing]:
+    """Use dynamic pricing if available, otherwise static fallback."""
+    from uncommon_route.proxy import _active_pricing
+    return _active_pricing or DEFAULT_MODEL_PRICING
+
+
 def _cache_savings(r: RouteRecord) -> float:
-    pricing = DEFAULT_MODEL_PRICING.get(r.model)
+    pricing = _get_stats_pricing().get(r.model)
     if pricing is None:
         return 0.0
     cached_input_price = pricing.cached_input_price if pricing.cached_input_price is not None else pricing.input_price
@@ -209,7 +233,7 @@ def _cache_savings(r: RouteRecord) -> float:
 def _compaction_savings(r: RouteRecord) -> float:
     if r.input_tokens_before <= r.input_tokens_after:
         return 0.0
-    pricing = DEFAULT_MODEL_PRICING.get(r.model)
+    pricing = _get_stats_pricing().get(r.model)
     if pricing is None:
         return 0.0
     reduced_tokens = r.input_tokens_before - r.input_tokens_after
@@ -230,9 +254,38 @@ class RouteStats:
         self._load()
 
     def record(self, rec: RouteRecord) -> None:
+        rec.tier = _normalize_tier_label(rec.tier)
+        rec.decision_tier = _normalize_tier_label(rec.decision_tier) if rec.decision_tier else ""
+        rec.feedback_from_tier = _normalize_tier_label(rec.feedback_from_tier) if rec.feedback_from_tier else ""
+        rec.feedback_to_tier = _normalize_tier_label(rec.feedback_to_tier) if rec.feedback_to_tier else ""
         self._records.append(rec)
         self._cleanup()
         self._save()
+
+    def record_feedback(
+        self,
+        request_id: str,
+        *,
+        signal: str,
+        ok: bool,
+        action: str,
+        from_tier: str = "",
+        to_tier: str = "",
+        reason: str = "",
+    ) -> bool:
+        for record in reversed(self._records):
+            if record.request_id != request_id:
+                continue
+            record.feedback_signal = signal
+            record.feedback_ok = ok
+            record.feedback_action = action
+            record.feedback_from_tier = _normalize_tier_label(from_tier) if from_tier else ""
+            record.feedback_to_tier = _normalize_tier_label(to_tier) if to_tier else ""
+            record.feedback_reason = reason
+            record.feedback_submitted_at = self._now()
+            self._save()
+            return True
+        return False
 
     def history(self, limit: int | None = None) -> list[RouteRecord]:
         records = list(reversed(self._records))
@@ -245,10 +298,10 @@ class RouteStats:
             {
                 "request_id": r.request_id,
                 "timestamp": r.timestamp,
-                "profile": r.profile,
+                "mode": r.mode,
                 "model": r.model,
-                "tier": r.tier,
-                "decision_tier": r.decision_tier or r.tier,
+                "tier": _normalize_tier_label(r.tier),
+                "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
                 "method": r.method,
                 "cost": _effective_cost(r),
                 "savings": r.savings,
@@ -262,6 +315,17 @@ class RouteStats:
                 "input_tokens_after": r.input_tokens_after,
                 "artifacts_created": r.artifacts_created,
                 "prompt_preview": r.prompt_preview,
+                "complexity": getattr(r, "complexity", 0.33),
+                "constraint_tags": list(r.constraint_tags or []),
+                "hint_tags": list(r.hint_tags or []),
+                "answer_depth": r.answer_depth,
+                "feedback_signal": r.feedback_signal,
+                "feedback_ok": r.feedback_ok,
+                "feedback_action": r.feedback_action,
+                "feedback_from_tier": r.feedback_from_tier,
+                "feedback_to_tier": r.feedback_to_tier,
+                "feedback_reason": r.feedback_reason,
+                "feedback_submitted_at": r.feedback_submitted_at,
             }
             for r in records[:limit]
         ]
@@ -272,7 +336,7 @@ class RouteStats:
                 total_requests=0, time_range_s=0.0,
                 by_tier={}, by_decision_tier={}, by_model={},
                 by_transport={}, by_cache_mode={}, by_cache_family={},
-                by_profile={}, by_method={},
+                by_mode={}, by_method={}, complexity_distribution={},
                 avg_confidence=0.0, avg_savings=0.0, avg_latency_us=0.0,
                 avg_input_reduction_ratio=0.0, avg_cache_hit_ratio=0.0,
                 total_estimated_cost=0.0, total_baseline_cost=0.0, total_actual_cost=0.0,
@@ -298,20 +362,29 @@ class RouteStats:
         transport_groups: dict[str, list[RouteRecord]] = {}
         cache_mode_groups: dict[str, list[RouteRecord]] = {}
         cache_family_groups: dict[str, list[RouteRecord]] = {}
-        profile_counts: dict[str, int] = {}
+        mode_counts: dict[str, int] = {}
         decision_tier_counts: dict[str, int] = {}
         method_counts: dict[str, int] = {}
+        complexity_dist = {"simple": 0, "medium": 0, "complex": 0}
 
         for r in self._records:
-            tier_groups.setdefault(r.tier, []).append(r)
+            tier = _normalize_tier_label(r.tier)
+            tier_groups.setdefault(tier, []).append(r)
             model_groups.setdefault(r.model, []).append(r)
             transport_groups.setdefault(r.transport, []).append(r)
             cache_mode_groups.setdefault(r.cache_mode, []).append(r)
             cache_family_groups.setdefault(r.cache_family, []).append(r)
-            profile_counts[r.profile] = profile_counts.get(r.profile, 0) + 1
-            decision_tier = r.decision_tier or r.tier
+            mode_counts[r.mode] = mode_counts.get(r.mode, 0) + 1
+            decision_tier = _normalize_tier_label(r.decision_tier or r.tier)
             decision_tier_counts[decision_tier] = decision_tier_counts.get(decision_tier, 0) + 1
             method_counts[r.method] = method_counts.get(r.method, 0) + 1
+            c = getattr(r, "complexity", 0.33)
+            if c < 0.33:
+                complexity_dist["simple"] += 1
+            elif c < 0.67:
+                complexity_dist["medium"] += 1
+            else:
+                complexity_dist["complex"] += 1
 
         by_tier: dict[str, TierSummary] = {}
         for tier, recs in tier_groups.items():
@@ -375,8 +448,9 @@ class RouteStats:
             by_transport=by_transport,
             by_cache_mode=by_cache_mode,
             by_cache_family=by_cache_family,
-            by_profile=profile_counts,
+            by_mode=mode_counts,
             by_method=method_counts,
+            complexity_distribution=complexity_dist,
             avg_confidence=sum(r.confidence for r in self._records) / n,
             avg_savings=sum(r.savings for r in self._records) / n,
             avg_latency_us=sum(r.latency_us for r in self._records) / n,
@@ -425,10 +499,10 @@ class RouteStats:
             {
                 "timestamp": r.timestamp,
                 "requested_model": r.requested_model,
-                "profile": r.profile,
+                "mode": r.mode,
                 "model": r.model,
-                "tier": r.tier,
-                "decision_tier": r.decision_tier,
+                "tier": _normalize_tier_label(r.tier),
+                "decision_tier": _normalize_tier_label(r.decision_tier) if r.decision_tier else "",
                 "confidence": r.confidence,
                 "method": r.method,
                 "estimated_cost": r.estimated_cost,
@@ -463,6 +537,17 @@ class RouteStats:
                 "streaming": r.streaming,
                 "request_id": r.request_id,
                 "prompt_preview": r.prompt_preview,
+                "complexity": r.complexity,
+                "constraint_tags": list(r.constraint_tags or []),
+                "hint_tags": list(r.hint_tags or []),
+                "answer_depth": r.answer_depth,
+                "feedback_signal": r.feedback_signal,
+                "feedback_ok": r.feedback_ok,
+                "feedback_action": r.feedback_action,
+                "feedback_from_tier": _normalize_tier_label(r.feedback_from_tier) if r.feedback_from_tier else "",
+                "feedback_to_tier": _normalize_tier_label(r.feedback_to_tier) if r.feedback_to_tier else "",
+                "feedback_reason": r.feedback_reason,
+                "feedback_submitted_at": r.feedback_submitted_at,
             }
             for r in self._records
         ])
@@ -474,12 +559,12 @@ class RouteStats:
             self._records.append(RouteRecord(
                 timestamp=r["timestamp"],
                 requested_model=r.get("requested_model", ""),
-                profile=r.get("profile", "auto"),
+                mode=r.get("mode", "auto"),
                 model=r.get("model", ""),
-                tier=r.get("tier", ""),
-                decision_tier=r.get("decision_tier", ""),
+                tier=_normalize_tier_label(r.get("tier", "")),
+                decision_tier=_normalize_tier_label(r.get("decision_tier", "")) if r.get("decision_tier", "") else "",
                 confidence=r.get("confidence", 0.0),
-                method=r.get("method", "cascade"),
+                method=r.get("method", "pool"),
                 estimated_cost=r.get("estimated_cost", 0.0),
                 baseline_cost=r.get("baseline_cost", 0.0),
                 actual_cost=r.get("actual_cost"),
@@ -512,5 +597,16 @@ class RouteStats:
                 streaming=r.get("streaming", False),
                 request_id=r.get("request_id", ""),
                 prompt_preview=r.get("prompt_preview", ""),
+                complexity=r.get("complexity", 0.33),
+                constraint_tags=list(r.get("constraint_tags", []) or []),
+                hint_tags=list(r.get("hint_tags", []) or []),
+                answer_depth=r.get("answer_depth", "standard"),
+                feedback_signal=r.get("feedback_signal", ""),
+                feedback_ok=r.get("feedback_ok", False),
+                feedback_action=r.get("feedback_action", ""),
+                feedback_from_tier=_normalize_tier_label(r.get("feedback_from_tier", "")) if r.get("feedback_from_tier", "") else "",
+                feedback_to_tier=_normalize_tier_label(r.get("feedback_to_tier", "")) if r.get("feedback_to_tier", "") else "",
+                feedback_reason=r.get("feedback_reason", ""),
+                feedback_submitted_at=r.get("feedback_submitted_at", 0.0),
             ))
         self._cleanup()

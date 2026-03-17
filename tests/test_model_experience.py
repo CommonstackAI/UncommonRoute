@@ -7,7 +7,7 @@ from uncommon_route import (
     FeedbackCollector,
     ModelPricing,
     RequestRequirements,
-    RoutingProfile,
+    RoutingMode,
     SelectionWeights,
     Tier,
     TierConfig,
@@ -18,12 +18,13 @@ from uncommon_route.model_experience import (
     InMemoryModelExperienceStorage,
     ModelExperienceStore,
 )
+from uncommon_route.model_map import infer_capabilities
 
 
 def test_model_experience_defaults_neutral() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
 
-    snapshot = store.snapshot("moonshot/kimi-k2.5", RoutingProfile.AUTO, Tier.SIMPLE)
+    snapshot = store.snapshot("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE)
 
     assert snapshot.reliability == 0.5
     assert snapshot.latency == 0.5
@@ -34,13 +35,36 @@ def test_model_experience_defaults_neutral() -> None:
     assert snapshot.samples == 0
 
 
+def test_infer_capabilities_marks_only_zero_priced_models_as_free() -> None:
+    low_cost = infer_capabilities(
+        "openai/gpt-oss-120b",
+        ModelPricing(0.05, 0.25),
+        has_explicit_pricing=True,
+    )
+    assert low_cost.free is False
+
+    zero_cost = infer_capabilities(
+        "local/free-model",
+        ModelPricing(0.0, 0.0),
+        has_explicit_pricing=True,
+    )
+    assert zero_cost.free is True
+
+    unknown_cost = infer_capabilities(
+        "openai/gpt-4o",
+        ModelPricing(0.0, 0.0),
+        has_explicit_pricing=False,
+    )
+    assert unknown_cost.free is False
+
+
 def test_model_experience_updates_from_observation_and_feedback() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
 
     for _ in range(4):
         store.observe(
             "google/gemini-2.5-flash-lite",
-            RoutingProfile.AUTO,
+            RoutingMode.AUTO,
             Tier.SIMPLE,
             success=True,
             ttft_ms=220,
@@ -50,9 +74,9 @@ def test_model_experience_updates_from_observation_and_feedback() -> None:
             cache_read_tokens=600,
             input_cost_multiplier=0.46,
         )
-    store.record_feedback("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE, "ok")
+    store.record_feedback("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE, "ok")
 
-    snapshot = store.snapshot("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE)
+    snapshot = store.snapshot("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE)
 
     assert snapshot.reliability > 0.7
     assert snapshot.latency > 0.6
@@ -66,13 +90,13 @@ def test_model_experience_updates_from_observation_and_feedback() -> None:
 def test_select_model_bandit_explores_under_sampled_candidate() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
     for _ in range(8):
-        store.observe("alpha/model", RoutingProfile.AUTO, Tier.SIMPLE, success=True, ttft_ms=200, tps=80)
+        store.observe("alpha/model", RoutingMode.AUTO, Tier.SIMPLE, success=True, ttft_ms=200, tps=80)
 
     decision = select_model(
         tier=Tier.SIMPLE,
-        profile=RoutingProfile.AUTO,
+        mode=RoutingMode.AUTO,
         confidence=0.8,
-        method="cascade",
+        method="pool",
         reasoning="test",
         tier_configs={
             Tier.SIMPLE: TierConfig(primary="alpha/model", fallback=["beta/model"]),
@@ -116,14 +140,14 @@ def test_select_model_bandit_explores_under_sampled_candidate() -> None:
 def test_select_model_bandit_guardrail_blocks_unreliable_candidate() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
     for _ in range(5):
-        store.observe("beta/model", RoutingProfile.AUTO, Tier.SIMPLE, success=False)
-    store.observe("alpha/model", RoutingProfile.AUTO, Tier.SIMPLE, success=True, ttft_ms=250, tps=70)
+        store.observe("beta/model", RoutingMode.AUTO, Tier.SIMPLE, success=False)
+    store.observe("alpha/model", RoutingMode.AUTO, Tier.SIMPLE, success=True, ttft_ms=250, tps=70)
 
     decision = select_model(
         tier=Tier.SIMPLE,
-        profile=RoutingProfile.AUTO,
+        mode=RoutingMode.AUTO,
         confidence=0.8,
-        method="cascade",
+        method="pool",
         reasoning="test",
         tier_configs={
             Tier.SIMPLE: TierConfig(primary="alpha/model", fallback=["beta/model"]),
@@ -169,20 +193,20 @@ def test_route_adapts_to_model_experience() -> None:
     for _ in range(6):
         store.observe(
             "moonshot/kimi-k2.5",
-            RoutingProfile.AUTO,
+            RoutingMode.AUTO,
             Tier.SIMPLE,
             success=False,
         )
-        store.record_feedback("moonshot/kimi-k2.5", RoutingProfile.AUTO, Tier.SIMPLE, "weak")
+        store.record_feedback("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE, "weak")
         store.observe(
             "google/gemini-2.5-flash-lite",
-            RoutingProfile.AUTO,
+            RoutingMode.AUTO,
             Tier.SIMPLE,
             success=True,
             ttft_ms=180,
             tps=110,
         )
-        store.record_feedback("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE, "ok")
+        store.record_feedback("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE, "ok")
 
     decision = route("hello", model_experience=store)
 
@@ -200,21 +224,21 @@ def test_feedback_collector_updates_model_experience() -> None:
         {"s_length": 0.1},
         "SIMPLE",
         model="moonshot/kimi-k2.5",
-        profile="auto",
+        mode="auto",
     )
 
     result = feedback.submit("req-1", "weak")
 
     assert result.ok is True
-    snapshot = store.snapshot("moonshot/kimi-k2.5", RoutingProfile.AUTO, Tier.SIMPLE)
+    snapshot = store.snapshot("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE)
     assert snapshot.feedback < 0.5
 
 
 def test_model_experience_summary_exposes_feedback_changes() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage(), now_fn=lambda: 1_000.0)
-    store.observe("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE, success=True, ttft_ms=200, tps=100)
-    store.record_feedback("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE, "ok")
-    store.record_feedback("moonshot/kimi-k2.5", RoutingProfile.AUTO, Tier.SIMPLE, "weak")
+    store.observe("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE, success=True, ttft_ms=200, tps=100)
+    store.record_feedback("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE, "ok")
+    store.record_feedback("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE, "weak")
 
     summary = store.summary()
 
@@ -231,7 +255,7 @@ def test_select_model_prefers_cache_friendly_candidate_when_weights_allow() -> N
     for _ in range(5):
         store.observe(
             "alpha/model",
-            RoutingProfile.AGENTIC,
+            RoutingMode.BEST,
             Tier.MEDIUM,
             success=True,
             ttft_ms=250,
@@ -243,7 +267,7 @@ def test_select_model_prefers_cache_friendly_candidate_when_weights_allow() -> N
         )
         store.observe(
             "beta/model",
-            RoutingProfile.AGENTIC,
+            RoutingMode.BEST,
             Tier.MEDIUM,
             success=True,
             ttft_ms=250,
@@ -256,9 +280,9 @@ def test_select_model_prefers_cache_friendly_candidate_when_weights_allow() -> N
 
     decision = select_model(
         tier=Tier.MEDIUM,
-        profile=RoutingProfile.AGENTIC,
+        mode=RoutingMode.BEST,
         confidence=0.8,
-        method="cascade",
+        method="pool",
         reasoning="cache test",
         tier_configs={
             Tier.MEDIUM: TierConfig(primary="beta/model", fallback=["alpha/model"]),
@@ -290,14 +314,14 @@ def test_select_model_prefers_cache_friendly_candidate_when_weights_allow() -> N
     assert decision.candidate_scores[0].cache_affinity > decision.candidate_scores[1].cache_affinity
 
 
-def test_model_experience_bucket_summary_filters_profile_and_tier() -> None:
+def test_model_experience_bucket_summary_filters_mode_and_tier() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
-    store.record_feedback("google/gemini-2.5-flash-lite", RoutingProfile.AUTO, Tier.SIMPLE, "ok")
-    store.record_feedback("anthropic/claude-haiku-4.5", RoutingProfile.AUTO, Tier.MEDIUM, "ok")
+    store.record_feedback("google/gemini-2.5-flash-lite", RoutingMode.AUTO, Tier.SIMPLE, "ok")
+    store.record_feedback("anthropic/claude-haiku-4.5", RoutingMode.AUTO, Tier.MEDIUM, "ok")
 
-    bucket = store.bucket_summary(RoutingProfile.AUTO, Tier.SIMPLE)
+    bucket = store.bucket_summary(RoutingMode.AUTO, Tier.SIMPLE)
 
-    assert bucket["profile"] == "auto"
+    assert bucket["mode"] == "auto"
     assert bucket["tier"] == "SIMPLE"
     assert bucket["count"] == 1
     assert bucket["models"][0]["model"] == "google/gemini-2.5-flash-lite"

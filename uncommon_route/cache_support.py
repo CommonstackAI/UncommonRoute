@@ -88,19 +88,27 @@ def apply_anthropic_cache_breakpoints(
     messages = body.get("messages") or []
     breakpoints = 0
 
+    # Anthropic requires cache_control TTLs to be non-increasing across
+    # tools → system → messages.  Determine the effective TTL by taking the
+    # longest of (a) our session-based preference and (b) any TTL already
+    # present in the request so breakpoints we add never violate ordering.
+    computed_ttl = "1h" if session_id and step_type != "general" else None
+    existing_max = _max_existing_cache_ttl(body)
+    use_1h = computed_ttl == "1h" or existing_max == "1h"
+    cc: dict[str, Any] = {"type": "ephemeral", "ttl": "1h"} if use_1h else {"type": "ephemeral"}
+
     if tools:
-        tools[-1]["cache_control"] = {"type": "ephemeral"}
+        tools[-1]["cache_control"] = dict(cc)
         breakpoints += 1
 
     system = body.get("system")
     if isinstance(system, list) and system:
-        system[-1]["cache_control"] = {"type": "ephemeral"}
+        system[-1]["cache_control"] = dict(cc)
         breakpoints += 1
     elif isinstance(system, str) and system.strip():
-        body["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        body["system"] = [{"type": "text", "text": system, "cache_control": dict(cc)}]
         breakpoints += 1
     elif messages:
-        # Fall back to the earliest reusable message when there is no top-level system block.
         for idx, message in enumerate(messages[:-1]):
             if message.get("role") not in {"system", "user", "assistant"}:
                 continue
@@ -109,19 +117,42 @@ def apply_anthropic_cache_breakpoints(
                 body_messages = list(messages)
                 body_messages[idx] = {
                     **message,
-                    "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
+                    "content": [{"type": "text", "text": content, "cache_control": dict(cc)}],
                 }
                 body["messages"] = body_messages
                 breakpoints += 1
                 break
 
-    ttl = "1h" if session_id and step_type != "general" else "5m"
+    ttl = "1h" if use_1h else "5m"
     return CacheRequestPlan(
         family="anthropic",
         mode="cache_control",
         anthropic_ttl=ttl,
         cache_breakpoints=breakpoints,
     )
+
+
+def _max_existing_cache_ttl(body: dict[str, Any]) -> str | None:
+    """Return ``"1h"`` if any cache_control block in *body* uses that TTL."""
+    for key in ("tools", "system", "messages"):
+        section = body.get(key)
+        if not isinstance(section, list):
+            continue
+        for item in section:
+            if not isinstance(item, dict):
+                continue
+            if _cache_control_has_1h(item.get("cache_control")):
+                return "1h"
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and _cache_control_has_1h(block.get("cache_control")):
+                        return "1h"
+    return None
+
+
+def _cache_control_has_1h(cc: Any) -> bool:
+    return isinstance(cc, dict) and cc.get("ttl") == "1h"
 
 
 def parse_usage_metrics(

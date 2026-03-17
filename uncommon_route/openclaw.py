@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING, VIRTUAL_MODEL_IDS
-from uncommon_route.router.types import RoutingProfile
+from uncommon_route.router.types import RoutingMode
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_FILE = _OPENCLAW_DIR / "openclaw.json"
@@ -50,7 +50,7 @@ def _build_provider_block(port: int) -> dict[str, Any]:
 
     models: list[dict[str, Any]] = [
         {
-            "id": VIRTUAL_MODEL_IDS[RoutingProfile.AUTO],
+            "id": VIRTUAL_MODEL_IDS[RoutingMode.AUTO],
             "name": "UncommonRoute Auto (smart routing)",
             "api": "openai-completions",
             "reasoning": False,
@@ -60,8 +60,8 @@ def _build_provider_block(port: int) -> dict[str, Any]:
             "maxTokens": 16384,
         },
         {
-            "id": VIRTUAL_MODEL_IDS[RoutingProfile.ECO],
-            "name": "UncommonRoute Eco (cheap-first)",
+            "id": VIRTUAL_MODEL_IDS[RoutingMode.FAST],
+            "name": "UncommonRoute Fast (lighter and faster)",
             "api": "openai-completions",
             "reasoning": False,
             "input": ["text"],
@@ -70,28 +70,8 @@ def _build_provider_block(port: int) -> dict[str, Any]:
             "maxTokens": 16384,
         },
         {
-            "id": VIRTUAL_MODEL_IDS[RoutingProfile.PREMIUM],
-            "name": "UncommonRoute Premium (quality-first)",
-            "api": "openai-completions",
-            "reasoning": True,
-            "input": ["text"],
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": 200000,
-            "maxTokens": 16384,
-        },
-        {
-            "id": VIRTUAL_MODEL_IDS[RoutingProfile.FREE],
-            "name": "UncommonRoute Free (free-first)",
-            "api": "openai-completions",
-            "reasoning": False,
-            "input": ["text"],
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": 200000,
-            "maxTokens": 16384,
-        },
-        {
-            "id": VIRTUAL_MODEL_IDS[RoutingProfile.AGENTIC],
-            "name": "UncommonRoute Agentic (tool-aware)",
+            "id": VIRTUAL_MODEL_IDS[RoutingMode.BEST],
+            "name": "UncommonRoute Best (highest quality)",
             "api": "openai-completions",
             "reasoning": True,
             "input": ["text"],
@@ -224,7 +204,7 @@ def print_status() -> None:
         print()
         print("  To integrate with OpenClaw:")
         print(f"    Option A (recommended): openclaw plugins install {_NPM_PACKAGE}")
-        print(f"    Option B (fallback):    uncommon-route openclaw install")
+        print("    Option B (fallback):    uncommon-route openclaw install")
 
 
 def cmd_openclaw(args: list[str]) -> None:
@@ -244,20 +224,20 @@ def cmd_openclaw(args: list[str]) -> None:
         if _is_plugin_installed():
             print("[UncommonRoute] JS bridge plugin is already installed.")
             print("  Config-patch not needed — the plugin handles registration automatically.")
-            print(f"  To reconfigure: edit ~/.openclaw/openclaw.yaml plugins section")
+            print("  To reconfigure: edit ~/.openclaw/openclaw.yaml plugins section")
             return
 
         is_new = install(port=port)
         if is_new:
-            print(f"[UncommonRoute] Registered as OpenClaw provider (config-patch)")
+            print("[UncommonRoute] Registered as OpenClaw provider (config-patch)")
             print(f"  Proxy URL: http://127.0.0.1:{port}/v1")
-            print(f"  Default model set to: uncommon-route/auto")
+            print("  Default model set to: uncommon-route/auto")
             print()
-            print(f"  Next steps:")
+            print("  Next steps:")
             print(f"    1. Start proxy:  uncommon-route serve --port {port}")
-            print(f"    2. Restart:      openclaw gateway restart")
+            print("    2. Restart:      openclaw gateway restart")
             print()
-            print(f"  For automatic lifecycle management, install the JS bridge instead:")
+            print("  For automatic lifecycle management, install the JS bridge instead:")
             print(f"    openclaw plugins install {_NPM_PACKAGE}")
         else:
             print(f"[UncommonRoute] Updated existing config-patch (port {port})")
@@ -266,7 +246,7 @@ def cmd_openclaw(args: list[str]) -> None:
         if _is_plugin_installed():
             print("[UncommonRoute] JS bridge plugin is installed.")
             print(f"  To uninstall: openclaw plugins uninstall {_NPM_PACKAGE}")
-            print(f"  Also removing config-patch if present...")
+            print("  Also removing config-patch if present...")
 
         removed = uninstall()
         if removed:

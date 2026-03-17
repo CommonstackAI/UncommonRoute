@@ -1,4 +1,4 @@
-<p align="right"><a href="https://github.com/anjieyang/UncommonRoute/blob/main/README.md">English</a> | <strong>简体中文</strong></p>
+<p align="right"><a href="https://github.com/CommonstackAI/UncommonRoute/blob/main/README.md">English</a> | <strong>简体中文</strong></p>
 
 <div align="center">
 
@@ -748,7 +748,7 @@ uncommon-route openclaw uninstall
 ## 开发
 
 ```bash
-git clone https://github.com/anjieyang/UncommonRoute.git
+git clone https://github.com/CommonstackAI/UncommonRoute.git
 cd UncommonRoute
 pip install -e ".[dev]"
 python -m pytest tests -v

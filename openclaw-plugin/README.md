@@ -1,8 +1,8 @@
-<p align="right"><strong>English</strong> | <a href="https://github.com/anjieyang/UncommonRoute/blob/main/README.zh-CN.md">简体中文</a></p>
+<p align="right"><strong>English</strong> | <a href="https://github.com/CommonstackAI/UncommonRoute/blob/main/README.zh-CN.md">简体中文</a></p>
 
 # @anjieyang/uncommon-route
 
-OpenClaw plugin for [UncommonRoute](https://github.com/anjieyang/UncommonRoute), the local LLM router that sends easy requests to cheaper models and saves stronger models for harder work.
+OpenClaw plugin for [UncommonRoute](https://github.com/CommonstackAI/UncommonRoute), the local LLM router that sends easy requests to cheaper models and saves stronger models for harder work.
 
 If you use OpenClaw and want one local endpoint with smart routing behind it, this plugin is the shortest path.
 
@@ -96,9 +96,9 @@ Current repo benchmarks:
 
 ## Links
 
-- [GitHub](https://github.com/anjieyang/UncommonRoute)
+- [GitHub](https://github.com/CommonstackAI/UncommonRoute)
 - [PyPI](https://pypi.org/project/uncommon-route/)
-- [Full README](https://github.com/anjieyang/UncommonRoute#readme)
+- [Full README](https://github.com/CommonstackAI/UncommonRoute#readme)
 
 ## License
 

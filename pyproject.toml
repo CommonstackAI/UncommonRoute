@@ -1,6 +1,6 @@
 [project]
 name = "uncommon-route"
-version = "0.2.9"
+version = "0.3.0"
 description = "Local LLM router that cuts premium-model spend with adaptive 3-tier routing, OpenAI + Anthropic compatible"
 requires-python = ">=3.11"
 license = "MIT"
@@ -36,9 +36,9 @@ dev = [
 uncommon-route = "uncommon_route.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/anjieyang/UncommonRoute"
-Repository = "https://github.com/anjieyang/UncommonRoute"
-Issues = "https://github.com/anjieyang/UncommonRoute/issues"
+Homepage = "https://github.com/CommonstackAI/UncommonRoute"
+Repository = "https://github.com/CommonstackAI/UncommonRoute"
+Issues = "https://github.com/CommonstackAI/UncommonRoute/issues"
 
 [build-system]
 requires = ["setuptools>=68.0"]

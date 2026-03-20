@@ -13,7 +13,7 @@ A lightweight local router that automatically balances cost and quality for ever
 </p>
 
 <p>
-Built for<strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
+Built for <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
 </p>
 
 <p>

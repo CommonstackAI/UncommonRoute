@@ -78,7 +78,7 @@ One benchmark snapshot:
 | Scenario | Total cost |
 | --- | ---: |
 | Always `anthropic/claude-opus-4.6` | `$1.7529` |
-| UncommonRoute | `$0.5801` |
+| UncommonRoute | `$0.238` |
 
 That is the core story of the project: spend premium-model money where it changes the answer, not where it just burns the budget.
 
@@ -689,7 +689,7 @@ Simulated on a **131-request agent coding session** and compared against always 
 
 | Metric | Always Opus | UncommonRoute |
 | --- | ---: | ---: |
-| Total cost | $1.7529 | **$0.5801** |
+| Total cost | $1.7529 | **$0.238** |
 | Cost saved | — | **86.4%** |
 | Quality retained | 100% | **93.5%** |
 | Routing accuracy | — | **90.8%** |

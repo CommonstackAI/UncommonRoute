@@ -9,11 +9,11 @@
 <p>
 A lightweight local router that automatically balances cost and quality for every LLM request.
   
-85%+ cost savings · 92.3% routing accuracy · <1ms decision latency ·
+85%+ cost savings · 92.3% routing accuracy · <1ms decision latency 
 </p>
 
 <p>
-Built for <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, the <strong>OpenAI SDK</strong>, and <strong>OpenClaw</strong>.
+Built for<strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
 </p>
 
 <p>

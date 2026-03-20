@@ -8,6 +8,7 @@
 
 <p>
 A lightweight local router that automatically balances cost and quality for every LLM request.
+  
 85%+ cost savings · 92.3% routing accuracy · <1ms decision latency ·
 </p>
 

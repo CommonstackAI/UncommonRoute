@@ -7,8 +7,8 @@
 <p><strong>Stop overpaying for every prompt.</strong></p>
 
 <p>
-UncommonRoute is a local LLM router that sits between your client and your upstream API.
-Easy turns go cheap, hard turns go strong, and fallback chains are ready when the first choice fails.
+A lightweight local router that automatically balances cost and quality for every LLM request.
+85%+ cost savings · 92.3% routing accuracy · <1ms decision latency ·
 </p>
 
 <p>

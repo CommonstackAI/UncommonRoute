@@ -4,7 +4,7 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>Route prompts by difficulty, not habit.</strong></p>
+<p><strong>Stop overpaying for every prompt.</strong></p>
 
 <p>
 UncommonRoute is a local LLM router that sits between your client and your upstream API.

@@ -69,7 +69,7 @@ It does not host models. It makes a fast local routing decision, forwards the re
 The pitch is simple: keep one local endpoint, let the router decide when a strong model is actually worth paying for.
 
 - **92.3% held-out routing accuracy** on 763 hand-written prompts across 15 languages and 35 categories
-- **67% lower simulated cost** on a 131-request coding session versus always using `anthropic/claude-opus-4.6`
+- **86.4% lower simulated cost** on a 131-request coding session versus always using `anthropic/claude-opus-4.6`
 - **~0.5ms average routing latency**
 - **281 passing tests**
 
@@ -690,7 +690,7 @@ Simulated on a **131-request agent coding session** and compared against always 
 | Metric | Always Opus | UncommonRoute |
 | --- | ---: | ---: |
 | Total cost | $1.7529 | **$0.5801** |
-| Cost saved | — | **67%** |
+| Cost saved | — | **86.4%** |
 | Quality retained | 100% | **93.5%** |
 | Routing accuracy | — | **90.8%** |
 

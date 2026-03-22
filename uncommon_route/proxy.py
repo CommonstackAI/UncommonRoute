@@ -78,7 +78,7 @@ from uncommon_route.providers import (
 )
 from uncommon_route.model_map import ModelMapper
 from uncommon_route.routing_config_store import RoutingConfigStore
-from uncommon_route.scene_store import SceneConfig, SceneStore
+from uncommon_route.scene_store import SceneConfig, SceneStore, _serialize_scene
 from uncommon_route.connections_store import ConnectionsStore, mask_api_key, resolve_primary_connection
 from uncommon_route.anthropic_compat import (
     anthropic_to_openai_request,
@@ -1629,16 +1629,29 @@ def create_app(
                     fallback = [str(f).strip() for f in fallback_raw if str(f).strip()]
                 else:
                     fallback = []
+                tier_floor_raw = body.get("tier_floor")
+                tier_floor = Tier(str(tier_floor_raw).upper()) if tier_floor_raw else None
+                tier_cap_raw = body.get("tier_cap")
+                tier_cap = Tier(str(tier_cap_raw).upper()) if tier_cap_raw else None
+                allowed_providers_raw = body.get("allowed_providers", [])
+                allowed_providers = (
+                    [str(p).strip() for p in allowed_providers_raw if str(p).strip()]
+                    if isinstance(allowed_providers_raw, list) else []
+                )
+                max_cost_raw = body.get("max_cost_per_request")
+                max_cost = float(max_cost_raw) if max_cost_raw is not None else None
+                if max_cost is not None and max_cost <= 0:
+                    return JSONResponse({"error": "max_cost_per_request must be positive"}, status_code=400)
                 scene = SceneConfig(
                     name=name,
                     primary=primary,
                     fallback=fallback,
                     hard_pin=bool(body.get("hard_pin", False)),
                     description=str(body.get("description", "")),
-                    complexity_override=body.get("complexity_override"),
-                    allowed_providers=body.get("allowed_providers", []),
-                    selection_weights_override=body.get("selection_weights_override"),
-                    max_cost_per_request=body.get("max_cost_per_request"),
+                    tier_floor=tier_floor,
+                    tier_cap=tier_cap,
+                    allowed_providers=allowed_providers,
+                    max_cost_per_request=max_cost,
                 )
                 stored = _scene_store.add(scene)
                 return JSONResponse({"ok": True, "scene": _serialize_scene_response(stored)})
@@ -1669,7 +1682,6 @@ def create_app(
         return JSONResponse(_serialize_scene_response(scene))
 
     def _serialize_scene_response(scene: SceneConfig) -> dict:
-        from uncommon_route.scene_store import _serialize_scene
         data = _serialize_scene(scene)
         data["model_pool"] = scene.model_pool()
         return data
@@ -1878,10 +1890,9 @@ def create_app(
                 )
             elif _active_scene:
                 # Soft scene: constrain candidate pool to scene's models,
-                # optionally override complexity, but let select_from_pool
-                # do multi-dimensional scoring (latency/reliability/feedback/bandit).
+                # let select_from_pool do multi-dimensional scoring
+                # (latency/reliability/feedback/bandit).
                 _scene_constraints = _active_scene.as_routing_constraints()
-                _scene_weights = _active_scene.as_selection_weights()
                 decision = route(
                     prompt,
                     system_prompt,
@@ -1932,7 +1943,8 @@ def create_app(
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence
             savings = decision.savings
-            route_method = "pool"
+            if not _active_scene:
+                route_method = "pool"
             mode_value = decision.mode.value
 
             body["model"] = selected_model

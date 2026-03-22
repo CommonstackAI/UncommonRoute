@@ -48,22 +48,10 @@ class TestSceneConfig:
         assert constraints.allowed_providers == ("anthropic",)
         assert constraints.max_cost == 0.05
 
-    def test_as_selection_weights_none_by_default(self):
+    def test_as_selection_weights_returns_none(self):
+        """selection_weights_override removed; method reserved for future use."""
         scene = SceneConfig(name="t", primary="a/b")
         assert scene.as_selection_weights() is None
-
-    def test_as_selection_weights_override(self):
-        scene = SceneConfig(
-            name="t",
-            primary="a/b",
-            selection_weights_override={"editorial": 0.8, "cost": 0.1},
-        )
-        weights = scene.as_selection_weights()
-        assert weights is not None
-        assert weights.editorial == 0.8
-        assert weights.cost == 0.1
-        # Unspecified fields use defaults
-        assert weights.latency == 0.1
 
 
 class TestSerialization:

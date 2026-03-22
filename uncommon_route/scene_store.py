@@ -9,9 +9,10 @@ Two behaviours depending on ``hard_pin``:
 
 * **hard_pin=True** — bypass classifier *and* selector; use
   ``primary`` directly with ``fallback`` as the ordered chain.
-* **hard_pin=False** — bypass the classifier (use ``complexity_override``
-  or default 0.5), but let ``select_from_pool`` score within the scene's
-  model list.  This preserves latency/reliability/feedback/bandit scoring.
+* **hard_pin=False** — constrain candidate pool to the scene's model
+  list, optionally apply tier_floor/tier_cap, but let the full
+  classifier → selector pipeline score within that pool.
+  This preserves latency/reliability/feedback/bandit scoring.
 
 Trigger precedence (checked in proxy):
 
@@ -25,14 +26,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from uncommon_route.paths import data_dir
 from uncommon_route.router.types import (
     RoutingConstraints,
-    SelectionWeights,
     Tier,
 )
 
@@ -52,20 +52,12 @@ class SceneConfig:
     hard_pin: bool = False
     description: str = ""
 
-    # When hard_pin=False, this value replaces the classifier output.
-    # None means "run the classifier normally" (scene only constrains
-    # the candidate pool, not the complexity signal).
-    complexity_override: float | None = None
-
     # Optional tier floor/cap — lets a scene say "at least MEDIUM".
     tier_floor: Tier | None = None
     tier_cap: Tier | None = None
 
     # Provider-level constraint (e.g. only allow anthropic/).
     allowed_providers: list[str] = field(default_factory=list)
-
-    # Per-scene selection weight overrides (None = use global defaults).
-    selection_weights_override: dict[str, float] | None = None
 
     # Per-scene spend limit ($/request).  None = no limit.
     max_cost_per_request: float | None = None
@@ -89,17 +81,9 @@ class SceneConfig:
             max_cost=self.max_cost_per_request,
         )
 
-    def as_selection_weights(self) -> SelectionWeights | None:
-        """Build SelectionWeights if overrides are defined."""
-        if not self.selection_weights_override:
-            return None
-        defaults = SelectionWeights()
-        kwargs: dict[str, float] = {}
-        for fld in defaults.__dataclass_fields__:
-            kwargs[fld] = self.selection_weights_override.get(
-                fld, getattr(defaults, fld)
-            )
-        return SelectionWeights(**kwargs)
+    def as_selection_weights(self) -> None:
+        """Reserved for future use when route() supports injected weights."""
+        return None
 
 
 def _serialize_scene(scene: SceneConfig) -> dict[str, Any]:
@@ -117,12 +101,8 @@ def _serialize_scene(scene: SceneConfig) -> dict[str, Any]:
     # Strip None/empty optionals for cleaner JSON
     if not data.get("allowed_providers"):
         data.pop("allowed_providers", None)
-    if data.get("selection_weights_override") is None:
-        data.pop("selection_weights_override", None)
     if data.get("max_cost_per_request") is None:
         data.pop("max_cost_per_request", None)
-    if data.get("complexity_override") is None:
-        data.pop("complexity_override", None)
     return data
 
 
@@ -165,11 +145,9 @@ def _deserialize_scene(data: dict[str, Any]) -> SceneConfig | None:
             fallback=[f for f in fallback if f],
             hard_pin=bool(data.get("hard_pin", False)),
             description=str(data.get("description", "")),
-            complexity_override=data.get("complexity_override"),
             tier_floor=tier_floor,
             tier_cap=tier_cap,
             allowed_providers=[str(p).strip() for p in allowed_providers if str(p).strip()],
-            selection_weights_override=data.get("selection_weights_override"),
             max_cost_per_request=data.get("max_cost_per_request"),
         )
     except Exception:
@@ -233,23 +211,15 @@ class SceneStore:
             fallback=[f.strip() for f in scene.fallback if f.strip()],
             hard_pin=scene.hard_pin,
             description=scene.description,
-            complexity_override=scene.complexity_override,
             tier_floor=scene.tier_floor,
             tier_cap=scene.tier_cap,
             allowed_providers=scene.allowed_providers,
-            selection_weights_override=scene.selection_weights_override,
             max_cost_per_request=scene.max_cost_per_request,
         )
         # Deduplicate fallback against primary
-        normalized = SceneConfig(
-            **{
-                **asdict(normalized),
-                "fallback": [
-                    f for f in normalized.fallback if f != normalized.primary
-                ],
-                "tier_floor": normalized.tier_floor,
-                "tier_cap": normalized.tier_cap,
-            }
+        normalized = replace(
+            normalized,
+            fallback=[f for f in normalized.fallback if f != normalized.primary],
         )
         self._scenes[normalized.name] = normalized
         self._save()

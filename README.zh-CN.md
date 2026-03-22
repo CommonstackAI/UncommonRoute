@@ -11,9 +11,7 @@
 </p>
 
 <p>
-适用于 <strong>Codex</strong>、<strong>Claude Code</strong>、<strong>Cursor</strong>、<strong>OpenAI SDK</strong> 和 <strong>OpenClaw</strong>。
-</p>
-
+适用于 <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
 <p>
 <a href="#快速开始"><strong>快速开始</strong></a> ·
 <a href="#路由到底怎么做决定"><strong>工作原理</strong></a> ·

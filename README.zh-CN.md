@@ -4,11 +4,10 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>按难度路由，不按习惯路由。</strong></p>
+<p><strong>别再为每条请求花冤枉钱了。</strong></p>
 
 <p>
-UncommonRoute 是一个跑在本机的 LLM Router，夹在你的客户端和上游模型 API 之间。
-简单请求走便宜模型，关键请求走强模型，首选失败时还能自动接上 fallback。
+一个轻量的本地 LLM Router，自动在成本和质量之间找到最优解。
 </p>
 
 <p>
@@ -68,7 +67,7 @@ UncommonRoute 做的事情很简单，就是把这个默认值改掉。
 一句话总结：你只保留一个本地 endpoint，剩下的模型选择交给 router。
 
 - **92.3% 保留集路由准确率**
-- **131 个请求的 coding session 模拟里，成本比 always Opus 低 67%**
+- **131 个请求的 coding session 模拟里，成本比 always Opus 低 86.4%**
 - **平均路由延迟约 0.5ms**
 - **当前测试套件 281 条全部通过**
 
@@ -77,7 +76,7 @@ UncommonRoute 做的事情很简单，就是把这个默认值改掉。
 | 场景 | 总成本 |
 | --- | ---: |
 | 始终使用 `anthropic/claude-opus-4.6` | `$1.7529` |
-| 使用 UncommonRoute | `$0.5801` |
+| 使用 UncommonRoute | `$0.236` |
 
 这就是项目想解决的问题：把贵模型的钱花在真的值钱的地方，而不是花在流程噪音上。
 
@@ -694,8 +693,8 @@ uncommon-route doctor
 
 | 指标 | Always Opus | UncommonRoute |
 | --- | ---: | ---: |
-| Total cost | $1.7529 | **$0.5801** |
-| Cost saved | — | **67%** |
+| Total cost | $1.7529 | **$0.236** |
+| Cost saved | — | **86.4%** |
 | Quality retained | 100% | **93.5%** |
 | Routing accuracy | — | **90.8%** |
 

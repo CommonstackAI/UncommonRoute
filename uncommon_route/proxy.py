@@ -78,6 +78,7 @@ from uncommon_route.providers import (
 )
 from uncommon_route.model_map import ModelMapper
 from uncommon_route.routing_config_store import RoutingConfigStore
+from uncommon_route.scene_store import SceneConfig, SceneStore, _serialize_scene
 from uncommon_route.connections_store import ConnectionsStore, mask_api_key, resolve_primary_connection
 from uncommon_route.anthropic_compat import (
     anthropic_to_openai_request,
@@ -1004,6 +1005,7 @@ def create_app(
     _semantic = semantic_compressor
     _routing_store = routing_config_store or RoutingConfigStore()
     _routing_config = _routing_store.config()
+    _scene_store = SceneStore()
 
     def _upstream_chat_url(base_url: str) -> str:
         return f"{str(base_url or '').rstrip('/')}/chat/completions"
@@ -1607,6 +1609,83 @@ def create_app(
         _refresh_active_pricing()
         return JSONResponse(payload)
 
+    async def handle_scenes(request: Request) -> JSONResponse:
+        """GET /v1/scenes — list all scenes.  POST /v1/scenes — add/remove/import."""
+        if request.method == "GET":
+            return JSONResponse(_scene_store.export())
+
+        body = await request.json()
+        action = str(body.get("action", "")).strip().lower()
+        try:
+            if action == "add":
+                name = str(body.get("name", "")).strip()
+                primary = str(body.get("primary", "")).strip()
+                if not name or not primary:
+                    return JSONResponse({"error": "name and primary are required"}, status_code=400)
+                fallback_raw = body.get("fallback", [])
+                if isinstance(fallback_raw, str):
+                    fallback = [p.strip() for p in fallback_raw.split(",") if p.strip()]
+                elif isinstance(fallback_raw, list):
+                    fallback = [str(f).strip() for f in fallback_raw if str(f).strip()]
+                else:
+                    fallback = []
+                tier_floor_raw = body.get("tier_floor")
+                tier_floor = Tier(str(tier_floor_raw).upper()) if tier_floor_raw else None
+                tier_cap_raw = body.get("tier_cap")
+                tier_cap = Tier(str(tier_cap_raw).upper()) if tier_cap_raw else None
+                allowed_providers_raw = body.get("allowed_providers", [])
+                allowed_providers = (
+                    [str(p).strip() for p in allowed_providers_raw if str(p).strip()]
+                    if isinstance(allowed_providers_raw, list) else []
+                )
+                max_cost_raw = body.get("max_cost_per_request")
+                max_cost = float(max_cost_raw) if max_cost_raw is not None else None
+                if max_cost is not None and max_cost <= 0:
+                    return JSONResponse({"error": "max_cost_per_request must be positive"}, status_code=400)
+                scene = SceneConfig(
+                    name=name,
+                    primary=primary,
+                    fallback=fallback,
+                    hard_pin=bool(body.get("hard_pin", False)),
+                    description=str(body.get("description", "")),
+                    tier_floor=tier_floor,
+                    tier_cap=tier_cap,
+                    allowed_providers=allowed_providers,
+                    max_cost_per_request=max_cost,
+                )
+                stored = _scene_store.add(scene)
+                return JSONResponse({"ok": True, "scene": _serialize_scene_response(stored)})
+            elif action == "remove":
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    return JSONResponse({"error": "name is required"}, status_code=400)
+                removed = _scene_store.remove(name)
+                return JSONResponse({"ok": removed, "name": name})
+            elif action == "import":
+                data = body.get("data", {})
+                count = _scene_store.import_scenes(data)
+                return JSONResponse({"ok": True, "imported": count})
+            else:
+                return JSONResponse(
+                    {"error": "Invalid action", "allowed": ["add", "remove", "import"]},
+                    status_code=400,
+                )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    async def handle_scene_detail(request: Request) -> JSONResponse:
+        """GET /v1/scenes/<name> — get one scene."""
+        name = request.path_params["name"]
+        scene = _scene_store.get(name)
+        if scene is None:
+            return JSONResponse({"error": f"Scene '{name}' not found"}, status_code=404)
+        return JSONResponse(_serialize_scene_response(scene))
+
+    def _serialize_scene_response(scene: SceneConfig) -> dict:
+        data = _serialize_scene(scene)
+        data["model_pool"] = scene.model_pool()
+        return data
+
     async def handle_artifacts(request: Request) -> JSONResponse:
         limit = int(request.query_params.get("limit", "50"))
         return JSONResponse({
@@ -1731,6 +1810,36 @@ def create_app(
         session_id = _resolve_session_id(request, body)
         step_type, tool_names = _classify_step(body)
 
+        # ── Scene resolution ───────────────────────────────────────────
+        # Trigger precedence:
+        #   1. x-uncommon-route-scene header
+        #   2. Virtual model ID: uncommon-route/scene/<name>
+        #   3. (Future: OpenClaw session → scene mapping via plugin)
+        _scene_name: str | None = None
+        _active_scene: SceneConfig | None = None
+
+        # Check header first (highest priority)
+        _scene_header = request.headers.get("x-uncommon-route-scene", "").strip()
+        if _scene_header:
+            _scene_name = _scene_header
+
+        # Check virtual model ID: uncommon-route/scene/<name>
+        if not _scene_name and model.startswith("uncommon-route/scene/"):
+            _scene_name = model[len("uncommon-route/scene/"):].strip()
+            # Treat scene requests as virtual (need routing)
+            if not is_virtual:
+                is_virtual = True
+                routing_mode = RoutingMode.AUTO
+
+        if _scene_name:
+            _active_scene = _scene_store.resolve(_scene_name)
+            if _active_scene:
+                logger.info(
+                    "Scene '%s' active: primary=%s hard_pin=%s",
+                    _active_scene.name, _active_scene.primary, _active_scene.hard_pin,
+                )
+                route_method = f"scene:{_active_scene.name}"
+
         if is_virtual:
             if prompt.startswith("/debug"):
                 debug_prompt = prompt[len("/debug"):].strip() or "hello"
@@ -1741,20 +1850,83 @@ def create_app(
 
             requirements, hints = _extract_requirements(body, step_type)
             user_keyed = _providers.keyed_models() or None
-            decision = route(
-                prompt,
-                system_prompt,
-                max_tokens,
-                config=_routing_config,
-                routing_mode=routing_mode or RoutingMode.AUTO,
-                request_requirements=requirements,
-                workload_hints=hints,
-                user_keyed_models=user_keyed,
-                model_experience=_model_experience,
-                pricing=_get_pricing(),
-                available_models=_mapper.available_models if _mapper.discovered else None,
-                model_capabilities=_routing_config.model_capabilities,
-            )
+
+            # ── Scene-aware routing ──────────────────────────────────
+            if _active_scene and _active_scene.hard_pin:
+                # Hard-pin: bypass classifier AND selector entirely.
+                # Use scene's primary directly; fallback is the ordered chain.
+                from uncommon_route.router.types import (
+                    FallbackOption,
+                    RoutingDecision,
+                    AnswerDepth as _AD,
+                )
+                from uncommon_route.router.structural import estimate_output_budget as _eob
+                _scene_pool = _active_scene.model_pool()
+                _scene_budget = _eob(prompt, "COMPLEX")
+                _scene_cost = _estimate_cost(
+                    _active_scene.primary,
+                    estimate_tokens(prompt),
+                    min(max_tokens, _scene_budget),
+                )
+                _scene_baseline = _estimate_baseline_cost(
+                    estimate_tokens(prompt),
+                    min(max_tokens, _scene_budget),
+                )
+                decision = RoutingDecision(
+                    model=_active_scene.primary,
+                    tier=Tier.COMPLEX,
+                    mode=routing_mode or RoutingMode.AUTO,
+                    confidence=1.0,
+                    method=f"scene:{_active_scene.name}:hard-pin",
+                    reasoning=f"scene={_active_scene.name} hard-pin → {_active_scene.primary}",
+                    cost_estimate=_scene_cost,
+                    baseline_cost=_scene_baseline,
+                    savings=max(0.0, (_scene_baseline - _scene_cost) / _scene_baseline) if _scene_baseline > 0 else 0.0,
+                    complexity=1.0,
+                    fallback_chain=[
+                        FallbackOption(model=m, cost_estimate=0.0, suggested_output_budget=_scene_budget)
+                        for m in _scene_pool[1:]
+                    ],
+                )
+            elif _active_scene:
+                # Soft scene: constrain candidate pool to scene's models,
+                # let select_from_pool do multi-dimensional scoring
+                # (latency/reliability/feedback/bandit).
+                _scene_constraints = _active_scene.as_routing_constraints()
+                decision = route(
+                    prompt,
+                    system_prompt,
+                    max_tokens,
+                    config=_routing_config,
+                    routing_mode=routing_mode or RoutingMode.AUTO,
+                    request_requirements=requirements,
+                    workload_hints=hints,
+                    user_keyed_models=user_keyed,
+                    model_experience=_model_experience,
+                    pricing=_get_pricing(),
+                    available_models=_active_scene.model_pool(),
+                    model_capabilities=_routing_config.model_capabilities,
+                    routing_constraints=_scene_constraints,
+                    tier_floor=_active_scene.tier_floor,
+                    tier_cap=_active_scene.tier_cap,
+                )
+            else:
+                # Normal routing (no scene active)
+                decision = route(
+                    prompt,
+                    system_prompt,
+                    max_tokens,
+                    config=_routing_config,
+                    routing_mode=routing_mode or RoutingMode.AUTO,
+                    request_requirements=requirements,
+                    workload_hints=hints,
+                    user_keyed_models=user_keyed,
+                    model_experience=_model_experience,
+                    pricing=_get_pricing(),
+                    available_models=_mapper.available_models if _mapper.discovered else None,
+                    model_capabilities=_routing_config.model_capabilities,
+                )
+
             selected_model = decision.model
             tier_value = decision.tier.value
             decision_tier = tier_value
@@ -1771,7 +1943,8 @@ def create_app(
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence
             savings = decision.savings
-            route_method = "pool"
+            if not _active_scene:
+                route_method = "pool"
             mode_value = decision.mode.value
 
             body["model"] = selected_model
@@ -2647,6 +2820,8 @@ def create_app(
         Route("/v1/stats", handle_stats, methods=["GET", "POST"]),
         Route("/v1/selector", handle_selector, methods=["GET", "POST"]),
         Route("/v1/routing-config", handle_routing_config, methods=["GET", "POST"]),
+        Route("/v1/scenes", handle_scenes, methods=["GET", "POST"]),
+        Route("/v1/scenes/{name:str}", handle_scene_detail, methods=["GET"]),
         Route("/v1/artifacts", handle_artifacts, methods=["GET"]),
         Route("/v1/artifacts/{artifact_id:str}", handle_artifact, methods=["GET"]),
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),

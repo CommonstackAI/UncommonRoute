@@ -18,6 +18,14 @@ class RoutingMode(str, Enum):
     BEST = "best"
 
 
+class RoutingFailureCode(str, Enum):
+    NO_AVAILABLE_MODELS = "no_available_models"
+    CAPABILITY_REQUIREMENTS_UNMET = "capability_requirements_unmet"
+    ALLOWLIST_EXHAUSTED = "allowlist_exhausted"
+    ROUTING_CONSTRAINTS_UNMET = "routing_constraints_unmet"
+    BUDGET_EXCEEDED = "budget_exceeded"
+
+
 class AnswerDepth(str, Enum):
     BRIEF = "brief"
     STANDARD = "standard"
@@ -73,11 +81,64 @@ class WorkloadHints:
     def tags(self) -> tuple[str, ...]:
         labels: list[str] = []
         if self.is_agentic:
-            labels.append("tool-heavy")
+            labels.append("agentic")
         if self.is_coding:
             labels.append("coding")
         if self.needs_structured_output:
             labels.append("structured-output")
+        return tuple(labels)
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingFeatures:
+    step_type: str = "general"
+    tool_names: tuple[str, ...] = ()
+    has_tool_results: bool = False
+    streaming: bool = False
+    needs_tool_calling: bool = False
+    needs_vision: bool = False
+    needs_structured_output: bool = False
+    response_format: str | None = None
+    is_agentic: bool = False
+    is_coding: bool = False
+    prefers_reasoning: bool = False
+    requested_max_output_tokens: int | None = None
+    tier_floor: Tier | None = None
+    tier_cap: Tier | None = None
+    session_present: bool = False
+
+    @property
+    def tool_count(self) -> int:
+        return len(self.tool_names)
+
+    def request_requirements(self) -> RequestRequirements:
+        return RequestRequirements(
+            needs_tool_calling=self.needs_tool_calling,
+            needs_vision=self.needs_vision,
+            prefers_reasoning=self.prefers_reasoning,
+        )
+
+    def workload_hints(self) -> WorkloadHints:
+        return WorkloadHints(
+            is_agentic=self.is_agentic,
+            is_coding=self.is_coding,
+            needs_structured_output=self.needs_structured_output,
+        )
+
+    def tags(self) -> tuple[str, ...]:
+        labels: list[str] = []
+        if self.step_type != "general":
+            labels.append(f"step:{self.step_type}")
+        if self.tool_names:
+            labels.append(f"tools:{len(self.tool_names)}")
+        if self.has_tool_results:
+            labels.append("tool-results")
+        if self.needs_vision:
+            labels.append("vision")
+        if self.needs_structured_output:
+            labels.append("structured-output")
+        if self.session_present:
+            labels.append("session")
         return tuple(labels)
 
 
@@ -90,13 +151,11 @@ class DimensionScore:
 
 @dataclass(frozen=True, slots=True)
 class ScoringResult:
-    score: float
-    tier: Tier | None  # None = ambiguous
-    confidence: float  # [0, 1]
-    signals: list[str]
-    dimensions: list[DimensionScore] = field(default_factory=list)
-    agentic_score: float = 0.0
-    complexity: float = 0.33  # continuous 0.0-1.0 complexity score
+    tier: Tier | None
+    confidence: float
+    signals: tuple[str, ...]
+    dimensions: tuple[DimensionScore, ...] = ()
+    complexity: float = 0.33
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +172,7 @@ class CandidateScore:
     model: str
     total: float
     predicted_cost: float
+    predicted_quality: float = 0.5
     effective_cost_multiplier: float = 1.0
     editorial: float = 0.0
     cost: float = 0.0
@@ -130,6 +190,44 @@ class CandidateScore:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutingInfeasibility:
+    code: RoutingFailureCode
+    message: str
+    available_model_count: int = 0
+    candidate_count: int = 0
+    constraint_tags: tuple[str, ...] = ()
+    failed_constraints: tuple[str, ...] = ()
+    missing_capabilities: tuple[str, ...] = ()
+    max_cost: float | None = None
+    cheapest_cost: float | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "code": self.code.value,
+            "message": self.message,
+            "available_model_count": self.available_model_count,
+            "candidate_count": self.candidate_count,
+        }
+        if self.constraint_tags:
+            payload["constraint_tags"] = list(self.constraint_tags)
+        if self.failed_constraints:
+            payload["failed_constraints"] = list(self.failed_constraints)
+        if self.missing_capabilities:
+            payload["missing_capabilities"] = list(self.missing_capabilities)
+        if self.max_cost is not None:
+            payload["max_cost"] = self.max_cost
+        if self.cheapest_cost is not None:
+            payload["cheapest_cost"] = self.cheapest_cost
+        return payload
+
+
+class RoutingInfeasibleError(RuntimeError):
+    def __init__(self, infeasibility: RoutingInfeasibility) -> None:
+        super().__init__(infeasibility.message)
+        self.infeasibility = infeasibility
+
+
+@dataclass(frozen=True, slots=True)
 class RoutingDecision:
     model: str
     tier: Tier
@@ -140,10 +238,17 @@ class RoutingDecision:
     cost_estimate: float
     baseline_cost: float
     savings: float  # 0-1
+    raw_confidence: float = 0.0
+    confidence_source: str = "classifier"
+    calibration_version: str = ""
+    calibration_sample_count: int = 0
+    calibration_temperature: float = 1.0
+    calibration_applied_tags: tuple[str, ...] = ()
     complexity: float = 0.33
     agentic_score: float = 0.0
     constraints: RoutingConstraints = field(default_factory=RoutingConstraints)
     workload_hints: WorkloadHints = field(default_factory=WorkloadHints)
+    routing_features: RoutingFeatures = field(default_factory=RoutingFeatures)
     answer_depth: AnswerDepth = AnswerDepth.STANDARD
     suggested_output_budget: int = 4096
     fallback_chain: list[FallbackOption] = field(default_factory=list)
@@ -193,13 +298,14 @@ class BanditConfig:
 
 @dataclass(frozen=True, slots=True)
 class HintAdjustments:
-    structured_output_complexity_floor: float = 0.40
-    coding_complexity_boost: float = 0.08
-    agentic_complexity_floor: float = 0.40
-    agentic_latency_bias: float = 0.05
-    agentic_reliability_bias: float = 0.06
-    agentic_cache_affinity_bias: float = 0.08
-    coding_reasoning_bias: float = 0.05
+    """Legacy — kept for backward compatibility but no longer affects routing."""
+    structured_output_complexity_floor: float = 0.0
+    coding_complexity_boost: float = 0.0
+    agentic_complexity_floor: float = 0.0
+    agentic_latency_bias: float = 0.0
+    agentic_reliability_bias: float = 0.0
+    agentic_cache_affinity_bias: float = 0.0
+    coding_reasoning_bias: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,24 +348,6 @@ class StructuralWeights:
 
 
 @dataclass
-class KeywordWeights:
-    """Weights for keyword-based features (language-specific, secondary)."""
-
-    code_presence: float = 0.06
-    reasoning_markers: float = 0.06
-    technical_terms: float = 0.04
-    creative_markers: float = 0.02
-    simple_indicators: float = 0.02
-    imperative_verbs: float = 0.02
-    constraint_count: float = 0.02
-    output_format: float = 0.02
-    domain_specificity: float = 0.01
-    agentic_task: float = 0.02
-    analytical_verbs: float = 0.04
-    multi_step_patterns: float = 0.04
-
-
-@dataclass
 class TierBoundaries:
     simple_medium: float = -0.02
     medium_complex: float = 0.15
@@ -268,7 +356,6 @@ class TierBoundaries:
 @dataclass
 class ScoringConfig:
     structural_weights: StructuralWeights = field(default_factory=StructuralWeights)
-    keyword_weights: KeywordWeights = field(default_factory=KeywordWeights)
     tier_boundaries: TierBoundaries = field(default_factory=TierBoundaries)
     confidence_steepness: float = 18.0
     confidence_threshold: float = 0.55
@@ -276,13 +363,9 @@ class ScoringConfig:
 
 @dataclass
 class RoutingConfig:
-    version: str = "4.0"
+    version: str = "5.0"
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     modes: dict[RoutingMode, ModeConfig] = field(default_factory=dict)
     hint_adjustments: HintAdjustments = field(default_factory=HintAdjustments)
     answer_depth: AnswerDepthConfig = field(default_factory=AnswerDepthConfig)
     model_capabilities: dict[str, ModelCapabilities] = field(default_factory=dict)
-    free_model: str = "nvidia/gpt-oss-120b"
-    max_tokens_force_complex: int = 100_000
-    structured_output_min_tier: Tier = Tier.MEDIUM
-    ambiguous_default_tier: Tier = Tier.MEDIUM

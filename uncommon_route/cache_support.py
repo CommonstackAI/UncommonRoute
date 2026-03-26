@@ -132,6 +132,46 @@ def apply_anthropic_cache_breakpoints(
     )
 
 
+def strip_anthropic_cache_controls(body: dict[str, Any]) -> CacheRequestPlan:
+    """Remove Anthropic-specific cache_control blocks from a request body."""
+    for holder in _iter_anthropic_cache_control_holders(body):
+        holder.pop("cache_control", None)
+    return CacheRequestPlan(
+        family="anthropic",
+        mode="none",
+    )
+
+
+def _iter_anthropic_cache_control_holders(body: dict[str, Any]) -> list[dict[str, Any]]:
+    holders: list[dict[str, Any]] = []
+
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict):
+                holders.append(tool)
+
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                holders.append(block)
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            holders.append(message)
+            content = message.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        holders.append(block)
+
+    return holders
+
+
 def _max_existing_cache_ttl(body: dict[str, Any]) -> str | None:
     """Return ``"1h"`` if any cache_control block in *body* uses that TTL."""
     for key in ("tools", "system", "messages"):

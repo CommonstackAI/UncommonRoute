@@ -1,9 +1,13 @@
-"""Public API — the route() entry point."""
+"""Public API — the route() entry point.
+
+v2: No hardcoded overrides (no tier_floor, tier_cap, complexity_floor,
+keyword-based is_coding/is_agentic inference).  All signals are features
+fed to the classifier; the classifier decides difficulty.
+"""
 
 from __future__ import annotations
 
-from dataclasses import replace
-
+from uncommon_route.calibration import get_active_route_confidence_calibrator
 from uncommon_route.router.types import (
     AnswerDepth,
     ModelCapabilities,
@@ -12,37 +16,20 @@ from uncommon_route.router.types import (
     RoutingConfig,
     RoutingConstraints,
     RoutingDecision,
+    RoutingFeatures,
     RoutingMode,
     Tier,
     WorkloadHints,
 )
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING
 from uncommon_route.router.classifier import classify
-from uncommon_route.router.selector import select_from_pool
+from uncommon_route.router.selector import select_from_pool, _derive_tier
 from uncommon_route.router.structural import estimate_tokens
 from uncommon_route.router.config import (
     DEFAULT_CONFIG,
     get_bandit_config,
     get_selection_weights,
 )
-
-
-def _adjust_selection_weights(
-    config: RoutingConfig,
-    mode: RoutingMode,
-    hints: WorkloadHints,
-):
-    weights = get_selection_weights(config, mode)
-    adjustments = config.hint_adjustments
-    if not any((hints.is_agentic, hints.is_coding)):
-        return weights
-    return replace(
-        weights,
-        latency=weights.latency + (adjustments.agentic_latency_bias if hints.is_agentic else 0.0),
-        reliability=weights.reliability + (adjustments.agentic_reliability_bias if hints.is_agentic else 0.0),
-        cache_affinity=weights.cache_affinity + (adjustments.agentic_cache_affinity_bias if hints.is_agentic else 0.0),
-        reasoning_bias=weights.reasoning_bias + (adjustments.coding_reasoning_bias if hints.is_coding else 0.0),
-    )
 
 
 def route(
@@ -54,93 +41,92 @@ def route(
     request_requirements: RequestRequirements | None = None,
     routing_constraints: RoutingConstraints | None = None,
     workload_hints: WorkloadHints | None = None,
+    routing_features: RoutingFeatures | None = None,
     answer_depth: AnswerDepth | str = AnswerDepth.STANDARD,
     user_keyed_models: set[str] | None = None,
     model_experience: object | None = None,
-    tier_cap: Tier | None = None,
-    tier_floor: Tier | None = None,
+    route_confidence_calibrator: object | None = None,
+    context_features: dict[str, float] | None = None,
     pricing: dict[str, ModelPricing] | None = None,
     available_models: list[str] | None = None,
     model_capabilities: dict[str, ModelCapabilities] | None = None,
+    # Legacy parameters — accepted but ignored
+    tier_cap: Tier | None = None,
+    tier_floor: Tier | None = None,
 ) -> RoutingDecision:
     """Route a prompt to the best model.
 
-    This is the main entry point. <1ms, pure local, no external calls.
-    All available models compete via pool-based scoring; ``complexity``
-    from the classifier drives the cost-vs-quality trade-off.
+    <1ms, pure local, no external calls.  The classifier uses structural
+    + Unicode + n-gram features to estimate difficulty.  No keyword lists,
+    no hardcoded tier overrides.
 
-    When ``available_models`` is not provided, falls back to the static
-    model list from ``DEFAULT_MODEL_PRICING``.
+    Context features (tools_present, conversation_depth, etc.) are passed
+    as numerical signals that the classifier can learn from, not as binary
+    flags that override its judgment.
     """
     cfg = config or DEFAULT_CONFIG
-    requirements = request_requirements or RequestRequirements()
     constraints = routing_constraints or RoutingConstraints()
-    prompt_lower = prompt.lower() if prompt else ""
-    hints = workload_hints or WorkloadHints(
-        is_coding=any(
-            marker in prompt_lower
-            for marker in ("code", "function", "debug", "refactor", "python", "typescript", "javascript", "rust")
-        ),
-        needs_structured_output=any(
-            marker in prompt_lower
-            for marker in ("json", "structured", "schema", "yaml", "xml")
-        ),
-    )
+    features = routing_features or RoutingFeatures()
+    requirements = features.request_requirements() if routing_features else (request_requirements or RequestRequirements())
+    hints = features.workload_hints() if routing_features else (workload_hints or WorkloadHints())
     mode = routing_mode if isinstance(routing_mode, RoutingMode) else RoutingMode(routing_mode)
     depth = answer_depth if isinstance(answer_depth, AnswerDepth) else AnswerDepth(str(answer_depth).strip().lower())
+    effective_max_output_tokens = features.requested_max_output_tokens or max_output_tokens
 
     estimated_tokens = estimate_tokens(prompt)
-    result = classify(prompt, system_prompt, cfg.scoring)
+    result = classify(prompt, system_prompt, cfg.scoring, context_features=context_features)
 
-    sel_weights = _adjust_selection_weights(cfg, mode, hints)
+    sel_weights = get_selection_weights(cfg, mode)
     bc = get_bandit_config(cfg, mode)
-    caps = model_capabilities or cfg.model_capabilities
-    pool = available_models or list(DEFAULT_MODEL_PRICING.keys())
-    effective_pricing = pricing or DEFAULT_MODEL_PRICING
-    inferred_prefers_reasoning = any(signal.startswith("reasoning-pref:") for signal in result.signals)
-    effective_requirements = RequestRequirements(
-        needs_tool_calling=requirements.needs_tool_calling,
-        needs_vision=requirements.needs_vision,
-        prefers_reasoning=requirements.prefers_reasoning or inferred_prefers_reasoning or hints.is_coding,
-    )
+    caps = cfg.model_capabilities if model_capabilities is None else model_capabilities
+    pool = list(DEFAULT_MODEL_PRICING.keys()) if available_models is None else available_models
+    effective_pricing = DEFAULT_MODEL_PRICING if pricing is None else pricing
 
     complexity = result.complexity
-    if prompt and any(kw in prompt_lower for kw in ("json", "structured", "schema")):
-        hints = replace(hints, needs_structured_output=True)
-    if hints.needs_structured_output:
-        complexity = max(complexity, cfg.hint_adjustments.structured_output_complexity_floor)
-    if hints.is_agentic:
-        complexity = max(complexity, cfg.hint_adjustments.agentic_complexity_floor)
-    if hints.is_coding:
-        complexity = min(1.0, complexity + cfg.hint_adjustments.coding_complexity_boost)
-    if tier_floor is not None:
-        floor_min = {Tier.SIMPLE: 0.0, Tier.MEDIUM: 0.33, Tier.COMPLEX: 0.67}
-        complexity = max(complexity, floor_min.get(tier_floor, 0.0))
-    if tier_cap is not None:
-        cap_max = {Tier.SIMPLE: 0.33, Tier.MEDIUM: 0.67, Tier.COMPLEX: 1.0}
-        complexity = min(complexity, cap_max.get(tier_cap, 1.0))
 
-    reasoning = f"score={result.score:.3f} | {', '.join(result.signals)}"
+    confidence_calibrator = route_confidence_calibrator or get_active_route_confidence_calibrator()
+
+    final_tier = _derive_tier(complexity)
+    confidence_estimate = confidence_calibrator.calibrate(
+        result.confidence,
+        mode=mode,
+        tier=final_tier,
+        complexity=complexity,
+        step_type=features.step_type,
+        answer_depth=depth,
+        constraint_tags=constraints.tags(),
+        hint_tags=hints.tags(),
+        feature_tags=features.tags(),
+        streaming=features.streaming,
+    )
+    reasoning = ", ".join(result.signals)
 
     return select_from_pool(
         complexity=complexity,
         mode=mode,
-        confidence=result.confidence,
+        confidence=confidence_estimate.confidence,
         reasoning_text=reasoning,
         available_models=pool,
         estimated_input_tokens=estimated_tokens,
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=effective_max_output_tokens,
         prompt=prompt,
         pricing=effective_pricing,
         capabilities=caps,
-        requirements=effective_requirements,
+        requirements=requirements,
         constraints=constraints,
         workload_hints=hints,
+        routing_features=features,
         answer_depth=depth,
         answer_depth_multiplier=cfg.answer_depth.multiplier(depth),
-        agentic_score=result.agentic_score,
+        agentic_score=0.0,
         user_keyed_models=user_keyed_models,
         selection_weights=sel_weights,
         bandit_config=bc,
         model_experience=model_experience,
+        raw_confidence=confidence_estimate.raw_confidence,
+        confidence_source=confidence_estimate.source,
+        calibration_version=confidence_estimate.version,
+        calibration_sample_count=confidence_estimate.sample_count,
+        calibration_temperature=confidence_estimate.temperature,
+        calibration_applied_tags=confidence_estimate.applied_adjustments,
     )

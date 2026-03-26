@@ -128,7 +128,7 @@ class TestCLI:
         r = run_cli(["debug", "prove that sqrt(2) is irrational"])
         assert r.returncode == 0
         assert "Structural Features:" in r.stdout
-        assert "Keyword Features:" in r.stdout
+        assert "Unicode Blocks:" in r.stdout
 
     def test_route_no_prompt_fails(self) -> None:
         r = run_cli(["route"])

@@ -40,6 +40,12 @@ class RouteRecord:
     confidence: float
     method: RouteMethod
     estimated_cost: float
+    raw_confidence: float = 0.0
+    confidence_source: str = ""
+    calibration_version: str = ""
+    calibration_sample_count: int = 0
+    calibration_temperature: float = 1.0
+    calibration_applied_tags: tuple[str, ...] | list[str] | None = None
     baseline_cost: float = 0.0
     requested_model: str = ""
     mode: str = "auto"
@@ -77,6 +83,7 @@ class RouteRecord:
     complexity: float = 0.33
     constraint_tags: list[str] | None = None
     hint_tags: list[str] | None = None
+    feature_tags: list[str] | None = None
     answer_depth: str = "standard"
     feedback_signal: str = ""
     feedback_ok: bool = False
@@ -305,6 +312,8 @@ class RouteStats:
                 "method": r.method,
                 "cost": _effective_cost(r),
                 "savings": r.savings,
+                "raw_confidence": r.raw_confidence,
+                "confidence_source": r.confidence_source,
                 "transport": r.transport,
                 "cache_mode": r.cache_mode,
                 "cache_family": r.cache_family,
@@ -318,6 +327,7 @@ class RouteStats:
                 "complexity": getattr(r, "complexity", 0.33),
                 "constraint_tags": list(r.constraint_tags or []),
                 "hint_tags": list(r.hint_tags or []),
+                "feature_tags": list(r.feature_tags or []),
                 "answer_depth": r.answer_depth,
                 "feedback_signal": r.feedback_signal,
                 "feedback_ok": r.feedback_ok,
@@ -504,6 +514,12 @@ class RouteStats:
                 "tier": _normalize_tier_label(r.tier),
                 "decision_tier": _normalize_tier_label(r.decision_tier) if r.decision_tier else "",
                 "confidence": r.confidence,
+                "raw_confidence": r.raw_confidence,
+                "confidence_source": r.confidence_source,
+                "calibration_version": r.calibration_version,
+                "calibration_sample_count": r.calibration_sample_count,
+                "calibration_temperature": r.calibration_temperature,
+                "calibration_applied_tags": list(r.calibration_applied_tags or []),
                 "method": r.method,
                 "estimated_cost": r.estimated_cost,
                 "baseline_cost": r.baseline_cost,
@@ -540,6 +556,7 @@ class RouteStats:
                 "complexity": r.complexity,
                 "constraint_tags": list(r.constraint_tags or []),
                 "hint_tags": list(r.hint_tags or []),
+                "feature_tags": list(r.feature_tags or []),
                 "answer_depth": r.answer_depth,
                 "feedback_signal": r.feedback_signal,
                 "feedback_ok": r.feedback_ok,
@@ -564,6 +581,12 @@ class RouteStats:
                 tier=_normalize_tier_label(r.get("tier", "")),
                 decision_tier=_normalize_tier_label(r.get("decision_tier", "")) if r.get("decision_tier", "") else "",
                 confidence=r.get("confidence", 0.0),
+                raw_confidence=r.get("raw_confidence", r.get("confidence", 0.0)),
+                confidence_source=r.get("confidence_source", ""),
+                calibration_version=r.get("calibration_version", ""),
+                calibration_sample_count=r.get("calibration_sample_count", 0),
+                calibration_temperature=r.get("calibration_temperature", 1.0),
+                calibration_applied_tags=list(r.get("calibration_applied_tags", []) or []),
                 method=r.get("method", "pool"),
                 estimated_cost=r.get("estimated_cost", 0.0),
                 baseline_cost=r.get("baseline_cost", 0.0),
@@ -600,6 +623,7 @@ class RouteStats:
                 complexity=r.get("complexity", 0.33),
                 constraint_tags=list(r.get("constraint_tags", []) or []),
                 hint_tags=list(r.get("hint_tags", []) or []),
+                feature_tags=list(r.get("feature_tags", []) or []),
                 answer_depth=r.get("answer_depth", "standard"),
                 feedback_signal=r.get("feedback_signal", ""),
                 feedback_ok=r.get("feedback_ok", False),

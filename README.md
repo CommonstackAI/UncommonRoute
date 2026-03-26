@@ -4,16 +4,15 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>Stop overpaying for every prompt.</strong></p>
+<p><strong>Route prompts by difficulty, not habit.</strong></p>
 
 <p>
-A lightweight local router that automatically balances cost and quality for every LLM request.
-  
-85%+ cost savings · 92.3% routing accuracy · <1ms decision latency 
+UncommonRoute is a local LLM router that sits between your client and your upstream API.
+Easy turns go cheap, hard turns go strong, and fallback chains are ready when the first choice fails.
 </p>
 
 <p>
-Built for <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
+Built for <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, the <strong>OpenAI SDK</strong>, and <strong>OpenClaw</strong>.
 </p>
 
 <p>
@@ -24,8 +23,8 @@ Built for <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code
 </p>
 
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>&nbsp;
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge" alt="MIT"></a>&nbsp;
-<img src="https://img.shields.io/badge/Tests-281_passing-16a34a?style=for-the-badge&logo=pytest&logoColor=white" alt="281 passing tests">&nbsp;
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-Modified_MIT-22c55e?style=for-the-badge" alt="Modified MIT"></a>&nbsp;
+<a href="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml"><img src="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml/badge.svg" alt="CI"></a>&nbsp;
 <a href="#quick-start"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
 <a href="#quick-start"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
 <a href="#quick-start"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
@@ -69,17 +68,12 @@ It does not host models. It makes a fast local routing decision, forwards the re
 
 The pitch is simple: keep one local endpoint, let the router decide when a strong model is actually worth paying for.
 
-- **92.3% held-out routing accuracy** on 763 hand-written prompts across 15 languages and 35 categories
-- **86.4% lower simulated cost** on a 131-request coding session versus always using `anthropic/claude-opus-4.6`
-- **~0.5ms average routing latency**
-- **281 passing tests**
-
-One benchmark snapshot:
-
-| Scenario | Total cost |
-| --- | ---: |
-| Always `anthropic/claude-opus-4.6` | `$1.7529` |
-| UncommonRoute | `$0.238` |
+- **~90-95% cost savings** in real Claude Code / OpenClaw sessions versus always using premium models
+- **Zero keyword lists** — the classifier uses structural features + n-gram learning, no hardcoded patterns
+- **Benchmark-driven quality** — model quality from [PinchBench](https://pinchbench.com) replaces price-based assumptions
+- **Thompson Sampling** — natural exploration-exploitation balance across the model pool
+- **3 feedback clicks** to change routing — user feedback takes effect immediately
+- **341 passing tests**
 
 That is the core story of the project: spend premium-model money where it changes the answer, not where it just burns the budget.
 
@@ -95,7 +89,7 @@ If you are brand new, do these in order.
 pip install uncommon-route
 ```
 
-Or use the installer:
+Optional convenience installer. Review the script first if you are security-conscious:
 
 ```bash
 curl -fsSL https://anjieyang.github.io/uncommon-route/install | bash
@@ -259,7 +253,9 @@ openclaw plugins install @anjieyang/uncommon-route
 openclaw gateway restart
 ```
 
-The plugin starts the proxy for you and registers a local OpenClaw provider.
+The plugin starts the proxy for you, registers a local OpenClaw provider, and syncs the discovered upstream pool into OpenClaw once `/v1/models/mapping` is available.
+
+The config-patch fallback is static by nature, so it only registers the virtual routing IDs.
 
 Example plugin config:
 
@@ -293,23 +289,19 @@ When something feels off, `uncommon-route doctor` should almost always be the fi
 
 You do not need to understand every internal detail to use the project, but the mental model matters.
 
-### 1. Every request is classified into one of three tiers
+### 1. Continuous difficulty, not discrete tiers
 
-| Tier | Typical requests |
-| --- | --- |
-| `SIMPLE` | greetings, short lookups, basic translation |
-| `MEDIUM` | code tasks, explanations, summaries |
-| `COMPLEX` | multi-constraint design and implementation work |
+The classifier estimates a continuous difficulty score (0.0–1.0) from structural features and n-gram patterns. No keyword lists, no hardcoded rules. The score drives model selection through a quality prediction formula — there are no fixed tier boundaries in the routing logic.
 
-There is no fixed per-tier default model anymore. By default, the selector scores the discovered model pool for the active mode, so the chosen model can change as pricing, availability, capabilities, and feedback change.
+Tiers (`SIMPLE` / `MEDIUM` / `COMPLEX`) still appear in logs, headers, and the dashboard, but they are display labels derived from the continuous score, not routing decisions.
 
-### 2. Routing mode changes the style of decision
+### 2. Routing mode changes quality-vs-cost preference
 
 | Mode | What it optimizes for |
 | --- | --- |
-| `auto` | balanced default |
-| `fast` | lighter, faster, and more cost-aware |
-| `best` | highest quality |
+| `auto` | balanced — best quality-per-dollar, adapts with difficulty |
+| `fast` | cost-dominant — cheapest acceptable model |
+| `best` | quality-dominant — highest quality, cost nearly ignored |
 
 These show up as virtual model IDs:
 
@@ -317,42 +309,27 @@ These show up as virtual model IDs:
 - `uncommon-route/fast`
 - `uncommon-route/best`
 
-### 3. The selector scores the real pool, not a static shortlist
+Only these virtual IDs trigger routing. Explicit real model IDs still pass through unchanged.
 
-The router considers:
+The quality-vs-cost weight automatically increases with task difficulty: harder tasks prioritize quality more, even in `auto` mode.
 
-- estimated token cost
-- observed latency and reliability
-- cache affinity
-- explicit user feedback
-- BYOK-backed model preference
-- free/local biases
-- capability requirements like tool use or vision
+### 3. Benchmark-driven quality, not price-based
 
-If the upstream exposes `/v1/models`, UncommonRoute builds a live model pool and pricing map from that reality instead of pretending the world is static.
+Model quality comes from real benchmark data ([PinchBench](https://pinchbench.com) agent task scores), not from price assumptions. Quality scores are blended with observed experience through Bayesian updating — the system starts from benchmark data and adapts to real-world performance over time.
 
-### 4. Session IDs still exist, but routing is no longer sticky
+The selector uses **Thompson Sampling** (Beta distribution per model) for natural exploration-exploitation balance. Models with fewer observations have wider distributions, giving them chances to prove themselves.
 
-Session IDs are still derived per task, but they do **not** pin model selection anymore.
+### 4. Three layers of learning
 
-Today they mainly help:
+| Layer | Source | What it learns |
+| --- | --- | --- |
+| **Benchmark prior** | PinchBench API + seed data | Model quality baselines (refreshed periodically) |
+| **Implicit feedback** | HTTP failures, retrial detection, logprob confidence | Automatic quality signals from every request |
+| **Explicit feedback** | User ok/weak/strong signals | Direct quality corrections (3 clicks to change routing) |
 
-- group cache keys
-- scope composition checkpoints
-- tag stats and debug traces
-- rehydrate `artifact://...` context for the right task
+### 5. Agentic steps route correctly
 
-### 5. Tool-heavy steps are cheaper than they look
-
-A real agent workflow is not one giant reasoning turn.
-
-There are many low-value middle steps:
-
-- tool selection
-- tool-result follow-up
-- ordinary chat turns between heavier steps
-
-UncommonRoute can detect those patterns and avoid spending the strongest reasoning model on turns that do not need it.
+Having tools in the request body does **not** inflate difficulty. A "hello" through Claude Code still routes as SIMPLE. The classifier evaluates the user's prompt on its own structural merits, not on whether tools happen to be available.
 
 ---
 
@@ -369,7 +346,7 @@ The dashboard shows:
 - request counts, latency, cost, and savings
 - mode, tier, and model distribution
 - upstream transport and cache behavior
-- live routing configuration and default-mode overrides
+- selector state, default mode, and stored override rows
 - primary upstream and BYOK provider connections
 - recent traffic, spend limits, and usage
 - recent feedback state and submitted feedback results
@@ -446,16 +423,19 @@ Important behavior today:
 If you need a specific upstream model right now, do one of these:
 
 - send that explicit non-virtual model ID directly
-- pin it with `uncommon-route config set-tier ...`
 - inspect the provider-backed set with `uncommon-route provider models`
+- preview what the live scorer would pick with `GET /v1/selector` or the dashboard
+
+Only the first option forces the request immediately. The others help you inspect what the live selector can see.
 
 The optional `--plan` field is metadata only. It is shown in `provider list`, but it does not replace an API key or unlock models by itself.
 
-### Live routing config
+### Default mode and stored override state
 
 ```bash
 uncommon-route config show
 uncommon-route config set-default-mode fast
+# Stored override rows for inspection / preview:
 uncommon-route config set-tier auto SIMPLE moonshot/kimi-k2.5 --fallback google/gemini-2.5-flash-lite,deepseek/deepseek-chat
 uncommon-route config set-tier best COMPLEX anthropic/claude-opus-4.6 --fallback anthropic/claude-sonnet-4.6 --strategy hard-pin
 uncommon-route config reset-tier auto SIMPLE
@@ -463,7 +443,11 @@ uncommon-route config reset-tier auto SIMPLE
 
 The default mode is used when a request omits `model`. Explicit model IDs still pass through unchanged.
 
-Use `--strategy hard-pin` when you want a tier to stay on the configured primary model unless that model actually fails upstream.
+Tier overrides are persisted, surfaced in the dashboard/API, and shown in selector previews.
+
+Important current behavior: the live pool-based request path still scores the discovered model pool at request time and does **not** yet enforce `primary`, `fallback`, or `--strategy hard-pin` as request-time routing controls.
+
+If you need to force a model immediately, send that explicit non-virtual model ID directly.
 
 Routing overrides are stored at:
 
@@ -519,7 +503,7 @@ This is the compact lookup section for SDK authors, agent builders, and people w
 | `GET /v1/models` | virtual models exposed by the router |
 | `GET /v1/models/mapping` | internal-to-upstream model mapping and pool view |
 | `GET /v1/connections` / `PUT /v1/connections` | inspect or update the primary runtime connection |
-| `GET /v1/routing-config` / `POST /v1/routing-config` | inspect or change routing mode/tier overrides |
+| `GET /v1/routing-config` / `POST /v1/routing-config` | inspect or update stored default-mode and mode/tier override rows |
 | `GET /v1/stats` / `POST /v1/stats` | routing summary or reset |
 | `GET /v1/stats/recent` | recent routed requests with feedback state |
 | `GET /v1/selector` / `POST /v1/selector` | inspect selector state or preview a routing decision |
@@ -602,21 +586,17 @@ When routing lands on an Anthropic-family model and the upstream supports it, Un
 
 ### Local training
 
-The classifier is local. You can retrain it on your own benchmark data.
-
-From the repo root:
+The classifier is local and keyword-free — it uses structural features and character n-grams only. You can retrain it on your own benchmark data:
 
 ```bash
-python - <<'PY'
-from uncommon_route.router.classifier import train_and_save_model
-train_and_save_model("bench/data/train.jsonl")
-PY
+python -c "from uncommon_route.router.classifier import train_and_save_model; train_and_save_model('bench/data/train.jsonl')"
 ```
 
-Online feedback updates are stored separately at:
+Model experience and feedback data are stored at:
 
 ```text
-~/.uncommon-route/model_online.json
+~/.uncommon-route/model-experience.json
+~/.uncommon-route/benchmark_cache.json
 ```
 
 ---
@@ -667,61 +647,113 @@ That one command usually tells you what is missing.
 
 ## Detailed Benchmarks
 
-Two questions matter:
+### Classifier accuracy
 
-1. Does the router classify difficulty correctly?
-2. Does that save real money in a realistic coding session?
+The v2 classifier uses structural features + n-grams only (no keyword lists). Trained on 1,904 examples, tested on a held-out set of 1,077 prompts:
 
-### Held-out routing benchmark
+| Metric | Value |
+| --- | ---: |
+| Training accuracy | **99.2%** |
+| Held-out accuracy | **88.5%** |
 
-Evaluated on **763 hand-written prompts** across **15 languages** and **35 categories**.
+The classifier's role in v2 is to provide a continuous difficulty signal, not to make the final routing decision. Benchmark quality data and Thompson Sampling compensate for classification errors.
 
-| Metric | UncommonRoute | ClawRouter | NotDiamond (cost) |
-| --- | ---: | ---: | ---: |
-| Accuracy | **92.3%** | 52.6% | 46.1% |
-| Weighted F1 | **92.3%** | 47.0% | 38.0% |
-| Latency / request | **0.5ms** | 0.6ms | 37.6ms |
-| MEDIUM F1 | **88.7%** | 43.6% | 6.2% |
-| COMPLEX F1 | **97.8%** | 61.7% | 0.0% |
+### Real-world cost savings
 
-### Real cost simulation
+In end-to-end testing through Claude Code with Commonstack upstream:
 
-Simulated on a **131-request agent coding session** and compared against always sending every request to `anthropic/claude-opus-4.6`.
+- **~90-95% cost reduction** versus always using premium models
+- **28/28 requests successful** with quality maintained across all difficulty levels
+- **15 different models** selected via Thompson Sampling
+- **0 expensive model waste** on simple tasks
+- **3 feedback clicks** sufficient to change routing behavior
 
-| Metric | Always Opus | UncommonRoute |
-| --- | ---: | ---: |
-| Total cost | $1.7529 | **$0.238** |
-| Cost saved | — | **86.4%** |
-| Quality retained | 100% | **93.5%** |
-| Routing accuracy | — | **90.8%** |
+Quality is maintained because the system uses [PinchBench](https://pinchbench.com) benchmark data to select models by measured agent-task performance, not by price.
 
 ### Reproduce the benchmark run
 
-If you also have the companion `router-bench/` directory checked out next to this repo, run:
-
 ```bash
-cd ../router-bench && python -m router_bench.run
+python -m bench.run
 ```
+
+---
+
+## Repo Layout
+
+- `uncommon_route/` is the shipped runtime package: proxy, router, CLI, calibration.
+- `bench/` contains offline evaluation datasets and benchmark scripts.
+- `demo/` contains local comparison/demo apps. The comparison server now lives in `demo/compare_api.py`.
+- `frontend/` contains dashboard/demo frontends.
+
+The root-level `api.py` now exists only as a compatibility shim for the comparison demo, so the package boundary stays clear.
 
 ---
 
 ## Turn It Off Or Remove It
 
-If you want to stop using UncommonRoute:
+If you want to stop using UncommonRoute, there are three different levels:
+
+1. stop the local proxy
+2. clear all local records and state
+3. fully uninstall and restore your client config
+
+### 1. Stop the local proxy
 
 ```bash
 # If you started it in background mode
 uncommon-route stop
-
-# Remove the Python package
-pip uninstall uncommon-route
 ```
 
 If you started `uncommon-route serve` in the foreground, stop it with `Ctrl+C`.
 
-Stopping `serve` only stops the local proxy. It does **not** automatically restore your previous client config. If your client still points at `http://localhost:8403` or `http://localhost:8403/v1`, it will keep trying localhost until you restore the original settings.
+### 2. Clear all local records
 
-Typical rollback commands:
+By default, UncommonRoute stores local state under:
+
+```text
+~/.uncommon-route
+```
+
+If you set `UNCOMMON_ROUTE_DATA_DIR`, it uses that directory instead.
+
+That local data directory can contain:
+
+- route stats and spending history
+- dashboard-saved primary connection and routing overrides
+- BYOK provider keys
+- online-learning weights and feedback buffers
+- learned aliases, model-experience memory, logs, and local artifacts
+
+To clear **all** local records, stop the proxy first and then move or delete the active data directory:
+
+```bash
+# Show the active data directory
+echo "${UNCOMMON_ROUTE_DATA_DIR:-$HOME/.uncommon-route}"
+
+# Recommended: move it aside as a backup first
+mv "${UNCOMMON_ROUTE_DATA_DIR:-$HOME/.uncommon-route}" \
+  "${UNCOMMON_ROUTE_DATA_DIR:-$HOME/.uncommon-route}.backup-$(date +%Y%m%d-%H%M%S)"
+
+# Or permanently delete it if you are sure
+# rm -rf "${UNCOMMON_ROUTE_DATA_DIR:-$HOME/.uncommon-route}"
+```
+
+If you only want to clear routing analytics, `uncommon-route stats reset` resets stats and pending feedback. It does **not** remove the rest of the local state.
+
+### 3. Fully uninstall
+
+If you installed the OpenClaw integration, remove that first:
+
+```bash
+openclaw plugins uninstall @anjieyang/uncommon-route
+
+# If you used the config-patch fallback instead of the plugin:
+uncommon-route openclaw uninstall
+```
+
+Stopping `serve` or uninstalling the package only stops the local proxy layer. It does **not** automatically restore your previous client config. If your client still points at `http://localhost:8403` or `http://localhost:8403/v1`, it will keep trying localhost until you restore the original settings.
+
+Typical client rollback commands:
 
 ```bash
 unset UNCOMMON_ROUTE_UPSTREAM
@@ -730,13 +762,14 @@ unset OPENAI_BASE_URL
 unset ANTHROPIC_BASE_URL
 ```
 
-If you installed the OpenClaw integration, also remove that registration:
+Then remove the Python package with the same tool you used to install it:
 
 ```bash
-openclaw plugins uninstall @anjieyang/uncommon-route
-
-# Or, if you used the config-patch fallback instead of the plugin:
-uncommon-route openclaw uninstall
+pipx uninstall uncommon-route
+# or
+python -m pip uninstall uncommon-route
+# or
+pip uninstall uncommon-route
 ```
 
 ---
@@ -750,7 +783,7 @@ pip install -e ".[dev]"
 python -m pytest tests -v
 ```
 
-The current test suite is `281 passed` on the latest local run.
+The current test suite is `341 passed` on the latest local run.
 
 ---
 

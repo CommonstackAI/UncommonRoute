@@ -15,6 +15,10 @@ from uncommon_route.router.types import (
     RoutingConfig,
     RoutingConstraints,
     RoutingDecision,
+    RoutingFailureCode,
+    RoutingFeatures,
+    RoutingInfeasibility,
+    RoutingInfeasibleError,
     RoutingMode,
     ScoringConfig,
     ScoringResult,
@@ -33,7 +37,7 @@ from uncommon_route.router.config import (
     get_selection_weights,
 )
 from uncommon_route.router.classifier import classify
-from uncommon_route.router.selector import get_fallback_chain, select_model
+from uncommon_route.router.selector import get_fallback_chain, select_model, select_from_pool
 from uncommon_route.session import derive_session_id
 from uncommon_route.spend_control import (
     CheckResult,
@@ -49,6 +53,18 @@ from uncommon_route.spend_control import (
 from uncommon_route.openclaw import install as openclaw_install
 from uncommon_route.openclaw import uninstall as openclaw_uninstall
 from uncommon_route.openclaw import status as openclaw_status
+from uncommon_route.calibration import (
+    FileRouteCalibrationStorage,
+    InMemoryRouteCalibrationStorage,
+    RouteCalibrationSnapshot,
+    RouteCalibrationStorage,
+    RouteConfidenceCalibrator,
+    RouteConfidenceEstimate,
+    apply_temperature,
+    compute_calibration,
+    fit_temperature_scaling,
+    get_active_route_confidence_calibrator,
+)
 from uncommon_route.providers import (
     ProvidersConfig,
     ProviderEntry,
@@ -128,6 +144,7 @@ __all__ = [
     "RoutingConfig",
     "RoutingConstraints",
     "WorkloadHints",
+    "RoutingFeatures",
     "AnswerDepth",
     "AnswerDepthConfig",
     "HintAdjustments",
@@ -142,6 +159,9 @@ __all__ = [
     "RequestRequirements",
     "CandidateScore",
     "FallbackOption",
+    "RoutingFailureCode",
+    "RoutingInfeasibility",
+    "RoutingInfeasibleError",
     "DEFAULT_CONFIG",
     "DEFAULT_MODEL_PRICING",
     "VIRTUAL_MODEL_IDS",
@@ -161,6 +181,9 @@ __all__ = [
     "FileSpendControlStorage",
     "InMemorySpendControlStorage",
     "format_duration",
+    "apply_temperature",
+    "compute_calibration",
+    "fit_temperature_scaling",
     # OpenClaw
     "openclaw_install",
     "openclaw_uninstall",
@@ -193,6 +216,13 @@ __all__ = [
     "SideChannelConfig",
     "SideChannelTaskConfig",
     "score_semantic_quality",
+    "RouteConfidenceEstimate",
+    "RouteCalibrationSnapshot",
+    "RouteConfidenceCalibrator",
+    "RouteCalibrationStorage",
+    "FileRouteCalibrationStorage",
+    "InMemoryRouteCalibrationStorage",
+    "get_active_route_confidence_calibrator",
     # Adaptive model selection memory
     "CandidateExperience",
     "FileModelExperienceStorage",

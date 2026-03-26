@@ -8,7 +8,11 @@ Supports two selection modes:
 
 from __future__ import annotations
 
+import logging
 import math
+import random
+
+logger = logging.getLogger("uncommon-route")
 
 from uncommon_route.router.types import (
     AnswerDepth,
@@ -20,6 +24,10 @@ from uncommon_route.router.types import (
     RequestRequirements,
     RoutingConstraints,
     RoutingDecision,
+    RoutingFailureCode,
+    RoutingFeatures,
+    RoutingInfeasibility,
+    RoutingInfeasibleError,
     RoutingMode,
     SelectionWeights,
     Tier,
@@ -29,6 +37,8 @@ from uncommon_route.router.types import (
 from uncommon_route.router.structural import estimate_output_budget
 from uncommon_route.router.config import BASELINE_MODEL, DEFAULT_MODEL_PRICING
 from uncommon_route.model_experience import CandidateExperience
+
+_rng = random.Random()
 
 
 def _calc_cost(
@@ -58,8 +68,6 @@ def _supports_requirements(
         missing.append("tool_calling")
     if requirements.needs_vision and not cap.vision:
         missing.append("vision")
-    if requirements.prefers_reasoning and not cap.reasoning:
-        missing.append("reasoning")
     return (not missing), missing
 
 
@@ -87,22 +95,144 @@ def _apply_constraints(
     candidates: list[str],
     constraints: RoutingConstraints,
     capabilities: dict[str, ModelCapabilities],
-) -> list[str]:
+) -> tuple[list[str], str | None, tuple[str, ...]]:
     allowed_models = set(constraints.allowed_models)
     allowed_providers = {provider.lower() for provider in constraints.allowed_providers}
-    filtered: list[str] = []
-    for candidate in candidates:
-        cap = capabilities.get(candidate, ModelCapabilities())
-        if constraints.free_only and not cap.free:
-            continue
-        if constraints.local_only and not cap.local:
-            continue
-        if allowed_models and candidate not in allowed_models:
-            continue
-        if allowed_providers and _provider_name(candidate) not in allowed_providers:
-            continue
-        filtered.append(candidate)
-    return filtered
+    filtered = list(candidates)
+    applied: list[str] = []
+
+    if constraints.free_only:
+        filtered = [
+            candidate
+            for candidate in filtered
+            if capabilities.get(candidate, ModelCapabilities()).free
+        ]
+        applied.append("free-only")
+        if not filtered:
+            return [], "free-only", tuple(applied)
+
+    if constraints.local_only:
+        filtered = [
+            candidate
+            for candidate in filtered
+            if capabilities.get(candidate, ModelCapabilities()).local
+        ]
+        applied.append("local-only")
+        if not filtered:
+            return [], "local-only", tuple(applied)
+
+    if allowed_models:
+        filtered = [candidate for candidate in filtered if candidate in allowed_models]
+        applied.append("model-subset")
+        if not filtered:
+            return [], "model-subset", tuple(applied)
+
+    if allowed_providers:
+        filtered = [
+            candidate
+            for candidate in filtered
+            if _provider_name(candidate) in allowed_providers
+        ]
+        applied.append("provider-subset")
+        if not filtered:
+            return [], "provider-subset", tuple(applied)
+
+    return filtered, None, tuple(applied)
+
+
+def _raise_no_available_models() -> None:
+    raise RoutingInfeasibleError(RoutingInfeasibility(
+        code=RoutingFailureCode.NO_AVAILABLE_MODELS,
+        message="No routed models are available in the current pool.",
+    ))
+
+
+def _raise_capability_infeasible(
+    *,
+    available_models: list[str],
+    candidate_count: int,
+    requirements: RequestRequirements,
+    excluded: dict[str, list[str]],
+    constraints: RoutingConstraints,
+) -> None:
+    missing = sorted({miss for values in excluded.values() for miss in values})
+    if not missing:
+        if requirements.needs_tool_calling:
+            missing.append("tool_calling")
+        if requirements.needs_vision:
+            missing.append("vision")
+    detail = ", ".join(missing) if missing else "requested capabilities"
+    raise RoutingInfeasibleError(RoutingInfeasibility(
+        code=RoutingFailureCode.CAPABILITY_REQUIREMENTS_UNMET,
+        message=f"No routed model satisfied required capabilities: {detail}.",
+        available_model_count=len(available_models),
+        candidate_count=candidate_count,
+        constraint_tags=constraints.tags(),
+        missing_capabilities=tuple(missing),
+    ))
+
+
+def _raise_constraint_infeasible(
+    *,
+    available_models: list[str],
+    candidate_count: int,
+    constraints: RoutingConstraints,
+    failed_constraint: str,
+    applied_constraints: tuple[str, ...],
+) -> None:
+    if failed_constraint == "model-subset":
+        code = RoutingFailureCode.ALLOWLIST_EXHAUSTED
+        base_message = "No routed model satisfied the allowed_models constraint"
+    elif failed_constraint == "provider-subset":
+        code = RoutingFailureCode.ALLOWLIST_EXHAUSTED
+        base_message = "No routed model satisfied the allowed_providers constraint"
+    elif failed_constraint == "free-only":
+        code = RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET
+        base_message = "No routed model satisfied the free_only constraint"
+    else:
+        code = RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET
+        base_message = "No routed model satisfied the local_only constraint"
+
+    prior_constraints = [tag for tag in applied_constraints if tag != failed_constraint]
+    if prior_constraints:
+        message = f"{base_message} after applying {', '.join(prior_constraints)}."
+    else:
+        message = f"{base_message}."
+
+    raise RoutingInfeasibleError(RoutingInfeasibility(
+        code=code,
+        message=message,
+        available_model_count=len(available_models),
+        candidate_count=candidate_count,
+        constraint_tags=constraints.tags(),
+        failed_constraints=applied_constraints,
+    ))
+
+
+def _raise_budget_infeasible(
+    *,
+    available_models: list[str],
+    candidate_count: int,
+    constraints: RoutingConstraints,
+    max_cost: float,
+    cheapest_cost: float | None,
+) -> None:
+    if cheapest_cost is None:
+        message = f"No routed model satisfied the max_cost constraint (${max_cost:.6f})."
+    else:
+        message = (
+            f"No routed model satisfied the max_cost constraint (${max_cost:.6f}); "
+            f"cheapest feasible candidate costs ${cheapest_cost:.6f}."
+        )
+    raise RoutingInfeasibleError(RoutingInfeasibility(
+        code=RoutingFailureCode.BUDGET_EXCEEDED,
+        message=message,
+        available_model_count=len(available_models),
+        candidate_count=candidate_count,
+        constraint_tags=constraints.tags(),
+        max_cost=max_cost,
+        cheapest_cost=cheapest_cost,
+    ))
 
 
 def select_model(
@@ -120,6 +250,7 @@ def select_model(
     request_requirements: RequestRequirements | None = None,
     constraints: RoutingConstraints | None = None,
     workload_hints: WorkloadHints | None = None,
+    routing_features: RoutingFeatures | None = None,
     answer_depth: AnswerDepth = AnswerDepth.STANDARD,
     answer_depth_multiplier: float = 1.0,
     agentic_score: float = 0.0,
@@ -128,34 +259,53 @@ def select_model(
     bandit_config: BanditConfig | None = None,
     model_experience: object | None = None,
 ) -> RoutingDecision:
-    pricing = pricing or DEFAULT_MODEL_PRICING
-    capabilities = model_capabilities or {}
+    pricing = DEFAULT_MODEL_PRICING if pricing is None else pricing
+    capabilities = {} if model_capabilities is None else model_capabilities
     requirements = request_requirements or RequestRequirements()
     hard_constraints = constraints or RoutingConstraints()
     hints = workload_hints or WorkloadHints()
     weights = selection_weights or SelectionWeights()
-    tc = tier_configs[tier]
+    tc = tier_configs.get(tier, TierConfig())
     configured_candidates = [candidate for candidate in [tc.primary, *tc.fallback] if candidate]
     if not configured_candidates:
         configured_candidates = list(pricing.keys())
-    constrained_candidates = _apply_constraints(configured_candidates, hard_constraints, capabilities)
-    constraint_relaxed = bool(hard_constraints.tags()) and not constrained_candidates
-    filtered_source = constrained_candidates or configured_candidates
-    filtered_candidates, excluded = _filter_candidates(filtered_source, requirements, capabilities)
-    candidates = filtered_candidates or filtered_source
+    if not configured_candidates:
+        _raise_no_available_models()
+
+    filtered_candidates, excluded = _filter_candidates(configured_candidates, requirements, capabilities)
+    if not filtered_candidates:
+        _raise_capability_infeasible(
+            available_models=configured_candidates,
+            candidate_count=len(configured_candidates),
+            requirements=requirements,
+            excluded=excluded,
+            constraints=hard_constraints,
+        )
+
+    candidates, failed_constraint, applied_constraints = _apply_constraints(
+        filtered_candidates,
+        hard_constraints,
+        capabilities,
+    )
+    if failed_constraint is not None:
+        _raise_constraint_infeasible(
+            available_models=configured_candidates,
+            candidate_count=len(filtered_candidates),
+            constraints=hard_constraints,
+            failed_constraint=failed_constraint,
+            applied_constraints=applied_constraints,
+        )
 
     capability_notes: list[str] = []
-    if filtered_candidates:
+    if excluded:
         capability_notes.extend(
             sorted({miss for missing in excluded.values() for miss in missing}),
         )
-    elif excluded:
-        capability_notes.append("capability-relaxed")
     if capability_notes:
-        kept = len(filtered_candidates) if filtered_candidates else len(configured_candidates)
-        reasoning = f"{reasoning} | caps={','.join(capability_notes)} ({kept}/{len(configured_candidates)})"
-    if constraint_relaxed:
-        reasoning = f"{reasoning} | constraints=relaxed"
+        reasoning = (
+            f"{reasoning} | caps={','.join(capability_notes)} "
+            f"({len(filtered_candidates)}/{len(configured_candidates)})"
+        )
 
     if tc.hard_pin and tc.primary in candidates:
         scoring_candidates = [tc.primary]
@@ -185,6 +335,24 @@ def select_model(
         model_experience=model_experience,
     )
     candidate_scores.sort(key=lambda item: item.total, reverse=True)
+    if hard_constraints.max_cost is not None:
+        affordable_scores = [
+            item for item in candidate_scores
+            if item.predicted_cost <= hard_constraints.max_cost
+        ]
+        if not affordable_scores:
+            cheapest_cost = (
+                min(item.predicted_cost for item in candidate_scores)
+                if candidate_scores else None
+            )
+            _raise_budget_infeasible(
+                available_models=configured_candidates,
+                candidate_count=len(candidate_scores),
+                constraints=hard_constraints,
+                max_cost=hard_constraints.max_cost,
+                cheapest_cost=cheapest_cost,
+            )
+        candidate_scores = affordable_scores
     if user_keyed_models:
         keyed_scores = [item for item in candidate_scores if item.model in user_keyed_models]
         if keyed_scores:
@@ -231,6 +399,7 @@ def select_model(
         tier=tier,
         mode=mode,
         confidence=confidence,
+        raw_confidence=confidence,
         method=method,  # type: ignore[arg-type]
         reasoning=reasoning,
         cost_estimate=cost,
@@ -240,6 +409,7 @@ def select_model(
         agentic_score=agentic_score,
         constraints=hard_constraints,
         workload_hints=hints,
+        routing_features=routing_features or RoutingFeatures(),
         answer_depth=answer_depth,
         suggested_output_budget=effective_output,
         fallback_chain=chain,
@@ -374,7 +544,10 @@ def _experience_snapshot(
 ) -> CandidateExperience:
     if store is None or not hasattr(store, "snapshot"):
         return CandidateExperience()
-    snapshot = store.snapshot(model, mode, tier)
+    try:
+        snapshot = store.snapshot(model, mode, tier)
+    except TypeError:
+        snapshot = store.snapshot(model, mode)
     if isinstance(snapshot, CandidateExperience):
         return snapshot
     return CandidateExperience()
@@ -390,7 +563,10 @@ def _bucket_pulls(
     try:
         pulls = int(store.bucket_pulls(mode, tier))
     except Exception:
-        return 0
+        try:
+            pulls = int(store.bucket_pulls(mode))
+        except Exception:
+            return 0
     return max(0, pulls)
 
 
@@ -432,33 +608,29 @@ def _derive_tier(complexity: float) -> Tier:
 
 def _quality_prior_scores(
     models: list[str],
-    pricing: dict[str, ModelPricing],
+    benchmark_quality: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Price-based quality prior: expensive models assumed higher quality.
-
-    Replaces the position-based ``editorial`` score from the tier path.
-    Range [0, 1], most expensive = 1.0, cheapest = 0.0.
+    """Quality prior from benchmark data.  Returns 0.5 (neutral) for
+    unknown models — the experience system learns actual quality over time.
     """
-    costs = {}
-    for m in models:
-        mp = pricing.get(m, ModelPricing(0, 0))
-        costs[m] = mp.input_price + mp.output_price
-    if not costs:
-        return {}
-    ranked = sorted(costs.keys(), key=lambda m: costs[m], reverse=True)
-    n = len(ranked)
-    return {m: 1.0 - (i / max(n - 1, 1)) for i, m in enumerate(ranked)}
+    if benchmark_quality:
+        return {m: benchmark_quality.get(m, 0.5) for m in models}
+    return {m: 0.5 for m in models}
 
 
 def _normalized_costs(
     models: list[str],
     pricing: dict[str, ModelPricing],
 ) -> dict[str, float]:
-    """Normalize costs to [0, 1].  Cheapest = 0, most expensive = 1."""
+    """Log-scale cost normalization.
+
+    Uses log(1 + cost) to prevent free models from having an absolute
+    cost advantage.  The gap between $0 and $0.30 is compressed vs linear.
+    """
     raw = {}
     for m in models:
         mp = pricing.get(m, ModelPricing(0, 0))
-        raw[m] = mp.input_price + mp.output_price
+        raw[m] = math.log1p(mp.input_price + mp.output_price)
     if not raw:
         return {}
     lo = min(raw.values())
@@ -485,6 +657,7 @@ def select_from_pool(
     requirements: RequestRequirements,
     constraints: RoutingConstraints | None = None,
     workload_hints: WorkloadHints | None = None,
+    routing_features: RoutingFeatures | None = None,
     answer_depth: AnswerDepth = AnswerDepth.STANDARD,
     answer_depth_multiplier: float = 1.0,
     agentic_score: float = 0.0,
@@ -492,6 +665,12 @@ def select_from_pool(
     selection_weights: SelectionWeights | None = None,
     bandit_config: BanditConfig | None = None,
     model_experience: object | None = None,
+    raw_confidence: float | None = None,
+    confidence_source: str = "classifier",
+    calibration_version: str = "",
+    calibration_sample_count: int = 0,
+    calibration_temperature: float = 1.0,
+    calibration_applied_tags: tuple[str, ...] = (),
 ) -> RoutingDecision:
     """Select the best model from the full discovered pool.
 
@@ -505,71 +684,147 @@ def select_from_pool(
     hints = workload_hints or WorkloadHints()
     tier = _derive_tier(complexity)
 
-    candidates = _filter_candidates(available_models, requirements, capabilities)[0]
-    if not candidates:
-        candidates = available_models
-    constrained_candidates = _apply_constraints(candidates, hard_constraints, capabilities)
-    constraint_relaxed = bool(hard_constraints.tags()) and not constrained_candidates
-    if constrained_candidates:
-        candidates = constrained_candidates
+    if not available_models:
+        _raise_no_available_models()
 
-    budget = estimate_output_budget(prompt, tier.value)
+    filtered_candidates, excluded = _filter_candidates(available_models, requirements, capabilities)
+    if not filtered_candidates:
+        _raise_capability_infeasible(
+            available_models=available_models,
+            candidate_count=len(available_models),
+            requirements=requirements,
+            excluded=excluded,
+            constraints=hard_constraints,
+        )
+
+    candidates, failed_constraint, applied_constraints = _apply_constraints(
+        filtered_candidates,
+        hard_constraints,
+        capabilities,
+    )
+    if failed_constraint is not None:
+        _raise_constraint_infeasible(
+            available_models=available_models,
+            candidate_count=len(filtered_candidates),
+            constraints=hard_constraints,
+            failed_constraint=failed_constraint,
+            applied_constraints=applied_constraints,
+        )
+
+    difficulty_tier_label = tier.value
+    budget = estimate_output_budget(prompt, difficulty_tier_label)
     effective_output = min(max_output_tokens, max(1, int(budget * max(0.1, answer_depth_multiplier))))
 
-    quality_priors = _quality_prior_scores(candidates, pricing)
+    benchmark_quality: dict[str, float] | None = None
+    try:
+        from uncommon_route.benchmark import get_benchmark_cache
+        benchmark_quality = get_benchmark_cache().get_all_qualities(candidates)
+    except Exception as exc:
+        logger.warning("Benchmark quality unavailable: %s", exc)
+    quality_priors = _quality_prior_scores(candidates, benchmark_quality=benchmark_quality)
     norm_costs = _normalized_costs(candidates, pricing)
-    experience = {
-        m: _experience_snapshot(model_experience, m, mode, tier)
-        for m in candidates
-    }
+    experience = {}
+    for m in candidates:
+        exp_snapshot = _experience_snapshot(model_experience, m, mode, tier)
+        if exp_snapshot.samples == 0:
+            best_alt = exp_snapshot
+            for alt_tier in (Tier.SIMPLE, Tier.MEDIUM, Tier.COMPLEX):
+                alt = _experience_snapshot(model_experience, m, mode, alt_tier)
+                if alt.samples > best_alt.samples:
+                    best_alt = alt
+            exp_snapshot = best_alt
+        experience[m] = exp_snapshot
     dollar_costs = {
         m: _calc_cost(m, estimated_input_tokens, effective_output, pricing,
                        input_cost_multiplier=experience[m].input_cost_multiplier)
         for m in candidates
     }
     cheapest_cost = min(dollar_costs.values()) if dollar_costs else 0.0
+    log_dollar_costs = {m: math.log1p(c * 1000) for m, c in dollar_costs.items()}
+    max_log_dc = max(log_dollar_costs.values()) if log_dollar_costs else 1.0
+    min_log_dc = min(log_dollar_costs.values()) if log_dollar_costs else 0.0
+    span_dc = max_log_dc - min_log_dc
+    actual_cost_norm = {m: (log_dollar_costs[m] - min_log_dc) / span_dc if span_dc > 0 else 0.5 for m in dollar_costs}
     if hard_constraints.max_cost is not None:
         affordable = [model for model in candidates if dollar_costs[model] <= hard_constraints.max_cost]
         if affordable:
             candidates = affordable
-            quality_priors = _quality_prior_scores(candidates, pricing)
+            quality_priors = _quality_prior_scores(candidates, benchmark_quality=benchmark_quality)
             norm_costs = _normalized_costs(candidates, pricing)
             experience = {m: experience[m] for m in candidates}
             dollar_costs = {m: dollar_costs[m] for m in candidates}
             cheapest_cost = min(dollar_costs.values()) if dollar_costs else 0.0
         else:
-            constraint_relaxed = True
-    bucket_pulls_count = _bucket_pulls(model_experience, mode, tier)
+            _raise_budget_infeasible(
+                available_models=available_models,
+                candidate_count=len(candidates),
+                constraints=hard_constraints,
+                max_cost=hard_constraints.max_cost,
+                cheapest_cost=cheapest_cost if dollar_costs else None,
+            )
 
     mu = complexity
-    bandit_active = bc.enabled and tier in bc.enabled_tiers
+    bandit_active = bc.enabled
+    prior_n = 20.0
+
+    # Mode controls quality-vs-cost preference:
+    #   FAST  → strongly prefer cheap (low cost_sensitivity = quality matters less)
+    #   AUTO  → balanced
+    #   BEST  → strongly prefer quality (high cost_sensitivity = cost matters less)
+    # Quality weight: how much does quality matter vs cost.
+    #   FAST: cost-dominant — pick the cheapest decent model
+    #   AUTO: balanced — best quality-per-dollar
+    #   BEST: quality-only — pick the highest quality, ignore cost
+    mode_quality_weight = {
+        RoutingMode.FAST: 0.35,
+        RoutingMode.AUTO: 0.65,
+        RoutingMode.BEST: 1.0,
+    }
+    base_q_weight = mode_quality_weight.get(mode, 0.65)
+    q_weight = base_q_weight + mu * (1.0 - base_q_weight) * 0.5
+
+    # Relative quality gate: exclude models below X% of the best available.
+    mode_gate_fraction = {
+        RoutingMode.FAST: 0.50,
+        RoutingMode.AUTO: 0.60,
+        RoutingMode.BEST: 0.85,
+    }
+    gate_fraction = mode_gate_fraction.get(mode, 0.60)
 
     ranked: list[CandidateScore] = []
+    all_predicted_qualities: dict[str, float] = {}
+
     for model in candidates:
         cap = capabilities.get(model, ModelCapabilities())
         exp = experience[model]
-        quality_prior = quality_priors.get(model, 0.5)
+        benchmark_q = quality_priors.get(model, 0.5)
         cost_norm = norm_costs.get(model, 0.5)
         reasoning_bias = 1.0 if requirements.prefers_reasoning and cap.reasoning else 0.0
         byok = 1.0 if user_keyed_models and model in user_keyed_models else 0.0
         free_bias = 1.0 if cap.free else 0.0
         local_bias = 1.0 if cap.local else 0.0
 
-        exploration_bonus = _bandit_bonus(
-            enabled=bandit_active,
-            bandit_config=bc,
-            candidate_cost=dollar_costs[model],
-            cheapest_cost=cheapest_cost,
-            reliability=exp.reliability,
-            samples=exp.samples,
-            bucket_pulls=bucket_pulls_count,
+        base_quality = (
+            (prior_n * benchmark_q + exp.samples * exp.reward_mean)
+            / (prior_n + exp.samples)
         )
 
-        # PROTEUS-inspired scoring (γ derived from existing weights):
-        #   score = base_quality + w_q·μ·quality_prior - w_c·(1-μ)·cost + auxiliary
-        base_quality = exp.reward_mean
-        quality_term = weights.editorial * mu * quality_prior
-        cost_penalty = weights.cost * (1.0 - mu) * cost_norm
+        predicted_quality = base_quality * (1.0 - mu * (1.0 - base_quality))
+
+        # Thompson Sampling: sample from Beta distribution.
+        # The sampled value REPLACES base_quality in difficulty adjustment,
+        # so it directly affects model ranking — not just a tiny bonus.
+        # exploration_scale controls distribution width:
+        #   scale=3 → wide (more exploration)
+        #   scale=10 → narrow (more exploitation)
+        exploration_scale = 4.0
+        ts_alpha = max(0.5, exploration_scale * base_quality)
+        ts_beta = max(0.5, exploration_scale * (1.0 - base_quality))
+        if bandit_active:
+            sampled_quality = _rng.betavariate(ts_alpha, ts_beta)
+            predicted_quality = sampled_quality * (1.0 - mu * (1.0 - sampled_quality))
+        exploration_bonus = 0.0
+        all_predicted_qualities[model] = predicted_quality
 
         auxiliary = (
             weights.latency * exp.latency
@@ -581,17 +836,19 @@ def select_from_pool(
             + weights.local_bias * local_bias
             + weights.reasoning_bias * reasoning_bias
         )
-
-        total = base_quality + quality_term - cost_penalty + auxiliary
-        if bandit_active:
-            total += exploration_bonus
+        total = (
+            q_weight * predicted_quality
+            - (1.0 - q_weight) * actual_cost_norm[model]
+            + auxiliary
+        )
 
         ranked.append(CandidateScore(
             model=model,
             total=total,
             predicted_cost=dollar_costs[model],
+            predicted_quality=predicted_quality,
             effective_cost_multiplier=exp.input_cost_multiplier,
-            editorial=quality_prior,
+            editorial=benchmark_q,
             cost=cost_norm,
             latency=exp.latency,
             reliability=exp.reliability,
@@ -606,7 +863,18 @@ def select_from_pool(
             samples=exp.samples,
         ))
 
-    ranked.sort(key=lambda s: s.total, reverse=True)
+    # Relative quality gate: exclude models below gate_fraction of best
+    best_quality = max(all_predicted_qualities.values()) if all_predicted_qualities else 0.5
+    quality_gate = best_quality * gate_fraction
+
+    gated = [s for s in ranked if s.predicted_quality >= quality_gate]
+    if gated:
+        gated.sort(key=lambda s: s.total, reverse=True)
+        below = [s for s in ranked if s.predicted_quality < quality_gate]
+        below.sort(key=lambda s: s.total, reverse=True)
+        ranked = gated + below
+    else:
+        ranked.sort(key=lambda s: s.predicted_quality, reverse=True)
 
     if user_keyed_models:
         keyed = [s for s in ranked if s.model in user_keyed_models]
@@ -641,18 +909,27 @@ def select_from_pool(
         f"mode={mode.value}",
         f"depth={answer_depth.value}",
     ]
+    capability_notes = sorted({miss for missing in excluded.values() for miss in missing})
+    if capability_notes:
+        reasoning_parts.append(
+            f"required_caps={','.join(capability_notes)} ({len(filtered_candidates)}/{len(available_models)})"
+        )
     if constraint_tags:
         reasoning_parts.append(f"constraints={','.join(constraint_tags)}")
     if hint_tags:
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
-    if constraint_relaxed:
-        reasoning_parts.append("constraints=relaxed")
 
     return RoutingDecision(
         model=model,
         tier=tier,
         mode=mode,
         confidence=confidence,
+        raw_confidence=confidence if raw_confidence is None else raw_confidence,
+        confidence_source=confidence_source,
+        calibration_version=calibration_version,
+        calibration_sample_count=calibration_sample_count,
+        calibration_temperature=calibration_temperature,
+        calibration_applied_tags=calibration_applied_tags,
         method=method_note,
         reasoning=" | ".join(reasoning_parts),
         cost_estimate=cost,
@@ -662,6 +939,7 @@ def select_from_pool(
         agentic_score=agentic_score,
         constraints=hard_constraints,
         workload_hints=hints,
+        routing_features=routing_features or RoutingFeatures(),
         answer_depth=answer_depth,
         suggested_output_budget=effective_output,
         fallback_chain=chain,

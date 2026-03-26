@@ -34,9 +34,8 @@ from uncommon_route.paths import data_dir
 from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
-from uncommon_route.router.keywords import extract_keyword_features
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 _DATA_DIR = data_dir()
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"
@@ -58,7 +57,7 @@ Commands:
   logs                              Tail background-proxy log
   setup <client>                    Generate config for a client (claude-code)
   debug <prompt>                    Show per-dimension scoring breakdown
-  feedback <sub>                    Online learning (status|rollback)
+  feedback <sub>                    Online learning + confidence calibration (status|rollback|calibrate)
   openclaw <sub>                    OpenClaw integration (install|uninstall|status)
   spend <sub>                       Spending limits (status|set|clear|history)
   provider <sub>                    API key management (list|add|remove|models)
@@ -85,8 +84,9 @@ Logs options:
   --follow                            Stream new lines (like tail -f)
 
 Feedback subcommands:
-  feedback status                     Show online learning status
+  feedback status                     Show online learning and route-confidence calibration status
   feedback rollback                   Discard online weights, revert to base model
+  feedback calibrate                  Fit route-confidence calibration from labeled local traces
 
 OpenClaw subcommands:
   openclaw install [--port <n>]       Register as OpenClaw provider
@@ -210,7 +210,7 @@ def _cmd_route(args: list[str]) -> None:
     output_json = bool(flags.get("json", False))
     no_feedback = bool(flags.get("no-feedback", False))
 
-    from uncommon_route.router.types import RoutingMode
+    from uncommon_route.router.types import RoutingInfeasibleError, RoutingMode
 
     try:
         routing_mode = RoutingMode(mode_flag)
@@ -222,12 +222,32 @@ def _cmd_route(args: list[str]) -> None:
         sys.exit(1)
 
     start = time.perf_counter_ns()
-    decision = route(
-        prompt,
-        system_prompt=system_prompt,
-        max_output_tokens=max_tokens,
-        routing_mode=routing_mode,
-    )
+    try:
+        decision = route(
+            prompt,
+            system_prompt=system_prompt,
+            max_output_tokens=max_tokens,
+            routing_mode=routing_mode,
+        )
+    except RoutingInfeasibleError as exc:
+        detail = exc.infeasibility.as_dict()
+        if output_json:
+            print(json.dumps({"error": detail}, indent=2))
+        else:
+            print(f"  Error:      {detail['message']}", file=sys.stderr)
+            if detail.get("failed_constraints"):
+                print(
+                    "  Constraints: "
+                    + ", ".join(str(tag) for tag in detail["failed_constraints"]),
+                    file=sys.stderr,
+                )
+            if detail.get("missing_capabilities"):
+                print(
+                    "  Missing:    "
+                    + ", ".join(str(tag) for tag in detail["missing_capabilities"]),
+                    file=sys.stderr,
+                )
+        sys.exit(2)
     elapsed_us = (time.perf_counter_ns() - start) / 1000
 
     if output_json:
@@ -236,6 +256,14 @@ def _cmd_route(args: list[str]) -> None:
             "model": decision.model,
             "tier": decision.tier.value,
             "confidence": round(decision.confidence, 3),
+            "raw_confidence": round(decision.raw_confidence, 3),
+            "confidence_source": decision.confidence_source,
+            "confidence_calibration": {
+                "version": decision.calibration_version,
+                "sample_count": decision.calibration_sample_count,
+                "temperature": round(decision.calibration_temperature, 3),
+                "applied_tags": list(decision.calibration_applied_tags),
+            },
             "cost_estimate": round(decision.cost_estimate, 6),
             "savings": round(decision.savings, 3),
             "reasoning": decision.reasoning,
@@ -252,6 +280,13 @@ def _cmd_route(args: list[str]) -> None:
     print(f"  Model:      {decision.model}")
     print(f"  Tier:       {decision.tier.value}")
     print(f"  Confidence: {decision.confidence:.2f}")
+    print(f"  Raw conf:   {decision.raw_confidence:.2f} ({decision.confidence_source})")
+    if decision.calibration_version:
+        print(
+            "  Calib:      "
+            f"{decision.calibration_version} "
+            f"(labels={decision.calibration_sample_count}, T={decision.calibration_temperature:.2f})"
+        )
     print(f"  Cost:       ${decision.cost_estimate:.6f}")
     print(f"  Savings:    {decision.savings:.0%}")
     print(f"  Latency:    {elapsed_us / 1000.0:.3f}ms")
@@ -297,10 +332,10 @@ def _cmd_debug(args: list[str]) -> None:
 
     struct_dims = extract_structural_features(full_text)
     unicode_blocks = extract_unicode_block_features(full_text)
-    kw_dims = extract_keyword_features(prompt)
 
     tier_str = result.tier.value if result.tier else "AMBIGUOUS"
     print(f"  Tier:       {tier_str}")
+    print(f"  Complexity: {result.complexity:.3f}")
     print(f"  Confidence: {result.confidence:.3f}")
     print(f"  Signals:    {', '.join(result.signals)}")
     print()
@@ -315,12 +350,6 @@ def _cmd_debug(args: list[str]) -> None:
     for name, prop in sorted(unicode_blocks.items(), key=lambda x: -x[1]):
         if prop > 0.001:
             print(f"    {name:<28} {prop:>7.3f}")
-
-    print()
-    print("  Keyword Features:")
-    for d in kw_dims:
-        sig = f"  [{d.signal}]" if d.signal else ""
-        print(f"    {d.name:<28} {d.score:>7.3f}{sig}")
 
 
 def _cmd_serve(args: list[str]) -> None:
@@ -864,15 +893,18 @@ def _cmd_stats(args: list[str]) -> None:
 
 
 def _cmd_feedback(args: list[str]) -> None:
+    from uncommon_route.calibration import get_active_route_confidence_calibrator
     from uncommon_route.router.classifier import (
         _get_online_model_path,
         rollback_online_model,
     )
+    from uncommon_route.stats import RouteStats
 
     if not args:
         args = ["status"]
 
     sub = args[0]
+    calibrator = get_active_route_confidence_calibrator()
 
     if sub == "status":
         online_path = _get_online_model_path()
@@ -887,10 +919,39 @@ def _cmd_feedback(args: list[str]) -> None:
             print(f"  Size:         {size_kb:.0f} KB")
             print(f"  Last updated: {ts}")
         print()
+        calibration = calibrator.status()
+        print(
+            "  Route confidence calibration: "
+            f"{'active' if calibration['active'] else 'inactive'}"
+        )
+        print(f"  Labels:       {calibration['labeled_examples']}")
+        if calibration.get("training_examples"):
+            print(
+                "  Split:        "
+                f"{calibration['training_examples']} train / {calibration['holdout_examples']} holdout"
+            )
+        if calibration.get("selected_strategy"):
+            print(f"  Strategy:     {calibration['selected_strategy']}")
+        print(f"  Temperature:  {calibration['temperature']:.2f}")
+        if calibration["version"]:
+            print(f"  Version:      {calibration['version']}")
+            print(
+                "  ECE:          "
+                f"{calibration['raw_ece']:.3f} -> {calibration['calibrated_ece']:.3f}"
+            )
+        if calibration.get("holdout_examples"):
+            print(
+                "  Holdout ECE:  "
+                f"{calibration['holdout_raw_ece']:.3f} -> {calibration['holdout_calibrated_ece']:.3f}"
+            )
+        if calibration.get("stale"):
+            print("  Snapshot:     stale (waiting for fresher labeled traces)")
+        print()
         print("  How feedback works:")
         print("    1. Run `uncommon-route route <prompt>` and rate the tier")
         print("    2. Your feedback updates a local model overlay (~/.uncommon-route/model_online.json)")
-        print("    3. The base model is never modified — rollback anytime with `feedback rollback`")
+        print("    3. Labeled route traces also fit calibrated runtime confidence")
+        print("    4. The base model is never modified — rollback anytime with `feedback rollback`")
 
     elif sub == "rollback":
         deleted = rollback_online_model()
@@ -899,9 +960,44 @@ def _cmd_feedback(args: list[str]) -> None:
         else:
             print("  No online weights found (already using base model)")
 
+    elif sub == "calibrate":
+        stats = RouteStats()
+        snapshot = calibrator.fit_from_route_records(stats.history())
+        status = calibrator.status()
+        if not status["active"]:
+            print("  Route-confidence calibration remains inactive.")
+            if snapshot.labeled_examples < snapshot.min_examples:
+                print(
+                    f"  Found {snapshot.labeled_examples} labeled traces "
+                    f"(need at least {snapshot.min_examples})."
+                )
+            elif status.get("stale"):
+                print("  The saved snapshot is stale; collect fresher feedback and rebuild.")
+            elif snapshot.selected_strategy == "raw" and snapshot.holdout_examples > 0:
+                print("  Holdout gate rejected the fitted calibration; keeping raw runtime confidence.")
+                print(
+                    "  Holdout ECE:  "
+                    f"{snapshot.holdout_raw_ece:.3f} -> {snapshot.holdout_calibrated_ece:.3f}"
+                )
+            else:
+                print("  No robust calibration model was selected from the available traces.")
+            return
+        print("  ✓ Rebuilt route-confidence calibration from local traces")
+        print(f"  Version:      {snapshot.version}")
+        print(f"  Labels:       {snapshot.labeled_examples}")
+        print(f"  Strategy:     {snapshot.selected_strategy or 'full'}")
+        if snapshot.holdout_examples > 0:
+            print(
+                "  Split:        "
+                f"{snapshot.training_examples} train / {snapshot.holdout_examples} holdout"
+            )
+        print(f"  Temperature:  {snapshot.temperature:.2f}")
+        print(f"  ECE:          {snapshot.raw_ece:.3f} -> {snapshot.calibrated_ece:.3f}")
+        print(f"  Adjustments:  {len(snapshot.adjustments)}")
+
     else:
         print(f"Unknown feedback subcommand: {sub}", file=sys.stderr)
-        print("  Available: status, rollback", file=sys.stderr)
+        print("  Available: status, rollback, calibrate", file=sys.stderr)
         sys.exit(1)
 
 

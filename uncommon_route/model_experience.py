@@ -155,17 +155,13 @@ class ModelExperienceStore:
                 record.input_cost_multiplier_ewma,
                 input_cost_multiplier,
             )
-        record.reward_ewma = self._blend(
-            record.reward_ewma,
-            _reward_from_observation(
-                success=success,
-                ttft_ms=ttft_ms,
-                tps=tps,
-                cache_hit_ratio=record.cache_hit_ratio_ewma,
-                input_cost_multiplier=record.input_cost_multiplier_ewma,
-            ),
-        )
-        record.reward_count += 1
+        # Only update reward for FAILURES (real signal).
+        # HTTP 200 success is an availability signal, not a quality signal.
+        # Quality reward comes from: explicit feedback, retrial detection,
+        # logprob confidence — not from HTTP status codes.
+        if not success:
+            record.reward_ewma = self._blend(record.reward_ewma, 0.0)
+            record.reward_count += 1
         record.last_used_at = float(self._now())
         self._save()
 
@@ -177,6 +173,9 @@ class ModelExperienceStore:
         signal: FeedbackSignal,
     ) -> None:
         record = self._get_or_create(model, mode, tier)
+        # "ok" = model was appropriate for this tier (positive)
+        # "weak" = model was too weak, should have used stronger (negative)
+        # "strong" = model was overkill, could have used cheaper (mild negative)
         delta = {
             "ok": 0.14,
             "weak": -0.22,
@@ -224,7 +223,7 @@ class ModelExperienceStore:
             cache_affinity=cache_affinity,
             input_cost_multiplier=max(0.1, min(2.0, record.input_cost_multiplier_ewma)),
             reward_mean=max(0.0, min(1.0, record.reward_ewma)),
-            samples=record.requests,
+            samples=record.reward_count,
         )
 
     def bucket_pulls(
@@ -465,36 +464,6 @@ class ModelExperienceStore:
             ),
         )
 
-
-def _reward_from_observation(
-    *,
-    success: bool,
-    ttft_ms: float | None,
-    tps: float | None,
-    cache_hit_ratio: float,
-    input_cost_multiplier: float,
-) -> float:
-    if not success:
-        return 0.0
-    ttft_score = 0.7
-    if ttft_ms is not None and ttft_ms > 0:
-        ttft_score = 1.0 / (1.0 + (ttft_ms / 1800.0))
-    tps_score = 0.6
-    if tps is not None and tps > 0:
-        tps_score = min(1.0, tps / 90.0)
-    cache_score = max(0.0, min(1.0, 0.5 + (cache_hit_ratio * 0.45)))
-    cost_score = max(0.0, min(1.0, 1.1 - (input_cost_multiplier * 0.55)))
-    return max(
-        0.0,
-        min(
-            1.0,
-            0.38
-            + (ttft_score * 0.20)
-            + (tps_score * 0.14)
-            + (cache_score * 0.16)
-            + (cost_score * 0.12),
-        ),
-    )
 
 
 def _reward_from_feedback(signal: FeedbackSignal) -> float:

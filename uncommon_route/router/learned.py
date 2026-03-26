@@ -80,30 +80,38 @@ class ScriptAgnosticClassifier:
         self,
         structural_scores: dict[str, float],
         unicode_blocks: dict[str, float],
-        keyword_scores: dict[str, float],
+        keyword_scores: dict[str, float] | None = None,
         prompt: str = "",
+        context_features: dict[str, float] | None = None,
     ) -> dict[str, float]:
-        """Build the full feature vector from component parts."""
+        """Build the full feature vector from component parts.
+
+        Keyword scores are accepted for backward compatibility but ignored
+        when the model is trained without them.  N-gram features learn
+        equivalent patterns directly from data.
+        """
         features: dict[str, float] = {}
 
-        # Structural features (12 dims, script-agnostic)
         for name, score in structural_scores.items():
             features[f"s_{name}"] = score
 
-        # Unicode block features (15 dims, script-agnostic)
         for name, proportion in unicode_blocks.items():
             features[f"u_{name}"] = proportion
 
-        # Keyword features (12 dims, multilingual vocabulary)
-        for name, score in keyword_scores.items():
-            features[f"k_{name}"] = score
+        if keyword_scores:
+            for name, score in keyword_scores.items():
+                features[f"k_{name}"] = score
 
-        # N-gram features (optional, same-script boost)
+        if context_features:
+            for name, value in context_features.items():
+                key = name if name.startswith("ctx_") else f"ctx_{name}"
+                features[key] = value
+
         if self._use_ngrams and prompt:
             ngram_feats = _extract_ngram_features(prompt)
-            # Scale down n-grams: they're a bonus, not the backbone
+            ngram_scale = 0.3 if keyword_scores else 0.5
             for k, v in ngram_feats.items():
-                features[k] = v * 0.3
+                features[k] = v * ngram_scale
 
         return features
 
@@ -254,6 +262,3 @@ class ScriptAgnosticClassifier:
         self._trained = True
 
 
-# Backward compat
-NgramClassifier = ScriptAgnosticClassifier
-PerceptronClassifier = ScriptAgnosticClassifier

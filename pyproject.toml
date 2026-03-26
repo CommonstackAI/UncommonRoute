@@ -1,9 +1,10 @@
 [project]
 name = "uncommon-route"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local LLM router that cuts premium-model spend with adaptive 3-tier routing, OpenAI + Anthropic compatible"
 requires-python = ">=3.11"
-license = "MIT"
+license = "LicenseRef-UncommonRoute-Modified-MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 authors = [
     {name = "Anjie Yang", email = "andrewanjieyang@gmail.com"},
@@ -27,9 +28,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    "twine>=6.0",
 ]
 
 [project.scripts]
@@ -48,7 +51,7 @@ build-backend = "setuptools.build_meta"
 include = ["uncommon_route*"]
 
 [tool.setuptools.package-data]
-uncommon_route = ["router/model.json", "static/**/*"]
+uncommon_route = ["router/model.json", "router/benchmark_seed.json", "static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

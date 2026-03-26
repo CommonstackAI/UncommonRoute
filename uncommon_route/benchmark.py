@@ -122,13 +122,20 @@ class PinchBenchProvider(BenchmarkProvider):
             logger.info("PinchBench: %d models with quality data", len(entries))
         return entries
 
-    @staticmethod
-    def _normalize_model_id(raw_id: str) -> str:
+    _PROVIDER_ALIASES: dict[str, str] = {
+        "z-ai": "zai-org",
+        "bailian": "zai-org",
+        "moonshotai": "moonshot",
+        "x-ai": "xai",
+    }
+
+    @classmethod
+    def _normalize_model_id(cls, raw_id: str) -> str:
         """Normalize PinchBench model IDs to canonical provider/model form.
 
         PinchBench entries include provider prefixes from different hosting
         setups (lmstudio/, vllm/, opencode-go/, etc.).  This extracts the
-        canonical model identity.
+        canonical model identity and unifies provider aliases.
         """
         parts = raw_id.split("/")
         if len(parts) >= 2:
@@ -136,11 +143,13 @@ class PinchBenchProvider(BenchmarkProvider):
                 "anthropic", "openai", "google", "deepseek", "minimax",
                 "moonshot", "moonshotai", "xai", "x-ai", "nvidia",
                 "meta-llama", "mistralai", "qwen", "z-ai", "zai-org",
-                "stepfun", "xiaomi", "inception",
+                "stepfun", "xiaomi", "inception", "bailian",
             }
             for i, part in enumerate(parts):
                 if part.lower() in provider_hints and i + 1 < len(parts):
-                    return "/".join(parts[i:])
+                    provider = cls._PROVIDER_ALIASES.get(part.lower(), part.lower())
+                    model_name = "/".join(parts[i + 1:])
+                    return f"{provider}/{model_name}"
         return raw_id
 
 
@@ -276,8 +285,9 @@ class BenchmarkCache:
     def get_quality(self, model_id: str, category: str = "") -> float:
         """Get the best available quality score for a model.
 
-        Checks all sources, returns weighted average.  Falls back to
-        seed data, then to 0.5 (neutral) for unknown models.
+        Checks all sources via exact match, fuzzy match, and model-family
+        match.  Returns the highest quality found across all matching
+        strategies, weighted by source reliability.
         """
         scores: list[tuple[float, float]] = []
 
@@ -285,18 +295,34 @@ class BenchmarkCache:
             entry = entries.get(model_id)
             if entry is None:
                 entry = self._fuzzy_match(model_id, entries)
-            if entry is None:
+            if entry is not None and entry.fetched_at and entry.overall > 0:
+                weight = self._source_weights.get(source_name, 0.3)
+                if category and category in entry.categories:
+                    cat_score = entry.categories[category]
+                    if cat_score > 0:
+                        scores.append((cat_score, weight))
+                elif entry.overall > 0:
+                    has_real_data = bool(entry.raw) or bool(entry.categories)
+                    scores.append((entry.overall, weight * (1.0 if has_real_data else 0.3)))
+
+        family = self._extract_model_family(model_id)
+        family_candidates = self._family_index.get(family, [])
+        for src, mid, _ in family_candidates:
+            if mid == model_id:
                 continue
-            if not entry.fetched_at or entry.overall <= 0:
+            source_entries = self._sources.get(src)
+            if source_entries is None:
                 continue
-            weight = self._source_weights.get(source_name, 0.3)
-            if category and category in entry.categories:
-                cat_score = entry.categories[category]
-                if cat_score > 0:
-                    scores.append((cat_score, weight))
-            elif entry.overall > 0:
-                has_real_data = bool(entry.raw) or bool(entry.categories)
-                scores.append((entry.overall, weight * (1.0 if has_real_data else 0.3)))
+            entry = source_entries.get(mid)
+            if entry is not None and entry.fetched_at and entry.overall > 0:
+                weight = self._source_weights.get(src, 0.3) * 0.85
+                if category and category in entry.categories:
+                    cat_score = entry.categories[category]
+                    if cat_score > 0:
+                        scores.append((cat_score, weight))
+                else:
+                    has_real_data = bool(entry.raw) or bool(entry.categories)
+                    scores.append((entry.overall, weight * (1.0 if has_real_data else 0.3)))
 
         if scores:
             total_weight = sum(w for _, w in scores)
@@ -324,14 +350,39 @@ class BenchmarkCache:
     def source_summary(self) -> dict[str, int]:
         return {name: len(entries) for name, entries in self._sources.items()}
 
+    @staticmethod
+    def _extract_model_family(model_id: str) -> str:
+        """Extract provider/family key for model-family matching.
+
+        ``claude-sonnet-4.6`` → ``anthropic/claude-sonnet``
+        ``gemini-2.5-pro``    → ``google/gemini-pro``
+        ``glm-4.7``           → ``zai-org/glm``
+        """
+        import re
+        if "/" in model_id:
+            provider, name = model_id.split("/", 1)
+        else:
+            provider, name = "", model_id
+        provider = PinchBenchProvider._PROVIDER_ALIASES.get(provider.lower(), provider.lower())
+        name = name.lower()
+        name = re.sub(r"[-_]?\d+(\.\d+)*", "", name)
+        name = re.sub(r"-(preview|eco|lite|air|fast|plus|next|fp\d+)$", "", name)
+        name = name.strip("-_")
+        return f"{provider}/{name}" if provider else name
+
     def _build_index(self) -> None:
         self._normalized_index: dict[str, tuple[str, str]] = {}
+        self._family_index: dict[str, list[tuple[str, str, float]]] = {}
         for source_name, entries in self._sources.items():
-            for model_id in entries:
+            for model_id, entry in entries.items():
                 norm = model_id.lower().replace(".", "-").replace("_", "-")
                 core = model_id.split("/", 1)[-1].lower() if "/" in model_id else model_id.lower()
                 self._normalized_index[norm] = (source_name, model_id)
                 self._normalized_index[core] = (source_name, model_id)
+                family = self._extract_model_family(model_id)
+                self._family_index.setdefault(family, []).append(
+                    (source_name, model_id, entry.overall)
+                )
 
     def _fuzzy_match(self, model_id: str, entries: dict[str, ModelBenchmarkEntry]) -> ModelBenchmarkEntry | None:
         normalized = model_id.lower().replace(".", "-").replace("_", "-")
@@ -352,6 +403,18 @@ class BenchmarkCache:
             key_core = key.split("/", 1)[-1].lower() if "/" in key else key.lower()
             if core == key_core:
                 return entry
+
+        family = self._extract_model_family(model_id)
+        candidates = self._family_index.get(family, [])
+        best_entry: ModelBenchmarkEntry | None = None
+        best_score = -1.0
+        for src, mid, score in candidates:
+            entry = entries.get(mid)
+            if entry is not None and entry.overall > best_score:
+                best_score = entry.overall
+                best_entry = entry
+        if best_entry is not None:
+            return best_entry
         return None
 
     def _fuzzy_seed_match(self, model_id: str) -> float | None:

@@ -1456,7 +1456,7 @@ def create_app(
             route_confidence_calibrator=_route_confidence,
             context_features=ctx_features,
             pricing=_get_pricing(),
-            available_models=_mapper.routing_models if _mapper.discovered else None,
+            available_models=_mapper.available_models if _mapper.discovered else None,
             model_capabilities=_routing_config.model_capabilities,
         )
 
@@ -2076,7 +2076,7 @@ def create_app(
                     context_features=ctx_features,
                     pricing=_get_pricing(),
                     available_models=_circuit_breaker.filter_available(
-                        _mapper.routing_models if _mapper.discovered else []
+                        _mapper.available_models if _mapper.discovered else []
                     ) or None,
                     model_capabilities=_routing_config.model_capabilities,
                 )

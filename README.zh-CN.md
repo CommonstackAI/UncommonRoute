@@ -51,11 +51,11 @@
 <img width="947" height="450" alt="image" src="https://github.com/user-attachments/assets/9df2066f-f0fc-4ace-99cd-3a56f08cb52e" />
  
 ```text
-"hello"                  → 🟢 gpt-4.1-nano       ($0.00002)
-"修一下第 3 行的拼写错误"   → 🟢 deepseek-chat       ($0.0002)
-"把这段日志总结成一句话"    → 🟢 minimax-m2.7        ($0.0003)
-"重构这个 500 行的模块"    → 🟠 claude-sonnet-4.6   ($0.0300)
-"设计一个分布式调度系统"    → 🔴 claude-opus-4.6     ($0.0800)
+"hello"                  → 🟢 gpt-4.1-nano       ($0.0008)
+"修一下第 3 行的拼写错误"   → 🟢 deepseek-chat       ($0.0012)
+"把这段日志总结成一句话"    → 🟢 minimax-m2.7        ($0.0097)
+"重构这个 500 行的模块"    → 🟠 claude-sonnet-4.6   ($0.0337)
+"设计一个分布式调度系统"    → 🔴 claude-opus-4.6     ($0.0562)
 ```
  
 同一个 endpoint，路由器自动选模型，你只管写代码。

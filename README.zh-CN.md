@@ -10,6 +10,19 @@
 一个轻量的本地 LLM Router，自动在成本和质量之间找到最优解，为你节省90%以上的成本。
 </p>
 
+</div>
+ 
+<table align="center">
+<tr>
+<td align="center"><h3>~90–95%</h3><sub>实测费用降低</sub></td>
+<td align="center"><h3>88.5%</h3><sub>分类器准确率</sub></td>
+<td align="center"><h3>28/28</h3><sub>请求成功率</sub></td>
+<td align="center"><h3>341</h3><sub>测试通过</sub></td>
+</tr>
+</table>
+ 
+<div align="center">
+  
 <p>
 适用于 <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
 <p>

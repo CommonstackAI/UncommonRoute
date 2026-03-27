@@ -17,7 +17,7 @@
 <td align="center"><h3>~90–95%</h3><sub>实测费用降低</sub></td>
 <td align="center"><h3>88.5%</h3><sub>分类器准确率</sub></td>
 <td align="center"><h3>100%</h3><sub>请求成功率</sub></td>
-<td align="center"><h3>341</h3><sub>测试通过</sub></td>
+<td align="center"><h3>1,077</h3><sub>测试通过</sub></td>
 </tr>
 </table>
  
@@ -50,13 +50,15 @@
 ## 直接看效果
  
 ```text
-"hello"                       → 🟢 llama-3-8b         ($0.00001)
-"修一下第 3 行的拼写错误"      → 🟢 deepseek-chat      ($0.0002)
-"把这段日志总结成一句话"       → 🟢 llama-3-8b         ($0.0001)
-"重构这个 500 行的模块"        → 🟠 claude-sonnet-4.6  ($0.0300)
-"设计一个分布式调度系统"       → 🔴 claude-opus-4.6    ($0.0800)
+"hello"                  → 🟢 gpt-4.1-nano       ($0.00002)
+"修一下第 3 行的拼写错误"   → 🟢 deepseek-chat       ($0.0002)
+"把这段日志总结成一句话"    → 🟢 minimax-m2.7        ($0.0003)
+"重构这个 500 行的模块"    → 🟠 claude-sonnet-4.6   ($0.0300)
+"设计一个分布式调度系统"    → 🔴 claude-opus-4.6     ($0.0800)
 ```
  
+同一个 endpoint，路由器自动选模型，你只管写代码。
+
 
 ## 一条 URL，解决你最大的痛点
  

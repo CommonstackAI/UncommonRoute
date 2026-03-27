@@ -48,6 +48,7 @@
 ---
 
 ## 直接看效果
+<img width="947" height="450" alt="image" src="https://github.com/user-attachments/assets/9df2066f-f0fc-4ace-99cd-3a56f08cb52e" />
  
 ```text
 "hello"                  → 🟢 gpt-4.1-nano       ($0.00002)

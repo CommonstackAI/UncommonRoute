@@ -25,20 +25,23 @@
   
 <p>
 适用于 <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</strong>, and the <strong>OpenAI SDK</strong>.
-<p>
-<a href="#快速开始"><strong>快速开始</strong></a> ·
-<a href="#路由到底怎么做决定"><strong>工作原理</strong></a> ·
-<a href="#真正会影响行为的配置"><strong>配置</strong></a> ·
-<a href="#详细-benchmark"><strong>Benchmark</strong></a>
-</p>
 
+<p>
+<a href="#2-分钟上手"><strong>快速开始</strong></a> ·
+<a href="#怎么做到的"><strong>工作原理</strong></a> ·
+<a href="#配置"><strong>配置</strong></a> ·
+<a href="#真实数据"><strong>性能数据</strong></a>
+</p>
+ 
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>&nbsp;
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge" alt="MIT"></a>&nbsp;
-<img src="https://img.shields.io/badge/Tests-281_passing-16a34a?style=for-the-badge&logo=pytest&logoColor=white" alt="281 passing tests">&nbsp;
-<a href="#快速开始"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
-<a href="#快速开始"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
-<a href="#快速开始"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-Modified_MIT-22c55e?style=for-the-badge" alt="Modified MIT"></a>&nbsp;
+<a href="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml"><img src="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml/badge.svg" alt="CI"></a>&nbsp;
+<a href="#2-分钟上手"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
+<a href="#2-分钟上手"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
+<a href="#2-分钟上手"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
 <a href="https://openclaw.ai"><img src="https://img.shields.io/badge/OpenClaw-Plugin-e11d48?style=for-the-badge" alt="OpenClaw"></a>
+ 
+</div>
 
 </div>
 

@@ -859,6 +859,48 @@ def _extract_requirements(body: dict, step_type: str, prompt: str = "") -> tuple
     return features.request_requirements(), features.workload_hints()
 
 
+def _normalize_reasoning_content_chunk(raw: bytes) -> bytes:
+    """Rewrite SSE chunks: move reasoning_content into content when content is null.
+
+    Some upstream models (e.g. GLM, minimax) return all text in
+    ``delta.reasoning_content`` with ``delta.content: null``.  Clients that
+    only read ``content`` (like OpenClaw) see an empty response.  This helper
+    patches the SSE data lines in-place so downstream consumers always find
+    the text in ``content``.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return raw
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            continue
+        rc = delta.get("reasoning_content")
+        if rc is not None and (delta.get("content") is None or delta.get("content") == ""):
+            delta["content"] = rc
+            del delta["reasoning_content"]
+            lines[i] = f"data: {json.dumps(data, ensure_ascii=False)}"
+            changed = True
+    if not changed:
+        return raw
+    return "\n".join(lines).encode("utf-8")
+
+
 _MODEL_ERROR_PATTERNS = ("model", "not found", "not available", "does not exist", "unsupported", "invalid model")
 
 
@@ -2824,7 +2866,7 @@ def create_app(
                     try:
                         async for chunk in stream_resp.aiter_bytes():
                             stream_chunks.append(chunk)
-                            yield chunk
+                            yield _normalize_reasoning_content_chunk(chunk)
                         _record_stream_success(
                             parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                         )

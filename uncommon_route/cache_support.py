@@ -321,6 +321,12 @@ def parse_stream_usage_metrics(
 
     anthropic_usage: dict[str, Any] = {}
     latest: UsageMetrics | None = None
+    # Fallback counters: count output tokens from stream deltas when the
+    # upstream does not include a usage summary (common for minimax/moonshot
+    # routed through Commonstack).
+    fallback_output_tokens = 0
+    fallback_prompt_tokens = 0
+    has_any_content = False
 
     for line in text.splitlines():
         if not line.startswith("data:"):
@@ -353,6 +359,48 @@ def parse_stream_usage_metrics(
             )
             if parsed is not None:
                 latest = parsed
+
+        # Count content/reasoning_content tokens as fallback when usage is missing
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if isinstance(delta, dict):
+                content = delta.get("content") or delta.get("reasoning_content") or ""
+                if content:
+                    has_any_content = True
+                    # Rough approximation: ~4 chars per token for mixed-language text
+                    fallback_output_tokens += max(1, len(content) // 4)
+            # Some providers include prompt_tokens in the first chunk's usage
+            chunk_usage = data.get("usage")
+            if isinstance(chunk_usage, dict) and chunk_usage.get("prompt_tokens"):
+                fallback_prompt_tokens = max(fallback_prompt_tokens, int(chunk_usage["prompt_tokens"]))
+
+    # If we got content but no usage summary, build a rough estimate so that
+    # stats/cost tracking records *something* instead of null/zero.
+    if latest is None and has_any_content and fallback_output_tokens > 0:
+        mp = pricing.get(model)
+        actual_cost: float | None = None
+        if mp is not None:
+            actual_cost = estimate_usage_cost(
+                input_tokens_uncached=fallback_prompt_tokens,
+                output_tokens=fallback_output_tokens,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+                pricing=mp,
+            )
+        latest = UsageMetrics(
+            input_tokens_total=fallback_prompt_tokens,
+            input_tokens_uncached=fallback_prompt_tokens,
+            output_tokens=fallback_output_tokens,
+            cache_read_input_tokens=0,
+            cache_write_input_tokens=0,
+            total_tokens=fallback_prompt_tokens + fallback_output_tokens,
+            ttft_ms=None,
+            tps=None,
+            actual_cost=actual_cost,
+            input_cost_multiplier=1.0,
+            cache_hit_ratio=0.0,
+        )
     return latest
 
 

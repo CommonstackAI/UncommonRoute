@@ -751,7 +751,7 @@ def select_from_pool(
         for m in candidates
     }
     cheapest_cost = min(dollar_costs.values()) if dollar_costs else 0.0
-    log_dollar_costs = {m: math.log1p(c * 1000)
+    log_dollar_costs = {m: math.log1p(max(c * 1000, 0))
                         for m, c in dollar_costs.items()}
     max_log_dc = max(log_dollar_costs.values()) if log_dollar_costs else 1.0
     min_log_dc = min(log_dollar_costs.values()) if log_dollar_costs else 0.0

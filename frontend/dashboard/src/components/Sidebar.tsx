@@ -12,11 +12,13 @@ interface Props {
 
 const NAV = [
   { id: "home", label: "Home" },
+  { id: "playground", label: "Playground" },
   { id: "routing", label: "Routing" },
   { id: "models", label: "Models" },
   { id: "connections", label: "Connections" },
   { id: "activity", label: "Activity" },
   { id: "budget", label: "Budget" },
+  { id: "explain", label: "Explain" },
   { id: "feedback", label: "Feedback" },
 ];
 

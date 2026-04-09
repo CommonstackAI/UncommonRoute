@@ -18,8 +18,10 @@ import SpendPanel from "./components/Spend";
 import Feedback from "./components/Feedback";
 import Connections from "./components/Connections";
 import Routing from "./components/Routing";
+import Playground from "./components/Playground";
+import Explainer from "./components/Explainer";
 
-type Page = "home" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections";
+type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain";
 
 const pageVariants = {
   initial: { opacity: 0, y: 10 },
@@ -91,6 +93,8 @@ export default function App() {
               {page === "models" && <Models mapping={mapping} />}
               {page === "connections" && <Connections initialConnection={health?.connections ?? null} onRefresh={refresh} />}
               {page === "budget" && <SpendPanel spend={spend} onRefresh={refresh} />}
+              {page === "playground" && <Playground />}
+              {page === "explain" && <Explainer />}
               {page === "feedback" && <Feedback />}
             </motion.div>
           </AnimatePresence>

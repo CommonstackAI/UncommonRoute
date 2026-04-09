@@ -392,3 +392,25 @@ export async function submitFeedback(
     return null;
   }
 }
+
+export interface RoutePreviewResult {
+  tier: number;
+  tier_name: string;
+  confidence: number;
+  method: string;
+  signals: Array<{ name: string; tier: number | null; confidence: number; shadow?: boolean }>;
+  cost_estimate: number;
+  cost_baseline: number;
+}
+
+export async function fetchRoutePreview(prompt: string, riskTolerance: number = 0.5): Promise<RoutePreviewResult | null> {
+  try {
+    const res = await fetch("/v1/route-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, risk_tolerance: riskTolerance }),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
+}

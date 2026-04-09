@@ -1,3 +1,5 @@
+import pytest
+
 from uncommon_route.v2_tiers import (
     TIER_LOW, TIER_MID, TIER_MID_HIGH, TIER_HIGH,
     TIER_TO_ID, ID_TO_TIER, V1_TO_V2, V2_TO_V1,
@@ -39,3 +41,13 @@ def test_tier_id_from_name():
 def test_tier_name_from_id():
     assert tier_name_from_id(0) == "low"
     assert tier_name_from_id(3) == "high"
+
+
+def test_tier_id_from_name_invalid():
+    with pytest.raises(ValueError):
+        tier_id_from_name("nonexistent")
+
+
+def test_tier_name_from_id_invalid():
+    with pytest.raises(ValueError):
+        tier_name_from_id(99)

@@ -45,3 +45,21 @@ def test_result_has_method():
     ens = Ensemble(weights=[1.0])
     result = ens.decide(votes)
     assert result.method in ("direct", "conservative")
+
+
+def test_conservative_fallback_caps_at_tier_3():
+    """When best_tier=3, conservative should stay at 3 (not go to 4)."""
+    votes = [TierVote(tier_id=3, confidence=0.4), TierVote(tier_id=3, confidence=0.3)]
+    ens = Ensemble(weights=[0.5, 0.5], risk_tolerance=0.0)  # very conservative threshold
+    result = ens.decide(votes)
+    assert result.tier_id == 3
+    assert result.method in ("direct", "conservative")
+
+
+def test_votes_weights_length_mismatch():
+    """Mismatched lengths should raise ValueError."""
+    import pytest
+    votes = [TierVote(tier_id=0, confidence=0.8)]
+    ens = Ensemble(weights=[0.5, 0.5])  # 2 weights but 1 vote
+    with pytest.raises(ValueError):
+        ens.decide(votes)

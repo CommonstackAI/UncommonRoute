@@ -27,6 +27,8 @@ class Ensemble:
         self._threshold = direct_threshold + (0.5 - risk_tolerance) * 0.3
 
     def decide(self, votes: list[TierVote]) -> EnsembleResult:
+        if len(votes) != len(self._weights):
+            raise ValueError(f"Expected {len(self._weights)} votes, got {len(votes)}")
         tier_scores = [0.0, 0.0, 0.0, 0.0]
         total_weight = 0.0
 

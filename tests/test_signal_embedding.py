@@ -56,3 +56,16 @@ def test_extract_last_user_message():
 def test_extract_last_user_message_empty():
     assert _extract_last_user_message([]) == ""
     assert _extract_last_user_message([{"role": "assistant", "content": "hi"}]) == ""
+
+
+def test_embedding_signal_abstains_on_empty_user_message(tmp_path):
+    embs, labels = _make_seed_index(tmp_path)
+    sig = EmbeddingSignal(
+        index_path=tmp_path / "seed_embeddings.npy",
+        labels_path=tmp_path / "seed_labels.json",
+        model_name=None,
+    )
+    sig._embed_fn = lambda text: embs[0]
+    row = {"messages": [{"role": "assistant", "content": "no user msg here"}]}
+    vote = sig.predict(row)
+    assert vote.abstained

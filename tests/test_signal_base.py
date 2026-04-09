@@ -1,3 +1,5 @@
+import pytest
+
 from uncommon_route.signals.base import TierVote, Signal
 
 
@@ -22,3 +24,13 @@ def test_signal_is_protocol():
     sig = DummySignal()
     result = sig.predict({"messages": []})
     assert result.tier_id == 0
+
+
+def test_tier_vote_invalid_tier_id():
+    with pytest.raises(ValueError):
+        TierVote(tier_id=5, confidence=0.5)
+
+
+def test_tier_vote_invalid_confidence():
+    with pytest.raises(ValueError):
+        TierVote(tier_id=0, confidence=1.5)

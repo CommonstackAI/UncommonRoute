@@ -41,6 +41,7 @@ def test_split_deterministic():
     t1, c1, h1 = stratified_3way_split(rows, seed=42)
     t2, c2, h2 = stratified_3way_split(rows, seed=42)
     assert [r["id"] for r in t1] == [r["id"] for r in t2]
+    assert [r["id"] for r in h1] == [r["id"] for r in h2]
 
 
 def test_split_stratified():

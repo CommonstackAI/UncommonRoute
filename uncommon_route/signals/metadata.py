@@ -18,7 +18,12 @@ def _has_tool_calls(messages: list[dict[str, Any]]) -> bool:
     )
 
 
-def _count_tool_messages(messages: list[dict[str, Any]]) -> int:
+def _count_tool_related_messages(messages: list[dict[str, Any]]) -> int:
+    """Count messages related to tool usage.
+
+    Counts both tool_calls (assistant messages invoking tools) and tool responses
+    (role='tool'), so a single tool invocation contributes 2 to the count.
+    """
     return sum(1 for m in messages if m.get("role") == "tool" or m.get("tool_calls"))
 
 
@@ -33,7 +38,7 @@ class MetadataSignal:
         messages = row.get("messages", [])
         msg_count = len(messages)
         has_tools = _has_tool_calls(messages)
-        tool_msg_count = _count_tool_messages(messages)
+        tool_msg_count = _count_tool_related_messages(messages)
         step_ratio = step_index / total_steps if total_steps > 0 else 0.0
 
         # --- Scenario-based prior ---

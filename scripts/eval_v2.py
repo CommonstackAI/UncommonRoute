@@ -1,9 +1,9 @@
-"""Phase 1 evaluation: Signal A + Signal C ensemble on holdout.
+"""v2 evaluation: Signal ensemble on holdout.
 
 Usage:
-    python scripts/eval_v2.py                           # default holdout
-    python scripts/eval_v2.py --risk-tolerance 0.3      # conservative
-    python scripts/eval_v2.py --risk-tolerance 0.8      # aggressive
+    python scripts/eval_v2.py                                    # 3-signal (default)
+    python scripts/eval_v2.py --signals 2                        # Phase 1: A+C only
+    python scripts/eval_v2.py --signals 3 --risk-tolerance 0.3   # 3-signal, conservative
 """
 
 from __future__ import annotations
@@ -27,27 +27,47 @@ from uncommon_route.signals.embedding import EmbeddingSignal
 from uncommon_route.decision.ensemble import Ensemble
 
 
-def make_v2_predictor(risk_tolerance: float, index_dir: Path):
+def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 3):
     sig_a = MetadataSignal()
     sig_c = EmbeddingSignal(
         index_path=index_dir / "seed_embeddings.npy",
         labels_path=index_dir / "seed_labels.json",
         model_name="BAAI/bge-small-en-v1.5",
     )
-    ensemble = Ensemble(
-        weights=[0.55, 0.45],
-        risk_tolerance=risk_tolerance,
-    )
 
-    def predict(row: dict) -> int:
-        vote_a = sig_a.predict(row)
-        vote_c = sig_c.predict(row)
-        result = ensemble.decide([vote_a, vote_c])
-        if result.tier_id is None:
-            return 1
-        return result.tier_id
+    if signals == 3:
+        from uncommon_route.signals.structural import StructuralSignal
+        sig_b = StructuralSignal()
+        ensemble = Ensemble(
+            weights=[0.50, 0.10, 0.40],  # Signal B gets low weight (noisy on agent conversations)
+            risk_tolerance=risk_tolerance,
+        )
 
-    return predict
+        def predict_3(row: dict) -> int:
+            vote_a = sig_a.predict(row)
+            vote_b = sig_b.predict(row)
+            vote_c = sig_c.predict(row)
+            result = ensemble.decide([vote_a, vote_b, vote_c])
+            if result.tier_id is None:
+                return 1
+            return result.tier_id
+
+        return predict_3
+    else:
+        ensemble = Ensemble(
+            weights=[0.55, 0.45],
+            risk_tolerance=risk_tolerance,
+        )
+
+        def predict_2(row: dict) -> int:
+            vote_a = sig_a.predict(row)
+            vote_c = sig_c.predict(row)
+            result = ensemble.decide([vote_a, vote_c])
+            if result.tier_id is None:
+                return 1
+            return result.tier_id
+
+        return predict_2
 
 
 def fmt(v) -> str:
@@ -62,6 +82,7 @@ def fmt(v) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Phase 1 v2 evaluation")
     parser.add_argument("--split", choices=["holdout", "calibration", "train"], default="holdout")
+    parser.add_argument("--signals", type=int, choices=[2, 3], default=3, help="2=A+C only, 3=A+B+C")
     parser.add_argument("--risk-tolerance", type=float, default=0.5)
     parser.add_argument("--index-dir", default="uncommon_route/data/v2_splits")
     parser.add_argument("--verbose", action="store_true")
@@ -74,9 +95,9 @@ def main():
         sys.exit(1)
 
     rows = load_all_question_bank_rows(split_path)
-    predict_fn = make_v2_predictor(args.risk_tolerance, index_dir)
+    predict_fn = make_v2_predictor(args.risk_tolerance, index_dir, signals=args.signals)
     predictor = FunctionPredictor(predict_fn)
-    label = f"v2_phase1_rt{args.risk_tolerance}"
+    label = f"v2_{args.signals}sig_rt{args.risk_tolerance}"
 
     progress = (lambda msg: print(msg, file=sys.stderr)) if args.verbose else None
 
@@ -97,7 +118,7 @@ def main():
 
     print()
     print("=" * 64)
-    print(f"  UncommonRoute v2 Phase 1 — {args.split} evaluation")
+    print(f"  UncommonRoute v2 ({args.signals}-signal) — {args.split} evaluation")
     print("=" * 64)
     print(f"  risk_tolerance: {args.risk_tolerance}")
     print(f"  Samples: {summary['sampled']}")

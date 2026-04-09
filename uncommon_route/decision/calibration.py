@@ -38,6 +38,8 @@ def fit_platt_from_evals(
 
 
 def _compute_ece(evals: list[dict], temperature: float, buckets: int = 10) -> float:
+    if not evals:
+        return 0.0
     cal = PlattCalibrator(temperature=temperature)
     bucket_data: list[list[tuple[float, float]]] = [[] for _ in range(buckets)]
     for item in evals:

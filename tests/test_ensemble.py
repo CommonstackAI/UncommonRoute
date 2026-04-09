@@ -64,9 +64,8 @@ def test_conservative_bumps_tier_up():
     votes = [TierVote(tier_id=1, confidence=0.8), TierVote(tier_id=0, confidence=0.7)]
     ens = Ensemble(weights=[0.5, 0.5], risk_tolerance=0.0)  # high threshold
     result = ens.decide(votes)
-    # If this enters conservative path, tier should be bumped from 1 to 2
-    if result.method == "conservative":
-        assert result.tier_id == 2
+    assert result.method == "conservative", f"Expected conservative, got {result.method}"
+    assert result.tier_id == 2
 
 
 def test_votes_weights_length_mismatch():

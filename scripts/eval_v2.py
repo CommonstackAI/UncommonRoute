@@ -66,12 +66,13 @@ def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 2, 
 
         return predict_3, None  # no shadow tracker in forced mode
 
-    # Default: 2-signal with optional shadow
-    ensemble = Ensemble(
+    # Default: 2-signal with optional shadow + auto-promotion
+    ensemble_2sig = Ensemble(
         weights=[0.55, 0.45],
         risk_tolerance=risk_tolerance,
         calibrator=calibrator,
     )
+    ensemble_3sig = None
 
     shadow_tracker = None
     sig_b = None
@@ -80,20 +81,34 @@ def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 2, 
         from uncommon_route.learning.shadow import ShadowTracker
         sig_b = StructuralSignal()
         shadow_tracker = ShadowTracker(eval_window=200, promote_after=3)
+        ensemble_3sig = Ensemble(
+            weights=[0.50, 0.10, 0.40],
+            risk_tolerance=risk_tolerance,
+            calibrator=calibrator,
+        )
 
     def predict_2(row: dict) -> int:
         vote_a = sig_a.predict(row)
         vote_c = sig_c.predict(row)
-        result = ensemble.decide([vote_a, vote_c])
+
+        # If shadow promoted Signal B, switch to 3-signal
+        if shadow_tracker is not None and shadow_tracker.promoted and sig_b is not None and ensemble_3sig is not None:
+            vote_b = sig_b.predict(row)
+            result = ensemble_3sig.decide([vote_a, vote_b, vote_c])
+            return 1 if result.tier_id is None else result.tier_id
+
+        result = ensemble_2sig.decide([vote_a, vote_c])
         tier_id = 1 if result.tier_id is None else result.tier_id
 
-        # Shadow: run Signal B and record, but don't use its vote
+        # Shadow: run Signal B, record all signal data for proper counterfactual replay
         if sig_b is not None and shadow_tracker is not None:
             vote_b = sig_b.predict(row)
             gold = row.get("target_tier_id")  # available in eval, None in production
             shadow_tracker.record(
-                signal_b_pred=vote_b.tier_id,
-                ensemble_pred=tier_id,
+                signal_a_pred=vote_a.tier_id, signal_a_conf=vote_a.confidence,
+                signal_b_pred=vote_b.tier_id, signal_b_conf=vote_b.confidence,
+                signal_c_pred=vote_c.tier_id, signal_c_conf=vote_c.confidence,
+                ensemble_2sig_tier=tier_id,
                 gold_tier=gold,
             )
 

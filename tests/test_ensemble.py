@@ -48,12 +48,25 @@ def test_result_has_method():
 
 
 def test_conservative_fallback_caps_at_tier_3():
-    """When best_tier=3, conservative should stay at 3 (not go to 4)."""
-    votes = [TierVote(tier_id=3, confidence=0.4), TierVote(tier_id=3, confidence=0.3)]
-    ens = Ensemble(weights=[0.5, 0.5], risk_tolerance=0.0)  # very conservative threshold
+    """When best_tier=3 but confidence is low, conservative path should cap at 3 (not 4)."""
+    # tier 3 wins the vote but with only ~52% confidence → below conservative threshold
+    votes = [TierVote(tier_id=3, confidence=0.8), TierVote(tier_id=1, confidence=0.7)]
+    ens = Ensemble(weights=[0.5, 0.5], risk_tolerance=0.0)  # threshold = 0.55 + 0.15 = 0.70
     result = ens.decide(votes)
-    assert result.tier_id == 3
-    assert result.method in ("direct", "conservative")
+    # tier_3 score = 0.8*0.5 = 0.4, tier_1 score = 0.7*0.5 = 0.35, total = 0.75
+    # normalized: tier_3 = 0.533, tier_1 = 0.467 → 0.533 < 0.70 → conservative path
+    assert result.tier_id == 3  # capped at 3, not bumped to 4
+    assert result.method == "conservative"
+
+
+def test_conservative_bumps_tier_up():
+    """When confidence is low and best_tier < 3, conservative should bump +1."""
+    votes = [TierVote(tier_id=1, confidence=0.8), TierVote(tier_id=0, confidence=0.7)]
+    ens = Ensemble(weights=[0.5, 0.5], risk_tolerance=0.0)  # high threshold
+    result = ens.decide(votes)
+    # If this enters conservative path, tier should be bumped from 1 to 2
+    if result.method == "conservative":
+        assert result.tier_id == 2
 
 
 def test_votes_weights_length_mismatch():

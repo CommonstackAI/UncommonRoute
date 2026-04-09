@@ -34,3 +34,8 @@ def test_tier_vote_invalid_tier_id():
 def test_tier_vote_invalid_confidence():
     with pytest.raises(ValueError):
         TierVote(tier_id=0, confidence=1.5)
+
+
+def test_tier_vote_float_tier_id_rejected():
+    with pytest.raises(TypeError):
+        TierVote(tier_id=1.5, confidence=0.5)

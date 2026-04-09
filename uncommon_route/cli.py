@@ -1167,6 +1167,27 @@ def _setup_openai(args: list[str]) -> None:
 
 
 
+def _cmd_explain(args: list[str]) -> None:
+    """Show v2 signal breakdown for a prompt."""
+    prompt = " ".join(args) if args else ""
+    if not prompt:
+        print("Usage: uncommon-route explain <prompt>")
+        print('Example: uncommon-route explain "Design a distributed rate limiter"')
+        return
+    from uncommon_route.api_v2 import route_preview
+    result = route_preview(prompt=prompt, risk_tolerance=0.5)
+    print(f"\n  Tier: {result['tier_name']} (id={result['tier']})")
+    print(f"  Confidence: {result['confidence']:.1%}")
+    print(f"  Method: {result['method']}")
+    print(f"  Cost: ${result['cost_estimate']:.4f} (vs ${result['cost_baseline']:.4f} baseline)")
+    print(f"\n  Signals:")
+    for s in result["signals"]:
+        shadow = " [shadow]" if s.get("shadow") else ""
+        tier = s["tier"] if s["tier"] is not None else "abstain"
+        print(f"    {s['name']:12s}  tier={tier}  confidence={s['confidence']:.2f}{shadow}")
+    print()
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -1195,6 +1216,7 @@ def main() -> None:
         "config": _cmd_config,
         "stats": _cmd_stats,
         "feedback": _cmd_feedback,
+        "explain": _cmd_explain,
     }
 
     handler = commands.get(cmd)

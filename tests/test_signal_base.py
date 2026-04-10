@@ -1,6 +1,6 @@
 import pytest
 
-from uncommon_route.signals.base import TierVote, Signal
+from uncommon_route.signals.base import TierVote
 
 
 def test_tier_vote_active():

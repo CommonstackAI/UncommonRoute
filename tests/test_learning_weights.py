@@ -44,12 +44,11 @@ def test_learning_rate_decays():
     assert delta_2 < delta_1
 
 
-def test_save_load(tmp_path):
+def test_update_count_tracks():
+    """Persistence is via v2_lifecycle/LearnedState; verify update_count increments."""
     tracker = SignalWeightTracker(initial_weights=[0.4, 0.3, 0.3])
+    assert tracker._update_count == 0
     tracker.update([0, 1, 2], [False, False, False], 0)
-    path = tmp_path / "weights.json"
-    tracker.save(path)
-    loaded = SignalWeightTracker.load(path)
-    for a, b in zip(loaded.weights, tracker.weights):
-        assert abs(a - b) < 1e-9
-    assert loaded._update_count == tracker._update_count
+    assert tracker._update_count == 1
+    tracker.update([0, 1, 2], [False, False, False], 0)
+    assert tracker._update_count == 2

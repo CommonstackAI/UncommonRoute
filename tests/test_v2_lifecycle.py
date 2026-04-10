@@ -14,6 +14,7 @@ def _reset_lifecycle():
     lc._index_manager = None
     lc._state_dir = None
     lc._initialized = False
+    lc._recent_predictions.clear()
 
 
 def test_on_startup_initializes_all(tmp_path):
@@ -82,14 +83,23 @@ def test_on_feedback_updates_weights(tmp_path):
     _reset_lifecycle()
     lc.on_startup(tmp_path)
     old_weights = list(lc._weight_tracker.weights)
-    lc.on_feedback(
-        actual_tier=0,
-        signal_predictions=[0, 1],
-        signal_abstained=[False, False],
+    # Simulate: Signal A predicted 0, Signal C predicted 2 (disagree)
+    lc.on_route_complete(
+        request_id="", tier_id=1, model="test", method="direct", confidence=0.8,
+        signal_a_tier=0, signal_a_conf=0.8,
+        signal_b_tier=1, signal_b_conf=0.7,
+        signal_c_tier=2, signal_c_conf=0.8,
     )
+    lc.associate_request_id("req_feedback_test")
+    # Feedback: "weak" on SIMPLE → actual_tier = min(0+1,3) = 1
+    # Signal A predicted 0 (wrong), Signal C predicted 2 (wrong) → both penalized
+    # But different predictions → weight ratio changes after normalization
+    lc.on_feedback(request_id="req_feedback_test", signal="ok", routed_tier_v1="SIMPLE")
     new_weights = lc._weight_tracker.weights
-    # First signal was correct (predicted 0, actual 0) — weight should increase
-    assert new_weights[0] > old_weights[0]
+    # Signal A predicted 0, actual=0 (ok→same) → rewarded
+    # Signal C predicted 2, actual=0 → penalized
+    # Weights should diverge
+    assert new_weights[0] > old_weights[0]  # A rewarded
     _reset_lifecycle()
 
 
@@ -97,8 +107,15 @@ def test_persistence_roundtrip(tmp_path):
     """Startup → activity → shutdown → restart → state restored."""
     _reset_lifecycle()
     lc.on_startup(tmp_path)
-    # Simulate feedback that changes weights
-    lc.on_feedback(actual_tier=0, signal_predictions=[0, 1], signal_abstained=[False, False])
+    # Simulate a routing + feedback that changes weights
+    lc.on_route_complete(
+        request_id="", tier_id=1, model="test", method="direct", confidence=0.8,
+        signal_a_tier=0, signal_a_conf=0.8,
+        signal_b_tier=1, signal_b_conf=0.7,
+        signal_c_tier=1, signal_c_conf=0.8,
+    )
+    lc.associate_request_id("req_persist")
+    lc.on_feedback(request_id="req_persist", signal="weak", routed_tier_v1="MEDIUM")
     weights_before = list(lc._weight_tracker.weights)
     lc.on_shutdown()
     # Restart
@@ -136,12 +153,17 @@ def test_index_manager_initialized(tmp_path):
     assert lc._index_manager is not None
     assert lc._index_manager.size == 5
 
-    # Test growth
-    from uncommon_route.v2_lifecycle import on_confident_routing
+    # Test growth via on_route_complete with high confidence + unanimous signals
     new_vec = np.random.randn(384).astype(np.float32)
     new_vec = new_vec / np.linalg.norm(new_vec)
-    added = on_confident_routing(new_vec, tier_id=1)
-    assert added
+    lc.on_route_complete(
+        request_id="growth_test", tier_id=1, model="test", method="direct",
+        confidence=0.9,  # >= 0.7 threshold
+        signal_a_tier=1, signal_a_conf=0.9,
+        signal_b_tier=1, signal_b_conf=0.7,
+        signal_c_tier=1, signal_c_conf=0.9,  # signal_a == signal_c → unanimous
+        query_embedding=new_vec,
+    )
     assert lc._index_manager.size == 6
 
     # Test save on shutdown

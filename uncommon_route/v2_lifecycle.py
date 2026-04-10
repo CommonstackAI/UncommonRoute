@@ -1,14 +1,17 @@
 """v2 lifecycle: startup, shutdown, per-request hooks.
 
-Centralizes all v2 state management so proxy.py only needs 3 call sites:
-  1. on_startup()  — in _on_startup()
-  2. on_shutdown() — in _lifespan finally
-  3. on_route_complete() — after each route() call
+Centralizes all v2 state management so proxy.py only needs a few call sites:
+  1. on_startup()          — in _on_startup()
+  2. on_shutdown()         — in _lifespan finally
+  3. on_route_complete()   — called from route() after each decision
+  4. on_feedback()         — called from proxy feedback endpoint
 """
 
 from __future__ import annotations
 
 import logging
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +20,21 @@ from uncommon_route.persistence import LearnedState, save_state, load_state
 from uncommon_route.learning.weights import SignalWeightTracker
 from uncommon_route.learning.shadow import ShadowTracker
 from uncommon_route.learning.index_growth import EmbeddingIndexManager
+from uncommon_route.v2_tiers import V1_TO_V2, TIER_TO_ID
 
 logger = logging.getLogger("uncommon-route.v2")
+
+# ─── Per-request prediction cache (for feedback → weight update) ───
+
+@dataclass
+class _RecentPrediction:
+    tier_id: int
+    signal_a_tier: int | None
+    signal_a_abstained: bool
+    signal_c_tier: int | None
+    signal_c_abstained: bool
+
+_recent_predictions: deque[tuple[str, _RecentPrediction]] = deque(maxlen=500)
 
 # ─── Singletons ───
 _metrics: RoutingMetrics | None = None
@@ -56,7 +72,7 @@ def on_startup(data_dir: Path | None = None) -> None:
     _shadow._consecutive_wins = state.shadow_consecutive_wins
     _shadow._promoted = state.shadow_promoted
 
-    # Embedding index manager for index growth
+    # Embedding index manager
     try:
         splits_dir = data_dir / "v2_splits"
         emb_path = splits_dir / "seed_embeddings.npy"
@@ -76,7 +92,6 @@ def on_shutdown() -> None:
     if _state_dir is None or not _initialized:
         return
 
-    # Save embedding index if it grew
     if _index_manager:
         try:
             _index_manager.save()
@@ -98,6 +113,19 @@ def on_shutdown() -> None:
     if _metrics:
         snap = _metrics.snapshot()
         logger.info("v2 session metrics: %s", snap)
+
+
+def associate_request_id(request_id: str) -> None:
+    """Link a request_id to the most recent un-linked prediction.
+
+    Called by proxy after route() returns and request_id is assigned.
+    """
+    # Find the most recent prediction with empty request_id and link it
+    for i in range(len(_recent_predictions) - 1, -1, -1):
+        rid, pred = _recent_predictions[i]
+        if rid == "":
+            _recent_predictions[i] = (request_id, pred)
+            return
 
 
 def on_route_complete(
@@ -127,17 +155,17 @@ def on_route_complete(
             confidence=confidence, signals_agreed=signals_agreed,
         )
 
-    # 2. Shadow tracking for Signal B
+    # 2. Shadow tracking for Signal B (gold_tier filled later via on_feedback)
     if _shadow:
         _shadow.record(
             signal_a_pred=signal_a_tier, signal_a_conf=signal_a_conf,
             signal_b_pred=signal_b_tier, signal_b_conf=signal_b_conf,
             signal_c_pred=signal_c_tier, signal_c_conf=signal_c_conf,
             ensemble_2sig_tier=tier_id,
-            gold_tier=None,  # unknown in production
+            gold_tier=None,  # filled retroactively by on_feedback
         )
 
-    # 3. Index growth — add to embedding index on high-confidence unanimous routing
+    # 3. Index growth on high-confidence unanimous routing
     if (
         _index_manager
         and query_embedding is not None
@@ -152,7 +180,16 @@ def on_route_complete(
         except Exception as e:
             logger.debug("v2 index growth failed: %s", e)
 
-    # 4. Structured log
+    # 4. Cache signal predictions for feedback (request_id linked later by proxy)
+    _recent_predictions.append(("", _RecentPrediction(
+        tier_id=tier_id,
+        signal_a_tier=signal_a_tier,
+        signal_a_abstained=signal_a_tier is None,
+        signal_c_tier=signal_c_tier,
+        signal_c_abstained=signal_c_tier is None,
+    )))
+
+    # 5. Structured log
     log_entry = RoutingLogEntry(
         request_id=request_id,
         signals={
@@ -168,30 +205,60 @@ def on_route_complete(
     logger.debug("v2 routing: %s", log_entry.to_json())
 
 
-def on_feedback(
-    *,
-    actual_tier: int,
-    signal_predictions: list[int | None],
-    signal_abstained: list[bool],
-) -> None:
-    """Update signal weights from feedback. Call when user provides ok/weak/strong."""
-    if _weight_tracker:
-        _weight_tracker.update(signal_predictions, signal_abstained, actual_tier)
+def on_feedback(*, request_id: str, signal: str, routed_tier_v1: str) -> None:
+    """Update signal weights and shadow labels from user feedback.
+
+    Args:
+        request_id: The request that was rated.
+        signal: "ok", "weak", or "strong".
+        routed_tier_v1: The v1-style tier name (SIMPLE/MEDIUM/COMPLEX) that was routed.
+    """
+    # Map v1 tier name to v2 tier_id
+    v2_tier_name = V1_TO_V2.get(routed_tier_v1.upper(), routed_tier_v1.lower())
+    if v2_tier_name not in TIER_TO_ID:
+        return
+    routed_tier_id = TIER_TO_ID[v2_tier_name]
+
+    # Determine "actual" tier from feedback
+    if signal == "ok":
+        actual_tier = routed_tier_id  # routing was correct
+    elif signal == "weak":
+        actual_tier = min(routed_tier_id + 1, 3)  # needed stronger model
+    elif signal == "strong":
+        actual_tier = max(routed_tier_id - 1, 0)  # could have used cheaper
+    else:
+        return
+
+    # Look up per-request signal predictions
+    pred = None
+    for rid, p in reversed(_recent_predictions):
+        if rid == request_id:
+            pred = p
+            break
+
+    if pred and _weight_tracker:
+        _weight_tracker.update(
+            predictions=[pred.signal_a_tier, pred.signal_c_tier],
+            abstained=[pred.signal_a_abstained, pred.signal_c_abstained],
+            actual_tier=actual_tier,
+        )
+        logger.debug(
+            "v2 weight update: request=%s signal=%s actual_tier=%d weights=%s",
+            request_id, signal, actual_tier, _weight_tracker.weights,
+        )
+
+    # Retroactively label shadow records for evaluation
+    if _shadow and _shadow._pending:
+        # Label the most recent pending record with feedback-derived tier
+        for rec in reversed(_shadow._pending):
+            if rec.gold_tier is None:
+                rec.gold_tier = actual_tier
+                break
 
 
 def get_metrics() -> dict[str, Any] | None:
     """Get current v2 metrics snapshot."""
     return _metrics.snapshot() if _metrics else None
-
-
-def on_confident_routing(embedding: "np.ndarray", tier_id: int) -> bool:
-    """Add a high-confidence routing to the embedding index. Returns True if added."""
-    if _index_manager is None:
-        return False
-    try:
-        return _index_manager.add(embedding, tier_id)
-    except Exception:
-        return False
 
 
 def is_signal_b_promoted() -> bool:

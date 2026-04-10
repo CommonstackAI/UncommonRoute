@@ -142,21 +142,4 @@ class ShadowTracker:
             self._promoted = True
             logger.info("Shadow mode: Signal B PROMOTED to active participation.")
 
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump({
-                "consecutive_wins": self._consecutive_wins,
-                "promoted": self._promoted,
-                "version": 1,
-            }, f)
-
-    @classmethod
-    def load(cls, path: Path, **kwargs) -> "ShadowTracker":
-        tracker = cls(**kwargs)
-        if path.exists():
-            with open(path) as f:
-                data = json.load(f)
-            tracker._consecutive_wins = data.get("consecutive_wins", 0)
-            tracker._promoted = data.get("promoted", False)
-        return tracker
+    # Persistence is handled by v2_lifecycle via LearnedState, not per-tracker files.

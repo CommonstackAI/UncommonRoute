@@ -1941,22 +1941,14 @@ def create_app(
                 reason=result.reason,
             )
             _route_confidence.fit_from_route_records(_stats.history())
-            # ─── v2: update signal weights from feedback ───
+            # ─── v2: update signal weights + shadow labels from feedback ───
             try:
                 from uncommon_route.v2_lifecycle import on_feedback as v2_feedback
-                from uncommon_route.v2_tiers import TIER_TO_ID
-                tier_name = result.to_tier or result.from_tier or ""
-                if tier_name.lower() in TIER_TO_ID:
-                    actual = TIER_TO_ID[tier_name.lower()]
-                    # We don't have per-signal predictions stored yet, so use a
-                    # simplified update: treat feedback tier as ground truth for
-                    # the most recent routing's signals. This is approximate but
-                    # directionally correct.
-                    v2_feedback(
-                        actual_tier=actual,
-                        signal_predictions=[actual, actual],  # placeholder until per-request signal storage
-                        signal_abstained=[False, False],
-                    )
+                v2_feedback(
+                    request_id=request_id,
+                    signal=signal,
+                    routed_tier_v1=result.from_tier or "",
+                )
             except Exception:
                 pass
         return JSONResponse({
@@ -2214,6 +2206,12 @@ def create_app(
                 return _spend_error(check, api_format=api_format)
 
             request_id = uuid.uuid4().hex[:12]
+            # ─── v2: link request_id to cached signal predictions ───
+            try:
+                from uncommon_route.v2_lifecycle import associate_request_id
+                associate_request_id(request_id)
+            except Exception:
+                pass
             route_feats = extract_features(prompt, system_prompt)
             _feedback.capture(
                 request_id,

@@ -1169,23 +1169,30 @@ def _setup_openai(args: list[str]) -> None:
 
 
 def _cmd_explain(args: list[str]) -> None:
-    """Show v2 signal breakdown for a prompt."""
+    """Show v2 signal breakdown for a prompt — uses the SAME path as production routing."""
     prompt = " ".join(args) if args else ""
     if not prompt:
         print("Usage: uncommon-route explain <prompt>")
         print('Example: uncommon-route explain "Design a distributed rate limiter"')
         return
-    from uncommon_route.api_v2 import route_preview
-    result = route_preview(prompt=prompt, risk_tolerance=0.5)
-    print(f"\n  Tier: {result['tier_name']} (id={result['tier']})")
-    print(f"  Confidence: {result['confidence']:.1%}")
-    print(f"  Method: {result['method']}")
-    print(f"  Cost: ${result['cost_estimate']:.4f} (vs ${result['cost_baseline']:.4f} baseline)")
+    from uncommon_route.router.api import _v2_classify, _TIER_ID_TO_COMPLEXITY
+    from uncommon_route.v2_tiers import ID_TO_TIER
+    v2 = _v2_classify(prompt, None, None, None, None)
+    print(f"\n  Tier: {ID_TO_TIER.get(v2.tier_id, '?')} (id={v2.tier_id})")
+    print(f"  Confidence: {v2.confidence:.1%}")
+    print(f"  Method: {v2.method}")
+    cost = _TIER_ID_TO_COMPLEXITY.get(v2.tier_id, 0.02)
+    print(f"  Complexity: {v2.complexity:.2f}")
+    signals = [
+        ("metadata", v2.vote_a.tier_id, v2.vote_a.confidence, False),
+        ("structural", v2.vote_b.tier_id, v2.vote_b.confidence, True),
+        ("embedding", v2.vote_c.tier_id, v2.vote_c.confidence, False),
+    ]
     print(f"\n  Signals:")
-    for s in result["signals"]:
-        shadow = " [shadow]" if s.get("shadow") else ""
-        tier = s["tier"] if s["tier"] is not None else "abstain"
-        print(f"    {s['name']:12s}  tier={tier}  confidence={s['confidence']:.2f}{shadow}")
+    for name, tier, conf, shadow in signals:
+        shadow_tag = " [shadow]" if shadow else ""
+        tier_str = str(tier) if tier is not None else "abstain"
+        print(f"    {name:12s}  tier={tier_str}  confidence={conf:.2f}{shadow_tag}")
     print()
 
 

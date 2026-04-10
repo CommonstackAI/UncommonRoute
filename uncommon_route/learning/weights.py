@@ -1,9 +1,9 @@
-"""Signal weight tracker with decaying learning rate and abstention exclusion."""
+"""Signal weight tracker with decaying learning rate and abstention exclusion.
+
+Persistence is handled by v2_lifecycle via LearnedState, not per-tracker files.
+"""
 
 from __future__ import annotations
-
-import json
-from pathlib import Path
 
 
 class SignalWeightTracker:
@@ -36,16 +36,3 @@ class SignalWeightTracker:
         total = sum(self._weights)
         if total > 0:
             self._weights = [w / total for w in self._weights]
-
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump({"weights": self._weights, "update_count": self._update_count, "version": 1}, f)
-
-    @classmethod
-    def load(cls, path: Path) -> "SignalWeightTracker":
-        with open(path) as f:
-            data = json.load(f)
-        tracker = cls(initial_weights=data["weights"])
-        tracker._update_count = data["update_count"]
-        return tracker

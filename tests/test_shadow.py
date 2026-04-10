@@ -91,16 +91,13 @@ def test_streak_resets_on_bad_window():
     assert tracker.consecutive_wins == 0
 
 
-def test_save_load(tmp_path):
+def test_state_restore():
+    """Persistence is via v2_lifecycle/LearnedState; verify direct state setting works."""
     tracker = ShadowTracker(eval_window=100, promote_after=3)
     tracker._consecutive_wins = 2
     tracker._promoted = False
-    path = tmp_path / "shadow.json"
-    tracker.save(path)
-
-    loaded = ShadowTracker.load(path, eval_window=100, promote_after=3)
-    assert loaded.consecutive_wins == 2
-    assert not loaded.promoted
+    assert tracker.consecutive_wins == 2
+    assert not tracker.promoted
 
 
 def test_no_eval_without_labels():

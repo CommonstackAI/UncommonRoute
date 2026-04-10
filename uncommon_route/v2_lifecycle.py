@@ -113,6 +113,7 @@ def on_route_complete(
     signal_b_conf: float,
     signal_c_tier: int | None,
     signal_c_conf: float,
+    query_embedding: Any = None,
 ) -> None:
     """Record a completed routing decision. Call after each route()."""
     if not _initialized:
@@ -136,7 +137,22 @@ def on_route_complete(
             gold_tier=None,  # unknown in production
         )
 
-    # 3. Structured log
+    # 3. Index growth — add to embedding index on high-confidence unanimous routing
+    if (
+        _index_manager
+        and query_embedding is not None
+        and confidence >= 0.7
+        and signal_a_tier is not None
+        and signal_a_tier == signal_c_tier
+    ):
+        try:
+            added = _index_manager.add(query_embedding, tier_id)
+            if added:
+                logger.debug("v2 index growth: added entry for tier %d (size=%d)", tier_id, _index_manager.size)
+        except Exception as e:
+            logger.debug("v2 index growth failed: %s", e)
+
+    # 4. Structured log
     log_entry = RoutingLogEntry(
         request_id=request_id,
         signals={

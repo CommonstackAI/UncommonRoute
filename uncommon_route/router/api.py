@@ -54,7 +54,7 @@ _v2_initialized = False
 _TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.68, 3: 0.90}
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class V2ClassifyResult:
     """Full result from v2 classification, including all signal votes."""
     complexity: float
@@ -65,6 +65,7 @@ class V2ClassifyResult:
     vote_a: TierVote
     vote_b: TierVote  # shadow — not used in ensemble
     vote_c: TierVote
+    query_embedding: Any = None  # cached for index growth (numpy array or None)
 
 
 def _ensure_v2_signals() -> None:
@@ -170,26 +171,40 @@ def _v2_classify(
     vote_b = _v2_sig_b.predict(row) if _v2_sig_b else TierVote(tier_id=None, confidence=0.0)
     vote_c = _v2_sig_c.predict(row) if _v2_sig_c else TierVote(tier_id=None, confidence=0.0)
 
-    # Check if shadow mode promoted Signal B
-    from uncommon_route.v2_lifecycle import is_signal_b_promoted
-    use_signal_b = is_signal_b_promoted()
+    # Cache query embedding for potential index growth
+    query_embedding = None
+    if _v2_sig_c and _v2_sig_c._embed_fn:
+        try:
+            from uncommon_route.signals.embedding import _extract_last_user_message
+            text = _extract_last_user_message(row.get("messages", []))
+            if text.strip():
+                query_embedding = _v2_sig_c._embed_fn(text)
+        except Exception:
+            pass
 
-    # Build ensemble with active signals
+    # Check if shadow mode promoted Signal B
+    from uncommon_route import v2_lifecycle as _lc
+    use_signal_b = _lc.is_signal_b_promoted()
+
+    # Get learned weights from tracker (falls back to defaults if not initialized)
+    tracker_weights = _lc._weight_tracker.weights if _lc._weight_tracker else None
+
+    # Build ensemble with active signals, using learned weights when available
     if use_signal_b:
         active_votes = [vote_a]
-        active_weights = [0.50]
+        active_weights = [tracker_weights[0] if tracker_weights and len(tracker_weights) >= 3 else 0.50]
         if not vote_b.abstained:
             active_votes.append(vote_b)
-            active_weights.append(0.10)
+            active_weights.append(tracker_weights[1] if tracker_weights and len(tracker_weights) >= 3 else 0.10)
         if not vote_c.abstained:
             active_votes.append(vote_c)
-            active_weights.append(0.40)
+            active_weights.append(tracker_weights[2] if tracker_weights and len(tracker_weights) >= 3 else 0.40)
     else:
         active_votes = [vote_a]
-        active_weights = [0.55]
+        active_weights = [tracker_weights[0] if tracker_weights and len(tracker_weights) >= 2 else 0.55]
         if not vote_c.abstained:
             active_votes.append(vote_c)
-            active_weights.append(0.45)
+            active_weights.append(tracker_weights[1] if tracker_weights and len(tracker_weights) >= 2 else 0.45)
 
     ensemble = Ensemble(
         weights=active_weights,
@@ -217,6 +232,7 @@ def _v2_classify(
         vote_a=vote_a,
         vote_b=vote_b,
         vote_c=vote_c,
+        query_embedding=query_embedding,
     )
 
 
@@ -327,6 +343,7 @@ def route(
             signal_b_conf=v2.vote_b.confidence,
             signal_c_tier=v2.vote_c.tier_id,
             signal_c_conf=v2.vote_c.confidence,
+            query_embedding=v2.query_embedding,
         )
     except Exception:
         pass  # lifecycle not initialized yet (e.g. during tests)

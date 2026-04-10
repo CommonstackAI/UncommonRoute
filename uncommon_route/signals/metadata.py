@@ -1,7 +1,12 @@
 """Signal A: metadata-based tier heuristics.
 
-Uses only request metadata (no text analysis). Works from day one with zero training.
-Empirical basis: ~65% cross-validated accuracy on LLMRouterBench.
+Uses ONLY features available in production — NO benchmark labels.
+Key features: message_count, has_tool_calls, tool_message_count, step_ratio.
+
+Data analysis (LLMRouterBench):
+  has_tool_calls:  low=16%, mid=62%, mid_high=80%, high=98%
+  message_count:   low=7.3,  mid=8.6, mid_high=12.6, high=12.1
+  step_index mean: low=1.5,  mid=3.2, mid_high=5.5,  high=5.2
 """
 
 from __future__ import annotations
@@ -28,50 +33,51 @@ def _count_tool_related_messages(messages: list[dict[str, Any]]) -> int:
 
 
 class MetadataSignal:
-    """Predict tier from conversation metadata: step position, message count, tool usage."""
+    """Predict tier from conversation metadata — NO benchmark labels used.
+
+    Uses only features available in production: message structure,
+    tool usage, and conversation depth.
+    """
 
     def predict(self, row: dict[str, Any]) -> TierVote:
-        benchmark = row.get("benchmark", "")
-        scenario = row.get("scenario", "")
-        step_index = row.get("step_index", 1)
-        total_steps = row.get("total_steps", 1)
         messages = row.get("messages", [])
         msg_count = len(messages)
         has_tools = _has_tool_calls(messages)
         tool_msg_count = _count_tool_related_messages(messages)
+
+        # step_index / total_steps may be available from request metadata
+        step_index = row.get("step_index", 1)
+        total_steps = row.get("total_steps", 1)
         step_ratio = step_index / total_steps if total_steps > 0 else 0.0
 
-        # --- Scenario-based prior ---
-        if scenario in ("rag_multiturn",) or benchmark == "mtrag":
-            return TierVote(tier_id=0, confidence=0.85)
+        # ─── Production-only heuristics (no benchmark field used) ───
 
-        if scenario in ("meeting_query_summarization",) or benchmark == "qmsum":
-            if msg_count > 6 and has_tools:
-                return TierVote(tier_id=1, confidence=0.6)
-            return TierVote(tier_id=0, confidence=0.80)
+        # Strongest signal: tool usage (16% low vs 98% high)
+        if not has_tools:
+            # No tools at all → likely simple
+            if msg_count <= 3:
+                return TierVote(tier_id=0, confidence=0.75)
+            if msg_count <= 6:
+                return TierVote(tier_id=0, confidence=0.65)
+            # Long conversation but no tools → probably summarization/QA → low-mid
+            return TierVote(tier_id=0, confidence=0.55)
 
-        if benchmark == "pinchbench":
-            if has_tools and msg_count > 10:
-                return TierVote(tier_id=1, confidence=0.55)
-            return TierVote(tier_id=0, confidence=0.65)
+        # Has tools — differentiate by depth
+        if tool_msg_count >= 8 and msg_count > 10:
+            # Heavy tool usage + deep conversation → high
+            return TierVote(tier_id=3, confidence=0.75)
 
-        # --- SWE-bench and code scenarios ---
-        if benchmark == "swebench" or scenario == "code_swe":
-            if has_tools and step_ratio > 0.5:
-                return TierVote(tier_id=3, confidence=0.75)
-            if has_tools and msg_count > 8:
-                return TierVote(tier_id=3, confidence=0.65)
-            if has_tools and tool_msg_count >= 4:
-                return TierVote(tier_id=3, confidence=0.60)
-            if has_tools:
-                return TierVote(tier_id=3, confidence=0.55)
-            if step_index <= 2 and msg_count <= 4:
-                return TierVote(tier_id=1, confidence=0.50)
-            return TierVote(tier_id=3, confidence=0.50)
+        if tool_msg_count >= 4 and msg_count > 8:
+            # Moderate tool usage → likely high
+            return TierVote(tier_id=3, confidence=0.65)
 
-        # --- Unknown / general ---
-        if has_tools and msg_count > 8:
-            return TierVote(tier_id=2, confidence=0.45)
-        if has_tools:
-            return TierVote(tier_id=1, confidence=0.45)
-        return TierVote(tier_id=1, confidence=0.40)
+        if tool_msg_count >= 4:
+            # Some tool usage → mid_high
+            return TierVote(tier_id=2, confidence=0.55)
+
+        if msg_count > 6:
+            # Light tools but long conversation → mid_high
+            return TierVote(tier_id=2, confidence=0.50)
+
+        # Light tools, short conversation → mid
+        return TierVote(tier_id=1, confidence=0.50)

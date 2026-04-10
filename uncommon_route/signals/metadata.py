@@ -45,12 +45,9 @@ class MetadataSignal:
         has_tools = _has_tool_calls(messages)
         tool_msg_count = _count_tool_related_messages(messages)
 
-        # step_index / total_steps may be available from request metadata
-        step_index = row.get("step_index", 1)
-        total_steps = row.get("total_steps", 1)
-        step_ratio = step_index / total_steps if total_steps > 0 else 0.0
-
-        # ─── Production-only heuristics (no benchmark field used) ───
+        # ─── Production-only heuristics ───
+        # Uses ONLY: msg_count, has_tools, tool_msg_count
+        # NO benchmark, scenario, step_index, or total_steps
 
         # Strongest signal: tool usage (16% low vs 98% high)
         if not has_tools:

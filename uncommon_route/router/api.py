@@ -85,11 +85,12 @@ def _build_signal_row(
     context_features: dict[str, float] | None,
 ) -> dict[str, Any]:
     """Build a row dict for v2 signals from available proxy data."""
-    # If full messages available, normalize content to strings
+    # If full messages available, normalize content to strings but preserve other keys
     if messages:
         msgs = []
         for m in messages:
-            content = m.get("content", "")
+            normalized = dict(m)  # preserve tool_calls, tool_call_id, name, etc.
+            content = normalized.get("content", "")
             if not isinstance(content, str):
                 # Content-array (e.g. vision) → extract text parts only
                 if isinstance(content, list):
@@ -97,7 +98,8 @@ def _build_signal_row(
                     content = " ".join(parts)
                 else:
                     content = str(content)
-            msgs.append({"role": m.get("role", "user"), "content": content})
+                normalized["content"] = content
+            msgs.append(normalized)
     else:
         # Reconstruct from prompt + system_prompt
         msgs = []

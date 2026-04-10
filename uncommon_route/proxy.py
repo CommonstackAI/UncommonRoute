@@ -1359,6 +1359,13 @@ def create_app(
             return False, {"error": "Failed to reload primary connection", "detail": str(exc)}
 
     async def _on_startup() -> None:
+        # ─── v2 lifecycle startup ───
+        try:
+            from uncommon_route.v2_lifecycle import on_startup as v2_startup
+            v2_startup()
+        except Exception as e:
+            logger.warning("v2 lifecycle startup failed: %s", e)
+
         if not upstream:
             return
         count = await _mapper.discover(_primary_api_key or None)
@@ -1957,6 +1964,15 @@ def create_app(
             if len(visible_records) >= limit:
                 break
         return JSONResponse(visible_records)
+
+    async def handle_v2_metrics(request: Request) -> JSONResponse:
+        """GET /v1/v2-metrics — v2 routing metrics snapshot."""
+        from uncommon_route.v2_lifecycle import get_metrics, is_signal_b_promoted
+        metrics = get_metrics()
+        if metrics is None:
+            return JSONResponse({"error": "v2 lifecycle not initialized"}, status_code=503)
+        metrics["signal_b_promoted"] = is_signal_b_promoted()
+        return JSONResponse(metrics)
 
     async def handle_route_preview(request: Request) -> JSONResponse:
         """POST /v1/route-preview — preview routing decision without sending request."""
@@ -3285,6 +3301,12 @@ def create_app(
         finally:
             if _rediscovery_task is not None:
                 _rediscovery_task.cancel()
+            # ─── v2 lifecycle shutdown ───
+            try:
+                from uncommon_route.v2_lifecycle import on_shutdown as v2_shutdown
+                v2_shutdown()
+            except Exception as e:
+                logger.warning("v2 lifecycle shutdown failed: %s", e)
 
     routes = [
         Route("/health", handle_health, methods=["GET"]),
@@ -3307,6 +3329,7 @@ def create_app(
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
         Route("/v1/route-preview", handle_route_preview, methods=["POST"]),
+        Route("/v1/v2-metrics", handle_v2_metrics, methods=["GET"]),
     ]
     if _dashboard_mount is not None:
         routes.append(Mount("/dashboard", app=_dashboard_mount))

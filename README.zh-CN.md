@@ -4,14 +4,37 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>每个 LLM 请求，自动路由到最便宜的能用的模型。</strong></p>
+<p><strong>自动路由，省 77% LLM 成本。</strong></p>
 
 <p>
-你 77% 的 LLM 预算花在了根本不需要顶配模型的简单任务上。<br>
-UncommonRoute 把这事量化了，然后自动解决。
+你的大部分 LLM 预算花在了根本不需要顶配模型的简单任务上。<br>
+UncommonRoute 自动选最便宜的能完成任务的模型——你不用管。
 </p>
 
 </div>
+
+```
+$ uncommon-route explain "把这句话翻译成法语：今天天气真好"
+
+  Tier: low (id=0)      ← 不需要顶配模型
+  Confidence: 100.0%
+  Signals:
+    metadata      tier=0  confidence=0.75
+    embedding     tier=0  confidence=0.79
+
+  → 不路由：$0.05（Opus）
+  → 路由后：$0.0005（nano）—— 这条请求省了 99%
+
+$ uncommon-route explain "Design a distributed rate limiter with Redis"
+
+  Tier: mid (id=1)      ← 需要更强的模型
+  Confidence: 85.0%
+  Signals:
+    metadata      tier=1  confidence=0.50
+    embedding     tier=1  confidence=0.78
+
+  → 路由到中档模型——够用，但不是最贵的
+```
  
 <table align="center">
 <tr>
@@ -183,6 +206,45 @@ uncommon-route serve
 
 ```bash
 uncommon-route doctor  # 不确定哪里有问题？一条命令检查所有东西
+```
+
+### 立即体验（30 秒）
+
+不需要 API key——看看路由器会怎么处理任何 prompt：
+
+```bash
+uncommon-route explain "帮我总结一下这段会议记录的要点"
+```
+
+或者打开浏览器 Playground：
+
+```bash
+# → http://localhost:8403/dashboard/playground
+# 输入 prompt，实时看路由决策变化
+```
+
+---
+
+## 为什么选 UncommonRoute？
+
+| 方案 | 问题 |
+|---|---|
+| 全程用最强模型 | 简单任务多花 10-100 倍冤枉钱 |
+| 手动选模型 | 每次都要自己决定——而且经常选错 |
+| 其他路由器 | 基于规则、不会学习、或需要改 SDK |
+| **UncommonRoute** | **自动路由、持续学习、OpenAI 兼容即插即用** |
+
+### 一行代码接入
+
+```python
+# 之前——写死用最贵的模型
+client = OpenAI()
+resp = client.chat.completions.create(model="o3", messages=msgs)
+
+# 之后——改一行，自动路由
+client = OpenAI(base_url="http://localhost:8403/v1")
+resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs)
+# → UncommonRoute 自动选最便宜的能用的模型
 ```
 
 ---

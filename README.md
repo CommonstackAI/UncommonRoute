@@ -4,14 +4,37 @@
 
 <h1>UncommonRoute</h1>
 
-<p><strong>Route every LLM call to the cheapest model that actually works.</strong></p>
+<p><strong>Cut your LLM costs by 77% with automatic model routing.</strong></p>
 
 <p>
-77% of your LLM budget is wasted on simple tasks that don't need a premium model.<br>
-UncommonRoute measures this, then fixes it — automatically.
+Most of your LLM budget goes to simple tasks that don't need a premium model.<br>
+UncommonRoute picks the cheapest model that still gets the job done — automatically.
 </p>
 
 </div>
+
+```
+$ uncommon-route explain "Translate this to French: The weather is nice today"
+
+  Tier: low (id=0)      ← doesn't need a premium model
+  Confidence: 100.0%
+  Signals:
+    metadata      tier=0  confidence=0.75
+    embedding     tier=0  confidence=0.79
+
+  → Without routing: $0.05 (Opus)
+  → With routing:    $0.0005 (nano) — 99% saved on this request
+
+$ uncommon-route explain "Design a distributed rate limiter with Redis"
+
+  Tier: mid (id=1)      ← needs more capability
+  Confidence: 85.0%
+  Signals:
+    metadata      tier=1  confidence=0.50
+    embedding     tier=1  confidence=0.78
+
+  → Routed to a mid-tier model — strong enough, but not the most expensive
+```
  
 <table align="center">
 <tr>
@@ -183,6 +206,45 @@ Done. Your existing workflow is already saving money.
 
 ```bash
 uncommon-route doctor  # not sure what's wrong? one command checks everything
+```
+
+### See It Work (30 seconds)
+
+No API key needed — see what the router would decide for any prompt:
+
+```bash
+uncommon-route explain "summarize this meeting transcript in 3 bullet points"
+```
+
+Or open the interactive Playground:
+
+```bash
+# → http://localhost:8403/dashboard/playground
+# Type any prompt, watch the routing decision update in real time
+```
+
+---
+
+## Why UncommonRoute?
+
+| Approach | Problem |
+|---|---|
+| Always use the best model | You're paying 10-100x more than needed for simple tasks |
+| Manually pick models | You have to decide for every call — and you'll guess wrong |
+| Other routers | Rule-based, no learning, or require model-specific SDKs |
+| **UncommonRoute** | **Automatic, learns from usage, drop-in OpenAI-compatible proxy** |
+
+### One-line integration
+
+```python
+# Before — hardcoded expensive model
+client = OpenAI()
+resp = client.chat.completions.create(model="o3", messages=msgs)
+
+# After — one line change, automatic routing
+client = OpenAI(base_url="http://localhost:8403/v1")
+resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs)
+# → UncommonRoute picks the cheapest model that works
 ```
 
 ---

@@ -43,3 +43,19 @@ spending.json
 # Benchmark results (large files, regenerate locally)
 bench/results/
 bench/data/*.generated.jsonl
+
+# ─── v2: internal design docs (not user-facing) ───
+docs/uncommon-route-v2-architecture.md
+docs/telemetry-design.md
+docs/TODO-next-improvements.md
+docs/presentation-slide.md
+docs/superpowers/
+
+# ─── v2: training data & model artifacts (regenerate via scripts/) ───
+uncommon_route/data/v2_splits/
+*.npy
+*.pkl
+
+# ─── v2: telemetry local data ───
+telemetry_buffer.jsonl
+telemetry_sent.jsonl

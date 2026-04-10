@@ -17,7 +17,11 @@ export default function Playground() {
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!prompt.trim()) { setResult(null); setError(null); setLoading(false); return; }
+    if (!prompt.trim()) {
+      if (abortRef.current) abortRef.current.abort();
+      setResult(null); setError(null); setLoading(false);
+      return;
+    }
 
     debounceRef.current = setTimeout(async () => {
       // Cancel any in-flight request
@@ -51,6 +55,7 @@ export default function Playground() {
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (abortRef.current) abortRef.current.abort();
     };
   }, [prompt, riskTolerance]);
 

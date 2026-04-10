@@ -1,8 +1,5 @@
 import { type ReactNode, useMemo, useState } from "react";
-import { motion } from "framer-motion";
 import type { Stats } from "../api";
-import { Card } from "./ui/Card";
-import { AnimatedNumber } from "./ui/AnimatedNumber";
 
 type UsageView = "requests" | "cost" | "avg";
 
@@ -14,7 +11,7 @@ export default function Activity({ stats }: Props) {
   const [usageView, setUsageView] = useState<UsageView>("requests");
 
   if (!stats || stats.total_requests === 0) {
-    return <div className="flex items-center justify-center py-20 text-[14px] text-[#9CA3AF]">No activity recorded yet.</div>;
+    return <div className="flex items-center justify-center py-20 font-mono text-[14px] text-n-disabled">No activity recorded yet.</div>;
   }
 
   const simpleCount = stats.by_tier.SIMPLE?.count ?? 0;
@@ -29,36 +26,9 @@ export default function Activity({ stats }: Props) {
   const passthroughCount = Math.max(stats.total_requests - classifiedCount, 0);
 
   const tierBuckets = [
-    {
-      label: "Simple",
-      count: simpleCount,
-      totalCost: simpleCost,
-      bg: "bg-sky-50/80",
-      ring: "ring-sky-500/10",
-      dot: "bg-sky-500",
-      bar: "bg-sky-500",
-      text: "text-sky-600",
-    },
-    {
-      label: "Medium",
-      count: mediumCount,
-      totalCost: mediumCost,
-      bg: "bg-amber-50/80",
-      ring: "ring-amber-500/10",
-      dot: "bg-amber-500",
-      bar: "bg-amber-500",
-      text: "text-amber-600",
-    },
-    {
-      label: "Complex",
-      count: complexCount,
-      totalCost: complexCost,
-      bg: "bg-rose-50/80",
-      ring: "ring-rose-500/10",
-      dot: "bg-rose-500",
-      bar: "bg-rose-500",
-      text: "text-rose-600",
-    },
+    { label: "Simple", count: simpleCount, totalCost: simpleCost },
+    { label: "Medium", count: mediumCount, totalCost: mediumCost },
+    { label: "Complex", count: complexCount, totalCost: complexCost },
   ];
 
   const totalTierCount = tierBuckets.reduce((sum, bucket) => sum + bucket.count, 0) || 1;
@@ -99,98 +69,87 @@ export default function Activity({ stats }: Props) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-[#111827]">Activity</h1>
-        <p className="mt-1 text-[13px] font-medium text-[#6B7280]">
+        <h1 className="text-xl font-semibold tracking-tight text-n-display">Activity</h1>
+        <p className="mt-1 text-[13px] text-n-secondary">
           {formatTimeRange(stats.time_range_s)} · {stats.total_requests.toLocaleString()} routed requests
         </p>
       </div>
 
+      {/* Overview stat row */}
       <div className="grid grid-cols-12 gap-3">
-        <motion.div className="col-span-3" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+        <div className="col-span-3">
           <OverviewCard
-            label="Actual Spend"
-            value={
-              <>
-                $<AnimatedNumber value={stats.total_actual_cost} format={(v) => v.toFixed(2)} />
-              </>
-            }
+            label="ACTUAL SPEND"
+            value={<>${stats.total_actual_cost.toFixed(2)}</>}
             meta={`$${stats.total_baseline_cost.toFixed(2)} baseline`}
           />
-        </motion.div>
-        <motion.div className="col-span-3" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.03 }}>
+        </div>
+        <div className="col-span-3">
           <OverviewCard
-            label="Saved"
-            value={
-              <>
-                <AnimatedNumber value={stats.total_savings_ratio * 100} format={(v) => v.toFixed(1)} />%
-              </>
-            }
+            label="SAVED"
+            value={<>{(stats.total_savings_ratio * 100).toFixed(1)}%</>}
             meta={`$${stats.total_savings_absolute.toFixed(2)} below baseline`}
             tone="success"
           />
-        </motion.div>
-        <motion.div className="col-span-3" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.06 }}>
+        </div>
+        <div className="col-span-3">
           <OverviewCard
-            label="Avg Latency"
-            value={
-              <>
-                <AnimatedNumber value={stats.avg_latency_ms} format={(v) => v.toFixed(1)} />ms
-              </>
-            }
+            label="AVG LATENCY"
+            value={<>{stats.avg_latency_ms.toFixed(1)}ms</>}
             meta={`${stats.total_requests.toLocaleString()} routed turns`}
           />
-        </motion.div>
-        <motion.div className="col-span-3" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.09 }}>
+        </div>
+        <div className="col-span-3">
           <OverviewCard
-            label="Optimization"
-            value={
-              <>
-                <AnimatedNumber value={stats.avg_input_reduction_ratio * 100} format={(v) => v.toFixed(1)} />%
-              </>
-            }
-            meta={`${(stats.avg_cache_hit_ratio * 100).toFixed(1)}% cache hit · $${stats.total_compaction_savings.toFixed(2)} compaction`}
+            label="OPTIMIZATION"
+            value={<>{(stats.avg_input_reduction_ratio * 100).toFixed(1)}%</>}
+            meta={`${(stats.avg_cache_hit_ratio * 100).toFixed(1)}% cache hit \u00B7 $${stats.total_compaction_savings.toFixed(2)} compaction`}
           />
-        </motion.div>
+        </div>
       </div>
 
       <div className="grid grid-cols-12 gap-5">
-        <motion.div className="col-span-7" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.12 }}>
-          <Card className="flex h-full flex-col p-6">
+        {/* Request Complexity */}
+        <div className="col-span-7">
+          <div className="flex h-full flex-col rounded-card border border-n-border bg-n-surface p-6">
             <div>
               <div className="flex items-center justify-between mb-5">
-                <div className="text-[12px] font-medium text-[#9CA3AF] uppercase tracking-wider">Request Complexity</div>
-                <div className="text-[11px] font-medium text-[#9CA3AF]">
+                <div className="label">REQUEST COMPLEXITY</div>
+                <div className="font-mono text-[11px] text-n-secondary">
                   {classifiedCount} classified · {passthroughCount} passthrough
                 </div>
               </div>
 
-              <div className="h-2 rounded-full bg-gray-100 overflow-hidden flex">
-                {tierSegments.map((bucket) => (
-                  <motion.div
-                    key={bucket.label}
-                    initial={{ width: 0 }}
-                    animate={{ width: `${bucket.pct}%` }}
-                    transition={{ duration: 0.8, ease: "easeOut" }}
-                    className={bucket.bar}
-                  />
-                ))}
+              {/* Segmented bar for tier distribution */}
+              <div className="segmented-bar" style={{ height: "6px" }}>
+                {tierSegments.map((bucket) => {
+                  const segCount = Math.max(Math.round(bucket.pct / 5), bucket.count > 0 ? 1 : 0);
+                  return Array.from({ length: segCount }).map((_, i) => (
+                    <div key={`${bucket.label}-${i}`} className="segment filled" />
+                  ));
+                })}
+                {/* Fill remaining to total 20 */}
+                {(() => {
+                  const filled = tierSegments.reduce((s, b) => s + Math.max(Math.round(b.pct / 5), b.count > 0 ? 1 : 0), 0);
+                  const empty = Math.max(20 - filled, 0);
+                  return Array.from({ length: empty }).map((_, i) => (
+                    <div key={`empty-${i}`} className="segment" />
+                  ));
+                })()}
               </div>
 
               <div className="mt-5 grid grid-cols-3 gap-3">
                 {tierSegments.map((bucket) => (
-                  <div
-                    key={bucket.label}
-                    className={`rounded-2xl ${bucket.bg} ring-1 ${bucket.ring} px-4 py-4`}
-                  >
+                  <div key={bucket.label} className="rounded-compact border border-n-border px-4 py-4">
                     <div className="flex items-center justify-between">
-                      <span className={`h-2 w-2 rounded-full ${bucket.dot}`} />
-                      <span className="text-[11px] font-medium text-[#9CA3AF]">{bucket.pct.toFixed(0)}%</span>
+                      <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
+                      <span className="font-mono text-[11px] text-n-secondary">{bucket.pct.toFixed(0)}%</span>
                     </div>
-                    <div className="mt-4 text-2xl font-semibold tracking-tight text-[#111827]">
-                      <AnimatedNumber value={bucket.count} />
+                    <div className="mt-4 font-mono text-2xl font-semibold tracking-tight text-n-display">
+                      {bucket.count.toLocaleString()}
                     </div>
-                    <div className={`mt-1 text-[12px] font-medium ${bucket.text}`}>{bucket.label}</div>
-                    <div className="mt-3 text-[11px] font-medium text-[#6B7280]">
+                    <div className="mt-1 label">{bucket.label.toUpperCase()}</div>
+                    <div className="mt-3 font-mono text-[11px] text-n-secondary">
                       Spent ${bucket.totalCost.toFixed(2)}
                     </div>
                   </div>
@@ -199,77 +158,66 @@ export default function Activity({ stats }: Props) {
             </div>
 
             <div className="mt-4 grid grid-cols-3 gap-2">
-              <MiniMetric
-                label="Dominant Band"
-                value={`${dominantBucket.label} ${dominantBucket.pct.toFixed(0)}%`}
-              />
-              <MiniMetric
-                label="Complex Share"
-                value={`${complexShare.toFixed(0)}%`}
-              />
-              <MiniMetric
-                label="Passthrough"
-                value={passthroughCount.toLocaleString()}
-              />
+              <MiniMetric label="DOMINANT BAND" value={`${dominantBucket.label} ${dominantBucket.pct.toFixed(0)}%`} />
+              <MiniMetric label="COMPLEX SHARE" value={`${complexShare.toFixed(0)}%`} />
+              <MiniMetric label="PASSTHROUGH" value={passthroughCount.toLocaleString()} />
             </div>
-          </Card>
-        </motion.div>
+          </div>
+        </div>
 
-        <motion.div className="col-span-5" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.16 }}>
-          <Card className="p-6 h-full">
+        {/* By Mode */}
+        <div className="col-span-5">
+          <div className="h-full rounded-card border border-n-border bg-n-surface p-6">
             <div className="flex items-center justify-between mb-5">
-              <div className="text-[12px] font-medium text-[#9CA3AF] uppercase tracking-wider">By Mode</div>
-              <div className="text-[11px] font-medium text-[#9CA3AF]">{modeTiles.length} active modes</div>
+              <div className="label">BY MODE</div>
+              <div className="font-mono text-[11px] text-n-secondary">{modeTiles.length} active modes</div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               {modeTiles.map((tile) => (
-                <div
-                  key={tile.mode}
-                  className={`rounded-2xl ${tile.bg} ring-1 ${tile.ring} px-4 py-4`}
-                >
+                <div key={tile.mode} className="rounded-compact border border-n-border px-4 py-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${tile.dot}`} />
-                      <span className="text-[12px] font-medium text-[#6B7280] capitalize">{tile.mode}</span>
+                      <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
+                      <span className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">{tile.mode}</span>
                     </div>
-                    <span className="text-[11px] font-medium text-[#9CA3AF]">{tile.pct.toFixed(0)}%</span>
+                    <span className="font-mono text-[11px] text-n-secondary">{tile.pct.toFixed(0)}%</span>
                   </div>
-                  <div className="mt-3 text-2xl font-semibold tracking-tight text-[#111827]">
-                    <AnimatedNumber value={tile.count} />
+                  <div className="mt-3 font-mono text-2xl font-semibold tracking-tight text-n-display">
+                    {tile.count.toLocaleString()}
                   </div>
-                  <div className={`mt-1 text-[11px] font-medium ${tile.text}`}>{tile.description}</div>
-                  <div className="mt-3 h-1.5 rounded-full bg-white/80 overflow-hidden">
-                    <motion.div
-                      initial={{ width: 0 }}
-                      animate={{ width: `${tile.pct}%` }}
-                      transition={{ duration: 0.75, ease: "easeOut" }}
-                      className={`h-full rounded-full ${tile.bar}`}
-                    />
+                  <div className="mt-1 font-mono text-[11px] text-n-secondary">{tile.description}</div>
+                  {/* Mini segmented bar */}
+                  <div className="mt-3 flex gap-[1px]" style={{ height: "4px" }}>
+                    {Array.from({ length: 10 }).map((_, i) => (
+                      <div
+                        key={i}
+                        className={`flex-1 ${i < Math.round(tile.pct / 10) ? "bg-n-display" : "bg-n-border"}`}
+                      />
+                    ))}
                   </div>
                 </div>
               ))}
             </div>
-          </Card>
-        </motion.div>
+          </div>
+        </div>
 
-        <motion.div className="col-span-12" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
-          <Card>
-            <div className="px-6 py-4 border-b border-black/[0.04] flex items-center justify-between">
-              <span className="text-[12px] font-medium text-[#9CA3AF] uppercase tracking-wider">Model Usage</span>
-              <div className="flex items-center gap-1 rounded-xl bg-gray-50/90 ring-1 ring-black/[0.04] p-1">
+        {/* Model Usage Table */}
+        <div className="col-span-12">
+          <div className="rounded-card border border-n-border bg-n-surface overflow-hidden">
+            <div className="flex items-center justify-between border-b border-n-border px-6 py-4">
+              <span className="label">MODEL USAGE</span>
+              <div className="inline-flex gap-[2px] rounded-compact bg-n-black p-[2px]">
                 {(["requests", "cost", "avg"] as UsageView[]).map((view) => {
                   const active = usageView === view;
                   return (
                     <button
                       key={view}
                       onClick={() => setUsageView(view)}
-                      className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors ${
-                        active
-                          ? "bg-white text-[#111827] shadow-sm ring-1 ring-black/[0.04]"
-                          : "text-[#6B7280] hover:text-[#111827]"
+                      className={`rounded-[6px] px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider transition-colors ${
+                        active ? "bg-n-raised text-n-display" : "text-n-secondary hover:text-n-primary"
                       }`}
                     >
-                      {view === "requests" ? "Requests" : view === "cost" ? "Cost" : "Avg cost"}
+                      {view === "requests" ? "REQUESTS" : view === "cost" ? "COST" : "AVG COST"}
                     </button>
                   );
                 })}
@@ -277,12 +225,12 @@ export default function Activity({ stats }: Props) {
             </div>
             <table className="w-full">
               <thead>
-                <tr className="border-b border-black/[0.04]">
-                  <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-3 px-6">Model</th>
-                  <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-3 px-6">Requests</th>
-                  <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-3 px-6">Share</th>
-                  <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-3 px-6">Total Cost</th>
-                  <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-3 px-6">Avg / Req</th>
+                <tr className="border-b border-n-border">
+                  <th className="label px-6 py-3 text-left">MODEL</th>
+                  <th className="label px-6 py-3 text-right">REQUESTS</th>
+                  <th className="label px-6 py-3 text-right">SHARE</th>
+                  <th className="label px-6 py-3 text-right">TOTAL COST</th>
+                  <th className="label px-6 py-3 text-right">AVG / REQ</th>
                 </tr>
               </thead>
               <tbody>
@@ -290,62 +238,48 @@ export default function Activity({ stats }: Props) {
                   const focusValue = getUsageValue(row, usageView);
                   const focusWidth = Math.max((focusValue / maxUsageValue) * 100, 3);
                   return (
-                    <tr key={row.name} className="border-b border-black/[0.03] last:border-0 hover:bg-gray-50 transition-colors group">
-                      <td className="py-3.5 px-6">
+                    <tr key={row.name} className="border-b border-n-border last:border-0 transition-colors hover:bg-n-raised">
+                      <td className="px-6 py-3.5">
                         <div className="flex items-center gap-3">
-                          <div className="w-24 h-1.5 rounded-full bg-gray-100 overflow-hidden">
-                            <motion.div
-                              initial={{ width: 0 }}
-                              animate={{ width: `${focusWidth}%` }}
-                              transition={{ duration: 0.7, ease: "easeOut" }}
-                              className={`h-full rounded-full ${
-                                usageView === "requests"
-                                  ? "bg-indigo-500"
-                                  : usageView === "cost"
-                                    ? "bg-rose-500"
-                                    : "bg-amber-500"
-                              }`}
-                            />
+                          <div className="flex w-24 gap-[1px]" style={{ height: "4px" }}>
+                            {Array.from({ length: 10 }).map((_, i) => (
+                              <div
+                                key={i}
+                                className={`flex-1 ${i < Math.round(focusWidth / 10) ? "bg-n-display" : "bg-n-border"}`}
+                              />
+                            ))}
                           </div>
                           <div>
-                            <div className="text-[13px] font-medium text-[#4B5563] group-hover:text-[#111827] transition-colors">
+                            <div className="font-mono text-[13px] text-n-primary">
                               {row.name.split("/").pop()}
                             </div>
-                            <div className="text-[11px] font-medium text-[#9CA3AF]">
+                            <div className="font-mono text-[11px] text-n-secondary">
                               {formatUsageValue(row, usageView)}
                             </div>
                           </div>
                         </div>
                       </td>
-                      <td className="py-3.5 px-6 text-[13px] font-mono text-[#6B7280] text-right">{row.count.toLocaleString()}</td>
-                      <td className="py-3.5 px-6 text-[13px] font-mono text-[#6B7280] text-right">{row.share.toFixed(1)}%</td>
-                      <td className="py-3.5 px-6 text-[13px] font-mono text-[#6B7280] text-right">${row.total_cost.toFixed(4)}</td>
-                      <td className="py-3.5 px-6 text-[13px] font-mono text-[#6B7280] text-right">${row.avg_cost.toFixed(4)}</td>
+                      <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-secondary">{row.count.toLocaleString()}</td>
+                      <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-secondary">{row.share.toFixed(1)}%</td>
+                      <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-secondary">${row.total_cost.toFixed(4)}</td>
+                      <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-secondary">${row.avg_cost.toFixed(4)}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-          </Card>
-        </motion.div>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function MiniMetric({
-  label,
-  value,
-  tone = "default",
-}: {
-  label: string;
-  value: string;
-  tone?: "default" | "success";
-}) {
+function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl bg-gray-50/80 ring-1 ring-black/[0.03] px-4 py-3">
-      <div className="text-[11px] uppercase tracking-wider text-[#9CA3AF]">{label}</div>
-      <div className={`mt-1 text-[16px] font-semibold tracking-tight ${tone === "success" ? "text-emerald-600" : "text-[#111827]"}`}>
+    <div className="rounded-compact border border-n-border px-4 py-3">
+      <div className="label">{label}</div>
+      <div className="mt-1 font-mono text-[16px] font-semibold tracking-tight text-n-display">
         {value}
       </div>
     </div>
@@ -364,62 +298,27 @@ function OverviewCard({
   tone?: "default" | "success";
 }) {
   return (
-    <Card className="p-5 h-full">
-      <div className="text-[12px] font-medium text-[#9CA3AF] uppercase tracking-wider">{label}</div>
-      <div className={`mt-3 text-[34px] leading-none font-semibold tracking-tight ${tone === "success" ? "text-emerald-600" : "text-[#111827]"}`}>
+    <div className="h-full rounded-card border border-n-border bg-n-surface p-5">
+      <div className="label">{label}</div>
+      <div className={`mt-3 font-mono text-[34px] leading-none font-semibold tracking-tight ${tone === "success" ? "text-n-success" : "text-n-display"}`}>
         {value}
       </div>
-      <div className="mt-2 text-[12px] font-medium text-[#6B7280]">{meta}</div>
-    </Card>
+      <div className="mt-2 font-mono text-[12px] text-n-secondary">{meta}</div>
+    </div>
   );
 }
 
-function getModeMeta(mode: string): {
-  bg: string;
-  ring: string;
-  dot: string;
-  bar: string;
-  text: string;
-  description: string;
-} {
+function getModeMeta(mode: string): { description: string } {
   switch (mode) {
     case "best":
-      return {
-        bg: "bg-violet-50/80",
-        ring: "ring-violet-500/10",
-        dot: "bg-violet-500",
-        bar: "bg-violet-500",
-        text: "text-violet-600",
-        description: "highest quality",
-      };
+      return { description: "highest quality" };
     case "fast":
-      return {
-        bg: "bg-sky-50/80",
-        ring: "ring-sky-500/10",
-        dot: "bg-sky-500",
-        bar: "bg-sky-500",
-        text: "text-sky-600",
-        description: "lighter and faster",
-      };
+      return { description: "lighter and faster" };
     case "passthrough":
-      return {
-        bg: "bg-gray-50/90",
-        ring: "ring-black/[0.05]",
-        dot: "bg-gray-400",
-        bar: "bg-gray-400",
-        text: "text-[#6B7280]",
-        description: "explicit model",
-      };
+      return { description: "explicit model" };
     case "auto":
     default:
-      return {
-        bg: "bg-indigo-50/80",
-        ring: "ring-indigo-500/10",
-        dot: "bg-indigo-500",
-        bar: "bg-indigo-500",
-        text: "text-indigo-600",
-        description: "balanced default",
-      };
+      return { description: "balanced default" };
   }
 }
 
@@ -446,5 +345,5 @@ function formatUsageValue(
 ): string {
   if (view === "cost") return `$${row.total_cost.toFixed(4)} total`;
   if (view === "avg") return `$${row.avg_cost.toFixed(4)} avg`;
-  return `${row.count.toLocaleString()} requests · ${row.share.toFixed(1)}%`;
+  return `${row.count.toLocaleString()} requests \u00B7 ${row.share.toFixed(1)}%`;
 }

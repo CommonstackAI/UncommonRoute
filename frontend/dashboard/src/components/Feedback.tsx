@@ -1,18 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import { motion } from "framer-motion";
 import {
   fetchRecent,
   submitFeedback,
   type RecentRequest,
   type FeedbackResult,
 } from "../api";
-import { Card } from "./ui/Card";
-import { StaggerContainer, StaggerItem } from "./ui/Stagger";
 
-const TIER_LABEL: Record<string, string> = {
-  SIMPLE: "text-emerald-600",
-  MEDIUM: "text-sky-600",
-  COMPLEX: "text-orange-600",
+const TIER_COLOR: Record<string, string> = {
+  SIMPLE: "text-n-success",
+  MEDIUM: "text-n-warning",
+  COMPLEX: "text-n-accent",
 };
 
 function fmtTime(ts: number): string {
@@ -37,17 +34,17 @@ function storedFeedback(request: RecentRequest): FeedbackResult | null {
 }
 
 function feedbackLabel(result: FeedbackResult): string {
-  if (result.action === "updated") return `${result.from_tier} → ${result.to_tier}`;
+  if (result.action === "updated") return `${result.from_tier} \u2192 ${result.to_tier}`;
   if (result.action === "reinforced" || result.action === "no_change") return "confirmed";
   if (result.action === "rate_limited") return "rate limited";
   return result.action;
 }
 
 function feedbackTone(result: FeedbackResult): string {
-  if (result.action === "updated") return "text-sky-600";
-  if (result.ok) return "text-emerald-600";
-  if (result.action === "rate_limited") return "text-amber-600";
-  return "text-[#6B7280]";
+  if (result.action === "updated") return "text-n-interactive";
+  if (result.ok) return "text-n-success";
+  if (result.action === "rate_limited") return "text-n-warning";
+  return "text-n-secondary";
 }
 
 export default function Feedback() {
@@ -93,124 +90,114 @@ export default function Feedback() {
     <div className="space-y-6">
       <div>
         <div className="flex items-baseline gap-3 mb-1">
-          <h1 className="text-xl font-semibold tracking-tight text-[#111827]">Feedback</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-n-display">Feedback</h1>
           {pendingCount > 0 && (
-            <span className="text-[13px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">{pendingCount} awaiting</span>
+            <span className="rounded-pill border border-n-warning px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-warning">
+              {pendingCount} AWAITING
+            </span>
           )}
         </div>
-        <p className="text-[13px] font-medium text-[#6B7280]">
+        <p className="text-[13px] text-n-secondary">
           Rate routing decisions to improve the classifier. All training happens locally.
         </p>
       </div>
 
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-        <Card>
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-black/[0.04]">
-                <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6 w-24">Time</th>
-                <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6 w-24">Mode</th>
-                <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6">Prompt</th>
-                <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6 w-24">Tier</th>
-                <th className="text-left text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6">Model</th>
-                <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 px-6 w-24">Cost</th>
-                <th className="text-right text-[11px] font-medium text-[#9CA3AF] uppercase tracking-wider py-4 pl-4 pr-8 w-[280px]"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-black/[0.04]">
-              {visibleRequests.length === 0 ? (
-                <tr><td colSpan={7} className="py-16 text-center text-[14px] font-medium text-[#9CA3AF]">No pending or rated requests yet.</td></tr>
-              ) : (
-                <StaggerContainer as="tbody" className="contents">
-                  {visibleRequests.map((r) => {
-                    const fb = submitted[r.request_id] ?? storedFeedback(r);
-                    const isBusy = busy === r.request_id;
-                    const displayTier = normalizeTier(r.tier);
+      <div className="rounded-card border border-n-border bg-n-surface overflow-hidden">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-n-border">
+              <th className="label px-6 py-4 text-left w-24">TIME</th>
+              <th className="label px-6 py-4 text-left w-24">MODE</th>
+              <th className="label px-6 py-4 text-left">PROMPT</th>
+              <th className="label px-6 py-4 text-left w-24">TIER</th>
+              <th className="label px-6 py-4 text-left">MODEL</th>
+              <th className="label px-6 py-4 text-right w-24">COST</th>
+              <th className="label px-6 py-4 text-right pl-4 pr-8 w-[280px]"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRequests.length === 0 ? (
+              <tr><td colSpan={7} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet.</td></tr>
+            ) : (
+              visibleRequests.map((r) => {
+                const fb = submitted[r.request_id] ?? storedFeedback(r);
+                const isBusy = busy === r.request_id;
+                const displayTier = normalizeTier(r.tier);
 
-                    return (
-                      <StaggerItem as="tr" key={r.request_id} className="hover:bg-gray-50 transition-colors group">
-                        <td className="text-[12px] font-mono text-[#6B7280] group-hover:text-[#4B5563] transition-colors py-4 px-6">{fmtTime(r.timestamp)}</td>
-                        <td className="text-[12px] font-mono text-[#6B7280] group-hover:text-[#4B5563] transition-colors py-4 px-6">{r.mode || "auto"}</td>
-                        <td className="py-4 px-6">
-                          <div className="max-w-[300px] truncate text-[13px] font-medium text-[#4B5563] group-hover:text-[#111827] transition-colors" title={r.prompt_preview}>
-                            {r.prompt_preview || "—"}
-                          </div>
-                          {(r.constraint_tags?.length || r.hint_tags?.length || (r.answer_depth && r.answer_depth !== "standard")) ? (
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {r.answer_depth && r.answer_depth !== "standard" && (
-                                <span className="inline-flex items-center rounded-full bg-gray-50 px-2 py-0.5 text-[11px] font-medium text-[#6B7280] ring-1 ring-black/[0.04]">
-                                  {r.answer_depth.replace(/[-_]/g, " ")}
-                                </span>
-                              )}
-                              {r.constraint_tags?.map((tag) => (
-                                <span key={`${r.request_id}-${tag}`} className="inline-flex items-center rounded-full bg-gray-50 px-2 py-0.5 text-[11px] font-medium text-[#6B7280] ring-1 ring-black/[0.04]">
-                                  {tag.replace(/[-_]/g, " ")}
-                                </span>
-                              ))}
-                              {r.hint_tags?.map((tag) => (
-                                <span key={`${r.request_id}-${tag}`} className="inline-flex items-center rounded-full bg-gray-50 px-2 py-0.5 text-[11px] font-medium text-[#6B7280] ring-1 ring-black/[0.04]">
-                                  {tag.replace(/[-_]/g, " ")}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
-                        </td>
-                        <td className={`text-[12px] font-mono font-medium py-4 px-6 ${TIER_LABEL[displayTier] ?? "text-[#6B7280]"}`}>
-                          {displayTier}
-                        </td>
-                        <td className="font-mono text-[12px] text-[#6B7280] group-hover:text-[#111827] transition-colors py-4 px-6">{r.model.split("/").pop()}</td>
-                        <td className="text-right font-mono text-[12px] text-[#6B7280] group-hover:text-[#4B5563] transition-colors py-4 px-6">${r.cost.toFixed(4)}</td>
-                        <td className="text-right py-4 pl-4 pr-8">
-                          {fb ? (
-                            <motion.span 
-                              initial={{ opacity: 0, scale: 0.9 }}
-                              animate={{ opacity: 1, scale: 1 }}
-                              className={`text-[12px] font-mono font-medium ${feedbackTone(fb)}`} 
-                              title={fb.reason}
-                            >
-                              {feedbackLabel(fb)}
-                            </motion.span>
-                          ) : (
-                            <div className="flex justify-end gap-2">
-                              <motion.button
-                                whileHover={{ scale: 1.02 }}
-                                whileTap={{ scale: 0.98 }}
-                                disabled={isBusy}
-                                onClick={() => handle(r.request_id, "strong")}
-                                className="px-3 py-1.5 rounded-lg text-[12px] font-medium bg-white border border-black/[0.06] shadow-sm text-[#6B7280] hover:text-[#111827] hover:bg-gray-50 transition-colors disabled:opacity-40"
-                              >
-                                Cheaper
-                              </motion.button>
-                              <motion.button
-                                whileHover={{ scale: 1.02 }}
-                                whileTap={{ scale: 0.98 }}
-                                disabled={isBusy}
-                                onClick={() => handle(r.request_id, "ok")}
-                                className="px-3 py-1.5 rounded-lg text-[12px] font-medium bg-[#111827] shadow-sm text-white hover:bg-black transition-colors disabled:opacity-40"
-                              >
-                                Right
-                              </motion.button>
-                              <motion.button
-                                whileHover={{ scale: 1.02 }}
-                                whileTap={{ scale: 0.98 }}
-                                disabled={isBusy}
-                                onClick={() => handle(r.request_id, "weak")}
-                                className="px-3 py-1.5 rounded-lg text-[12px] font-medium bg-white border border-black/[0.06] shadow-sm text-[#6B7280] hover:text-[#111827] hover:bg-gray-50 transition-colors disabled:opacity-40"
-                              >
-                                Stronger
-                              </motion.button>
-                            </div>
+                return (
+                  <tr key={r.request_id} className="border-b border-n-border last:border-0 transition-colors hover:bg-n-raised">
+                    <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{fmtTime(r.timestamp)}</td>
+                    <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{r.mode || "auto"}</td>
+                    <td className="px-6 py-4">
+                      <div className="max-w-[300px] truncate text-[13px] text-n-primary" title={r.prompt_preview}>
+                        {r.prompt_preview || "\u2014"}
+                      </div>
+                      {(r.constraint_tags?.length || r.hint_tags?.length || (r.answer_depth && r.answer_depth !== "standard")) ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {r.answer_depth && r.answer_depth !== "standard" && (
+                            <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                              {r.answer_depth.replace(/[-_]/g, " ")}
+                            </span>
                           )}
-                        </td>
-                      </StaggerItem>
-                    );
-                  })}
-                </StaggerContainer>
-              )}
-            </tbody>
-          </table>
-        </Card>
-      </motion.div>
+                          {r.constraint_tags?.map((tag) => (
+                            <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                              {tag.replace(/[-_]/g, " ")}
+                            </span>
+                          ))}
+                          {r.hint_tags?.map((tag) => (
+                            <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                              {tag.replace(/[-_]/g, " ")}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className={`px-6 py-4 font-mono text-[12px] font-medium ${TIER_COLOR[displayTier] ?? "text-n-secondary"}`}>
+                      {displayTier}
+                    </td>
+                    <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{r.model.split("/").pop()}</td>
+                    <td className="px-6 py-4 text-right font-mono text-[12px] text-n-secondary">${r.cost.toFixed(4)}</td>
+                    <td className="py-4 pl-4 pr-8 text-right">
+                      {fb ? (
+                        <span
+                          className={`font-mono text-[12px] font-medium ${feedbackTone(fb)}`}
+                          title={fb.reason}
+                        >
+                          {feedbackLabel(fb)}
+                        </span>
+                      ) : (
+                        <div className="flex justify-end gap-2">
+                          <button
+                            disabled={isBusy}
+                            onClick={() => handle(r.request_id, "strong")}
+                            className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
+                          >
+                            CHEAPER
+                          </button>
+                          <button
+                            disabled={isBusy}
+                            onClick={() => handle(r.request_id, "ok")}
+                            className="rounded-pill bg-n-display px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
+                          >
+                            RIGHT
+                          </button>
+                          <button
+                            disabled={isBusy}
+                            onClick={() => handle(r.request_id, "weak")}
+                            className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
+                          >
+                            STRONGER
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

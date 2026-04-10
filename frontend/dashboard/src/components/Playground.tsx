@@ -54,7 +54,10 @@ export default function Playground() {
         if (!controller.signal.aborted) setLoading(false);
       }
     }, 300);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (abortRef.current) abortRef.current.abort();
+    };
   }, [prompt, riskTolerance]);
 
   useEffect(() => () => { abortRef.current?.abort(); }, []);

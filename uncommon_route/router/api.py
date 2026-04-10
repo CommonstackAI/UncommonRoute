@@ -75,6 +75,11 @@ def _ensure_v2_signals() -> None:
     _v2_initialized = True
     _v2_sig_a = MetadataSignal()
     _v2_sig_b = StructuralSignal()  # always loaded for shadow mode
+    # Auto-deploy seed index from package data if not in user data dir
+    try:
+        ensure_seed_index_deployed()
+    except Exception:
+        pass
     # Try to load embedding index
     try:
         from uncommon_route.paths import data_dir
@@ -349,3 +354,20 @@ def route(
         pass  # lifecycle not initialized yet (e.g. during tests)
 
     return decision
+
+
+def ensure_seed_index_deployed() -> None:
+    """Copy seed index from package data to user data dir if not already present."""
+    from uncommon_route.paths import data_dir
+    from pathlib import Path
+    import shutil
+
+    user_splits = data_dir() / "v2_splits"
+    pkg_splits = Path(__file__).resolve().parent.parent / "data" / "v2_splits"
+
+    for fname in ("seed_embeddings.npy", "seed_labels.json"):
+        user_file = user_splits / fname
+        pkg_file = pkg_splits / fname
+        if not user_file.exists() and pkg_file.exists():
+            user_splits.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pkg_file, user_file)

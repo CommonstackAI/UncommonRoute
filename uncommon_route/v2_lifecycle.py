@@ -35,6 +35,7 @@ class _RecentPrediction:
     signal_c_abstained: bool
 
 _recent_predictions: deque[tuple[str, _RecentPrediction]] = deque(maxlen=500)
+_pending_telemetry: dict[str, Any] = {}  # request_id → TelemetryRecord (Stage 1, awaiting outcome)
 
 # ─── Singletons ───
 _metrics: RoutingMetrics | None = None
@@ -189,7 +190,35 @@ def on_route_complete(
         signal_c_abstained=signal_c_tier is None,
     )))
 
-    # 5. Structured log
+    # 5. Telemetry (opt-in, pseudonymous)
+    try:
+        from uncommon_route import telemetry as _telem
+        if _telem.is_enabled():
+            import time
+            emb_list = None
+            if query_embedding is not None:
+                token_est = max(20, int(confidence * 100))  # rough proxy
+                emb_list = _telem.prepare_embedding(query_embedding, token_est)
+            rec = _telem.TelemetryRecord(
+                schema_version=1,
+                client_version="0.5.0",
+                platform=sys.platform if "sys" in dir() else __import__("sys").platform,
+                timestamp_day=time.strftime("%Y-%m-%d"),
+                predicted_tier=tier_id,
+                routed_model=model,
+                confidence=confidence,
+                routing_method=method,
+                message_count=0,  # not available here; filled by proxy if wired
+                has_tools=False,
+                tool_count=0,
+                embedding=emb_list,
+            )
+            # Stage 1 skeleton — outcome filled later by proxy
+            _pending_telemetry[request_id] = rec
+    except Exception:
+        pass
+
+    # 6. Structured log
     log_entry = RoutingLogEntry(
         request_id=request_id,
         signals={
@@ -254,6 +283,32 @@ def on_feedback(*, request_id: str, signal: str, routed_tier_v1: str) -> None:
             if rec.gold_tier is None:
                 rec.gold_tier = actual_tier
                 break
+
+
+def complete_telemetry(
+    request_id: str,
+    outcome: str = "success",
+    outcome_reason: str | None = None,
+    final_tier: int = -1,
+    final_model: str = "",
+    cascaded: bool = False,
+    cascade_from_tier: int | None = None,
+) -> None:
+    """Stage 2: fill outcome fields and buffer the telemetry record."""
+    rec = _pending_telemetry.pop(request_id, None)
+    if rec is None:
+        return
+    try:
+        from uncommon_route import telemetry as _telem
+        rec.outcome = outcome
+        rec.outcome_reason = outcome_reason
+        rec.final_tier = final_tier
+        rec.final_model = final_model
+        rec.cascaded = cascaded
+        rec.cascade_from_tier = cascade_from_tier
+        _telem.buffer_record(rec)
+    except Exception:
+        pass
 
 
 def get_metrics() -> dict[str, Any] | None:

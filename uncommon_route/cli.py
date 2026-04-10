@@ -64,6 +64,7 @@ Commands:
   config <sub>                      Routing config (show|set-default-mode|set-tier|reset-tier|reset)
   stats [sub]                       Routing analytics (summary|history|reset)
   explain <prompt>                  Show v2 signal breakdown for a prompt
+  telemetry [sub]                   Anonymous data sharing (status|enable|disable|show-sent|flush)
   --version                         Show version
 
 Route options:
@@ -1168,6 +1169,39 @@ def _setup_openai(args: list[str]) -> None:
 
 
 
+def _cmd_telemetry(args: list[str]) -> None:
+    """Manage telemetry: status, enable, disable, show-sent, flush."""
+    from uncommon_route.telemetry import enable, disable, status, flush, get_sent_records
+    sub = args[0] if args else "status"
+    if sub == "status":
+        s = status()
+        state = "enabled" if s["enabled"] else "disabled"
+        print(f"  Telemetry: {state}")
+        print(f"  Pending records: {s['pending_records']}")
+        print(f"  Total sent: {s['total_sent']}")
+    elif sub == "enable":
+        enable()
+        print("  Telemetry enabled.")
+    elif sub == "disable":
+        disable()
+        print("  Telemetry disabled. Pending data discarded.")
+    elif sub == "show-sent":
+        records = get_sent_records()
+        if not records:
+            print("  No records sent yet.")
+        else:
+            for r in records[-20:]:
+                print(json.dumps(r, ensure_ascii=False))
+            if len(records) > 20:
+                print(f"  ... ({len(records)} total, showing last 20)")
+    elif sub == "flush":
+        count = flush()
+        print(f"  Flushed {count} records.")
+    else:
+        print(f"  Unknown telemetry command: {sub}")
+        print("  Usage: uncommon-route telemetry [status|enable|disable|show-sent|flush]")
+
+
 def _cmd_explain(args: list[str]) -> None:
     """Show v2 signal breakdown for a prompt — uses the SAME path as production routing."""
     prompt = " ".join(args) if args else ""
@@ -1225,6 +1259,7 @@ def main() -> None:
         "stats": _cmd_stats,
         "feedback": _cmd_feedback,
         "explain": _cmd_explain,
+        "telemetry": _cmd_telemetry,
     }
 
     handler = commands.get(cmd)

@@ -1,5 +1,7 @@
-import { motion } from "framer-motion";
-import { cn } from "../lib/utils";
+/**
+ * Nothing Design: Sidebar navigation
+ * Space Mono ALL CAPS labels, dot indicator for active, OLED black
+ */
 
 interface Props {
   current: string;
@@ -11,46 +13,44 @@ interface Props {
 }
 
 const NAV = [
-  { id: "home", label: "Home" },
-  { id: "playground", label: "Playground" },
-  { id: "routing", label: "Routing" },
-  { id: "models", label: "Models" },
-  { id: "connections", label: "Connections" },
-  { id: "activity", label: "Activity" },
-  { id: "budget", label: "Budget" },
-  { id: "explain", label: "Explain" },
-  { id: "feedback", label: "Feedback" },
+  { id: "home", label: "HOME" },
+  { id: "playground", label: "PLAYGROUND" },
+  { id: "explain", label: "EXPLAIN" },
+  { id: "routing", label: "ROUTING" },
+  { id: "models", label: "MODELS" },
+  { id: "activity", label: "ACTIVITY" },
+  { id: "connections", label: "CONNECTIONS" },
+  { id: "budget", label: "BUDGET" },
+  { id: "feedback", label: "FEEDBACK" },
 ];
 
 export default function Sidebar({ current, onChange, upstream, isUp, version, feedbackPending }: Props) {
   return (
-    <aside className="fixed top-0 left-0 h-full w-[240px] bg-[#F9FAFB] border-r border-black/[0.04] flex flex-col z-50">
-      <div className="px-6 h-16 flex items-center">
-        <span className="text-[15px] font-semibold text-[#111827] tracking-tight">UncommonRoute</span>
+    <aside className="fixed top-0 left-0 h-full w-[200px] bg-n-black border-r border-n-border flex flex-col z-50">
+      {/* Logo — Doto hero + mono label */}
+      <div className="px-6 h-16 flex items-center gap-2">
+        <span className="font-display text-[20px] text-n-display tracking-tight">UR</span>
+        <span className="font-mono text-[10px] text-n-disabled tracking-[0.1em]">ROUTE</span>
       </div>
 
-      <nav className="flex-1 py-3 px-3 flex flex-col gap-1">
+      {/* Nav items */}
+      <nav className="flex-1 py-4 px-3 flex flex-col gap-px">
         {NAV.map((item) => {
-          const isActive = current === item.id;
+          const active = current === item.id;
           return (
             <button
               key={item.id}
               onClick={() => onChange(item.id)}
-              className={cn(
-                "relative w-full text-left px-3 py-2 rounded-xl text-[13px] font-medium transition-colors flex items-center justify-between",
-                isActive ? "text-[#111827]" : "text-[#6B7280] hover:text-[#111827] hover:bg-black/[0.03]"
-              )}
+              className={`relative w-full text-left px-4 py-2.5 font-mono text-[11px] tracking-[0.08em] transition-colors duration-150 ${
+                active ? "text-n-display" : "text-n-disabled hover:text-n-secondary"
+              }`}
             >
-              {isActive && (
-                <motion.div
-                  layoutId="sidebar-active"
-                  className="absolute inset-0 bg-white shadow-sm ring-1 ring-black/[0.04] rounded-xl"
-                  transition={{ type: "spring", stiffness: 500, damping: 35 }}
-                />
+              {active && (
+                <span className="absolute left-1 top-1/2 -translate-y-1/2 w-1 h-1 rounded-full bg-n-accent" />
               )}
-              <span className="relative z-10">{item.label}</span>
+              {item.label}
               {item.id === "feedback" && feedbackPending > 0 && (
-                <span className="relative z-10 text-[11px] font-semibold bg-indigo-500 text-white rounded-full h-5 min-w-5 flex items-center justify-center px-1.5 shadow-sm">
+                <span className="ml-2 font-mono text-[9px] text-n-accent">
                   {feedbackPending}
                 </span>
               )}
@@ -59,12 +59,15 @@ export default function Sidebar({ current, onChange, upstream, isUp, version, fe
         })}
       </nav>
 
-      <div className="px-6 py-6">
-        <div className="flex items-center gap-2 text-[12px] font-medium text-[#9CA3AF]">
-          <div className={cn("h-2 w-2 rounded-full", isUp ? "bg-emerald-500" : "bg-gray-300")} />
-          <span className="truncate">{upstream || "No upstream"}</span>
+      {/* Status */}
+      <div className="px-6 py-5 border-t border-n-border">
+        <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.06em] text-n-disabled">
+          <span className={`h-1.5 w-1.5 rounded-full ${isUp ? "bg-n-success" : "bg-n-disabled"}`} />
+          <span className="truncate">{(upstream || "NO UPSTREAM").toUpperCase()}</span>
         </div>
-        <div className="text-[11px] font-mono font-medium text-[#D1D5DB] mt-1.5">v{version}</div>
+        <div className="mt-2 font-mono text-[10px] tracking-[0.1em] text-n-border-vis">
+          V{version}
+        </div>
       </div>
     </aside>
   );

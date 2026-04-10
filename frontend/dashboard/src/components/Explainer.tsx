@@ -1,7 +1,14 @@
+/**
+ * Nothing Design: Route Explainer
+ * Left: request list as data rows. Right: signal instrument panel.
+ */
+
 import { useState, useEffect } from "react";
-import { TierBadge } from "./TierBadge";
-import { SignalCard } from "./SignalCard";
-import { CostComparison } from "./CostComparison";
+
+const TIER_NAMES: Record<string, string> = {
+  SIMPLE: "LOW", MEDIUM: "MID", COMPLEX: "HIGH", REASONING: "HIGH",
+  low: "LOW", mid: "MID", mid_high: "MID_HIGH", high: "HIGH",
+};
 
 interface RecentReq {
   request_id?: string;
@@ -11,17 +18,6 @@ interface RecentReq {
   cost?: number;
   raw_confidence?: number;
   method?: string;
-  complexity?: number;
-}
-
-// v1 returns uppercase tiers (SIMPLE/MEDIUM/COMPLEX), normalize for TierBadge
-function normalizeTier(tier?: string): string {
-  if (!tier) return "mid";
-  const upper = tier.toUpperCase();
-  if (upper === "SIMPLE") return "low";
-  if (upper === "MEDIUM") return "mid";
-  if (upper === "COMPLEX" || upper === "REASONING") return "high";
-  return tier.toLowerCase();
 }
 
 export default function Explainer() {
@@ -31,75 +27,135 @@ export default function Explainer() {
 
   useEffect(() => {
     fetch("/v1/stats/recent?limit=30")
-      .then(r => {
-        if (!r.ok) throw new Error("Failed to fetch");
-        return r.json();
-      })
-      .then(data => {
-        // /v1/stats/recent returns a plain array, not an object
-        const arr = Array.isArray(data) ? data : [];
-        setRecent(arr);
-      })
-      .catch(() => {
-        setError("Could not load recent requests. Is the proxy running?");
-        setRecent([]);
-      });
+      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(data => setRecent(Array.isArray(data) ? data : []))
+      .catch(() => { setError("[ERROR: PROXY UNREACHABLE]"); setRecent([]); });
   }, []);
+
+  const normTier = (t?: string) => TIER_NAMES[t || ""] || (t || "—").toUpperCase();
 
   return (
     <div>
-      <h1 className="text-[22px] font-semibold text-[#111827] mb-1">Route Explainer</h1>
-      <p className="text-[13px] text-[#6B7280] mb-6">Understand why each request was routed to a specific model.</p>
+      <div className="mb-8">
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN</h1>
+        <p className="mt-2 text-[14px] text-n-secondary">
+          Select a request to see why it was routed where it was.
+        </p>
+      </div>
 
-      {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 mb-4">{error}</div>}
+      {error && <div className="font-mono text-[12px] text-n-accent mb-4">{error}</div>}
 
-      <div className="grid grid-cols-3 gap-6">
-        <div className="col-span-1 space-y-2 max-h-[600px] overflow-y-auto">
-          <h2 className="text-[13px] font-semibold text-[#6B7280] mb-2">Recent Requests</h2>
-          {recent.length === 0 && !error && <p className="text-[13px] text-[#9CA3AF]">No requests yet. Send some requests through the proxy first.</p>}
-          {recent.map((req, i) => (
-            <button key={req.request_id || i} onClick={() => setSelected(req)}
-              className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                selected === req ? "border-blue-500 bg-blue-50" : "border-gray-200 hover:border-gray-300"}`}>
-              <div className="flex items-center justify-between mb-1">
-                <TierBadge tier={normalizeTier(req.tier)} size="sm" />
-                <span className="text-[11px] text-[#9CA3AF]">{req.model || ""}</span>
-              </div>
-              <p className="text-[13px] text-[#374151] truncate">{req.prompt_preview || "(no preview)"}</p>
-            </button>
-          ))}
-        </div>
-
-        <div className="col-span-2">
-          {selected ? (
-            <div className="space-y-4">
-              <div className="p-6 bg-white rounded-xl border border-gray-200 text-center">
-                <p className="text-[15px] text-[#374151]">
-                  Routed to <span className="font-bold text-[#111827]">{selected.model || "unknown"}</span>
-                </p>
-                <div className="flex items-center justify-center gap-4 mt-3">
-                  <TierBadge tier={normalizeTier(selected.tier)} size="lg" />
-                  <span className="text-2xl font-bold text-[#111827]">
-                    {selected.raw_confidence != null ? `${Math.round(selected.raw_confidence * 100)}%` : "\u2014"}
+      <div className="grid grid-cols-3 gap-8">
+        {/* Left: Request list */}
+        <div className="col-span-1 max-h-[600px] overflow-y-auto">
+          <div className="label mb-3">RECENT REQUESTS</div>
+          {recent.length === 0 && !error && (
+            <div className="font-mono text-[11px] text-n-disabled tracking-[0.06em]">
+              [NO REQUESTS YET]
+            </div>
+          )}
+          <div className="border-t border-n-border">
+            {recent.map((req, i) => (
+              <button
+                key={req.request_id || i}
+                onClick={() => setSelected(req)}
+                className={`w-full text-left py-3 px-2 border-b border-n-border transition-colors duration-150 ${
+                  selected === req ? "bg-n-surface" : "hover:bg-n-surface/50"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-[10px] tracking-[0.06em] text-n-secondary">
+                    {normTier(req.tier)}
+                  </span>
+                  <span className="font-mono text-[10px] text-n-disabled truncate ml-2">
+                    {(req.model || "").split("/").pop()}
                   </span>
                 </div>
-                {selected.method && (
-                  <p className="text-[13px] text-[#6B7280] mt-1">{selected.method} routing</p>
-                )}
+                <div className="text-[12px] text-n-primary truncate">
+                  {req.prompt_preview || "[no preview]"}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Right: Explanation */}
+        <div className="col-span-2">
+          {selected ? (
+            <div>
+              {/* Verdict */}
+              <div className="mb-8">
+                <div className="label mb-2">ROUTED TO</div>
+                <div className="font-display text-[48px] text-n-display leading-none tracking-tight">
+                  {(selected.model || "").split("/").pop() || "—"}
+                </div>
+                <div className="mt-3 flex items-center gap-6">
+                  <div>
+                    <div className="label mb-1">TIER</div>
+                    <div className="font-mono text-[16px] text-n-display">{normTier(selected.tier)}</div>
+                  </div>
+                  <div>
+                    <div className="label mb-1">CONFIDENCE</div>
+                    <div className="font-mono text-[16px] text-n-display">
+                      {selected.raw_confidence != null
+                        ? `${Math.round(selected.raw_confidence * 100)}%`
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="label mb-1">METHOD</div>
+                    <div className="font-mono text-[16px] text-n-secondary">
+                      {(selected.method || "pool").toUpperCase()}
+                    </div>
+                  </div>
+                </div>
               </div>
-              <CostComparison actual={selected.cost || 0.001} baseline={0.02} />
-              <div className="grid grid-cols-3 gap-3">
-                <SignalCard name="Metadata" tier={0} tierName="low" confidence={0.85} reasoning="Based on conversation metadata" />
-                <SignalCard name="Structural" tier={1} tierName="mid" confidence={0.70} reasoning="Text structure analysis" shadow />
-                <SignalCard name="Embedding" tier={0} tierName="low" confidence={0.80} reasoning="Similar to known low-tier tasks" />
+
+              {/* Cost */}
+              <div className="flex gap-6 mb-8 pb-6 border-b border-n-border">
+                <div>
+                  <div className="label mb-1">COST</div>
+                  <div className="font-mono text-[20px] text-n-success">
+                    ${(selected.cost ?? 0.001).toFixed(4)}
+                  </div>
+                </div>
+                <div>
+                  <div className="label mb-1">VS PREMIUM</div>
+                  <div className="font-mono text-[20px] text-n-disabled line-through">$0.0200</div>
+                </div>
               </div>
-              <p className="text-[11px] text-[#9CA3AF] text-center">
-                Signal breakdown shows placeholder data. Per-request signal storage coming in a future update.
-              </p>
+
+              {/* Signal breakdown — placeholder */}
+              <div className="label mb-3">SIGNAL BREAKDOWN</div>
+              <div className="border-t border-n-border">
+                {[
+                  { name: "METADATA", tier: "LOW", conf: "85%", shadow: false },
+                  { name: "STRUCTURAL", tier: "MID", conf: "70%", shadow: true },
+                  { name: "EMBEDDING", tier: "LOW", conf: "80%", shadow: false },
+                ].map((s) => (
+                  <div key={s.name} className="flex items-center justify-between py-2.5 border-b border-n-border">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[11px] tracking-[0.06em] text-n-secondary w-24">{s.name}</span>
+                      {s.shadow && (
+                        <span className="font-mono text-[9px] text-n-disabled border border-n-border px-1.5 py-0.5">SHADOW</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span className="font-mono text-[12px] text-n-display">{s.tier}</span>
+                      <span className="font-mono text-[11px] text-n-secondary">{s.conf}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 font-mono text-[10px] text-n-disabled tracking-[0.04em]">
+                SIGNAL DATA IS PLACEHOLDER. PER-REQUEST STORAGE COMING IN A FUTURE UPDATE.
+              </div>
             </div>
           ) : (
-            <div className="flex items-center justify-center h-96 text-[#9CA3AF] border border-dashed border-gray-200 rounded-xl text-[13px]">
-              Select a request to see its routing explanation
+            <div className="flex items-center justify-center h-96 border border-dashed border-n-border rounded-compact">
+              <span className="font-mono text-[11px] text-n-disabled tracking-[0.08em]">
+                [SELECT A REQUEST]
+              </span>
             </div>
           )}
         </div>

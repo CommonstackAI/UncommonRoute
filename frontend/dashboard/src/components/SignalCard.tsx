@@ -1,4 +1,8 @@
-import { TierBadge } from "./TierBadge";
+/**
+ * Nothing Design: Signal card — instrument readout row
+ */
+
+const TIER_NAMES = ["LOW", "MID", "MID_HIGH", "HIGH"];
 
 interface SignalCardProps {
   name: string;
@@ -9,23 +13,30 @@ interface SignalCardProps {
   shadow?: boolean;
 }
 
-export function SignalCard({ name, tier, tierName, confidence, reasoning, shadow }: SignalCardProps) {
+export function SignalCard({ name, tier, confidence, reasoning, shadow }: SignalCardProps) {
   const pct = Math.round(confidence * 100);
   return (
-    <div className={`rounded-xl border p-4 ${shadow ? "border-dashed border-gray-300 bg-gray-50" : "border-gray-200 bg-white"}`}>
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="font-semibold text-sm text-gray-700">{name}</h3>
-        {shadow && <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">shadow</span>}
+    <div className={`py-3 border-b ${shadow ? "border-dashed border-n-border" : "border-n-border"}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[11px] tracking-[0.06em] text-n-secondary uppercase">{name}</span>
+          {shadow && (
+            <span className="font-mono text-[9px] text-n-disabled border border-n-border px-1.5 py-0.5">SHADOW</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[12px] text-n-display">
+            {tier !== null ? TIER_NAMES[tier] : "ABSTAIN"}
+          </span>
+          <span className="font-mono text-[11px] text-n-secondary">{pct}%</span>
+        </div>
       </div>
-      <div className="flex items-center gap-2 mb-2">
-        {tier !== null ? <TierBadge tier={tierName} size="sm" /> : <span className="text-gray-400 text-sm">abstained</span>}
-        <span className="text-sm text-gray-500">{pct}%</span>
+      <div className="mt-2 flex gap-px h-[3px]" style={{ maxWidth: 200 }}>
+        {Array.from({ length: 10 }).map((_, i) => (
+          <div key={i} className={`flex-1 ${i < Math.round(confidence * 10) ? "bg-n-primary" : "bg-n-border"}`} />
+        ))}
       </div>
-      <div className="w-full bg-gray-100 rounded-full h-2 mb-2">
-        <div className="h-2 rounded-full transition-all duration-500"
-          style={{ width: `${pct}%`, backgroundColor: confidence >= 0.7 ? "#22c55e" : confidence >= 0.4 ? "#eab308" : "#ef4444" }} />
-      </div>
-      {reasoning && <p className="text-xs text-gray-500">{reasoning}</p>}
+      {reasoning && <div className="mt-1.5 font-mono text-[10px] text-n-disabled">{reasoning}</div>}
     </div>
   );
 }

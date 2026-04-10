@@ -1,3 +1,7 @@
+/**
+ * Nothing Design: Cost comparison — stat row with savings percentage
+ */
+
 interface CostComparisonProps {
   actual: number;
   baseline: number;
@@ -7,19 +11,18 @@ export function CostComparison({ actual, baseline }: CostComparisonProps) {
   const savings = baseline - actual;
   const ratio = baseline > 0 ? Math.round((savings / baseline) * 100) : 0;
   return (
-    <div className="flex items-center gap-4 p-3 bg-green-50 rounded-lg border border-green-200">
-      <div className="text-center">
-        <div className="text-lg font-bold text-green-700">${actual.toFixed(4)}</div>
-        <div className="text-xs text-green-600">actual</div>
+    <div className="flex items-center gap-6 py-4 border-b border-n-border">
+      <div>
+        <div className="label mb-1">ACTUAL</div>
+        <div className="font-mono text-[18px] text-n-success">${actual.toFixed(4)}</div>
       </div>
-      <div className="text-gray-400">vs</div>
-      <div className="text-center">
-        <div className="text-lg font-bold text-gray-400 line-through">${baseline.toFixed(4)}</div>
-        <div className="text-xs text-gray-500">highest tier</div>
+      <div>
+        <div className="label mb-1">BASELINE</div>
+        <div className="font-mono text-[18px] text-n-disabled line-through">${baseline.toFixed(4)}</div>
       </div>
-      <div className="ml-auto text-center">
-        <div className="text-2xl font-bold text-green-600">{ratio}%</div>
-        <div className="text-xs text-green-600">saved</div>
+      <div>
+        <div className="label mb-1">SAVED</div>
+        <div className="font-mono text-[18px] text-n-success">{ratio}%</div>
       </div>
     </div>
   );

@@ -1,30 +1,30 @@
-const TIER_COLORS: Record<string, string> = {
-  low: "bg-green-100 text-green-800 border-green-300",
-  mid: "bg-yellow-100 text-yellow-800 border-yellow-300",
-  mid_high: "bg-orange-100 text-orange-800 border-orange-300",
-  high: "bg-red-100 text-red-800 border-red-300",
+/**
+ * Nothing Design: Tier badge
+ * Technical tag — border only, Space Mono ALL CAPS, 4px radius
+ */
+
+const TIER_NORMALIZE: Record<string, string> = {
+  SIMPLE: "LOW", MEDIUM: "MID", COMPLEX: "HIGH", REASONING: "HIGH",
+  low: "LOW", mid: "MID", mid_high: "MID_HIGH", high: "HIGH",
 };
 
-// Map v1 uppercase tiers to v2 lowercase for color lookup
-const TIER_NORMALIZE: Record<string, string> = {
-  SIMPLE: "low",
-  MEDIUM: "mid",
-  COMPLEX: "high",
-  REASONING: "high",
+const TIER_STATUS: Record<string, string> = {
+  LOW: "text-n-success border-n-success/40",
+  MID: "text-n-warning border-n-warning/40",
+  MID_HIGH: "text-n-warning border-n-warning/40",
+  HIGH: "text-n-accent border-n-accent/40",
 };
 
 interface TierBadgeProps {
   tier: string;
-  size?: "sm" | "md" | "lg";
 }
 
-export function TierBadge({ tier, size = "md" }: TierBadgeProps) {
-  const normalized = TIER_NORMALIZE[tier] || tier.toLowerCase();
-  const colors = TIER_COLORS[normalized] || TIER_COLORS.mid;
-  const sizeClasses = { sm: "px-2 py-0.5 text-xs", md: "px-3 py-1 text-sm", lg: "px-4 py-1.5 text-base font-semibold" };
+export function TierBadge({ tier }: TierBadgeProps) {
+  const normalized = TIER_NORMALIZE[tier] || tier.toUpperCase();
+  const style = TIER_STATUS[normalized] || "text-n-secondary border-n-border-vis";
   return (
-    <span className={`inline-flex items-center rounded-full border ${colors} ${sizeClasses[size]}`}>
-      {normalized.replace("_", " ")}
+    <span className={`inline-flex items-center font-mono text-[10px] tracking-[0.06em] border rounded-technical px-2 py-0.5 ${style}`}>
+      {normalized}
     </span>
   );
 }

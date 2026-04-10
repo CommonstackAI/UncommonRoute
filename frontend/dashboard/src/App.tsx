@@ -1,5 +1,9 @@
+/**
+ * Nothing Design: App shell
+ * OLED black, 200px sidebar, no animated transitions (percussive, not fluid)
+ */
+
 import { useCallback, useEffect, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import {
   fetchHealth,
   fetchStats,
@@ -22,12 +26,6 @@ import Playground from "./components/Playground";
 import Explainer from "./components/Explainer";
 
 type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain";
-
-const pageVariants = {
-  initial: { opacity: 0, y: 10 },
-  animate: { opacity: 1, y: 0, transition: { duration: 0.3, ease: "easeOut" as const } },
-  exit: { opacity: 0, transition: { duration: 0.15 } },
-};
 
 export default function App() {
   const [page, setPage] = useState<Page>("home");
@@ -60,14 +58,16 @@ export default function App() {
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="h-3 w-3 rounded-full bg-white/10 animate-pulse" />
+      <div className="flex min-h-screen items-center justify-center bg-n-black">
+        <div className="font-mono text-[11px] tracking-[0.1em] text-n-disabled animate-pulse">
+          [CONNECTING...]
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen bg-n-black">
       <Sidebar
         current={page}
         onChange={(p) => setPage(p as Page)}
@@ -77,27 +77,17 @@ export default function App() {
         feedbackPending={feedbackPending}
       />
 
-      <main className="ml-[240px] min-h-screen relative">
-        <div className="px-10 py-10 max-w-[1200px] mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={page}
-              variants={pageVariants}
-              initial="initial"
-              animate="animate"
-              exit="exit"
-            >
-              {page === "home" && <Home stats={stats} health={health} />}
-              {page === "routing" && <Routing onRefresh={refresh} />}
-              {page === "activity" && <Activity stats={stats} />}
-              {page === "models" && <Models mapping={mapping} />}
-              {page === "connections" && <Connections initialConnection={health?.connections ?? null} onRefresh={refresh} />}
-              {page === "budget" && <SpendPanel spend={spend} onRefresh={refresh} />}
-              {page === "playground" && <Playground />}
-              {page === "explain" && <Explainer />}
-              {page === "feedback" && <Feedback />}
-            </motion.div>
-          </AnimatePresence>
+      <main className="ml-[200px] min-h-screen">
+        <div className="px-8 py-8 max-w-[1100px] mx-auto">
+          {page === "home" && <Home stats={stats} health={health} />}
+          {page === "playground" && <Playground />}
+          {page === "explain" && <Explainer />}
+          {page === "routing" && <Routing onRefresh={refresh} />}
+          {page === "activity" && <Activity stats={stats} />}
+          {page === "models" && <Models mapping={mapping} />}
+          {page === "connections" && <Connections initialConnection={health?.connections ?? null} onRefresh={refresh} />}
+          {page === "budget" && <SpendPanel spend={spend} onRefresh={refresh} />}
+          {page === "feedback" && <Feedback />}
         </div>
       </main>
     </div>

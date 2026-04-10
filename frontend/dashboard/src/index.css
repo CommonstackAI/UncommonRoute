@@ -1,35 +1,98 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+/* ─── Nothing Design System: Global Tokens ─── */
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Dark mode (default — OLED black, instrument panel) */
+  --black: #000000;
+  --surface: #111111;
+  --surface-raised: #1A1A1A;
+  --border: #222222;
+  --border-visible: #333333;
+  --text-disabled: #666666;
+  --text-secondary: #999999;
+  --text-primary: #E8E8E8;
+  --text-display: #FFFFFF;
+
+  --accent: #D71921;
+  --accent-subtle: rgba(215, 25, 33, 0.15);
+  --success: #4A9E5C;
+  --warning: #D4A843;
+  --error: #D71921;
+  --interactive: #5B9BF6;
+}
+
 body {
-  background-color: #F9FAFB;
-  color: #111827;
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  font-size: 14px;
+  background-color: var(--black);
+  color: var(--text-primary);
+  font-family: "Space Grotesk", "DM Sans", system-ui, sans-serif;
+  font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-::selection {
-  background: rgba(99, 102, 241, 0.2);
-  color: #111827;
+/* ─── Typography helpers ─── */
+
+.font-display { font-family: "Doto", "Space Mono", monospace; }
+.font-body    { font-family: "Space Grotesk", "DM Sans", system-ui, sans-serif; }
+.font-data    { font-family: "Space Mono", "JetBrains Mono", monospace; }
+
+.label {
+  font-family: "Space Mono", monospace;
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* ─── Dot-matrix motif ─── */
+
+.dot-grid {
+  background-image: radial-gradient(circle, var(--border-visible) 1px, transparent 1px);
+  background-size: 16px 16px;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+
+.dot-grid-subtle {
+  background-image: radial-gradient(circle, var(--border) 0.5px, transparent 0.5px);
+  background-size: 12px 12px;
 }
-::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.1);
-  border-radius: 10px;
+
+/* ─── Scrollbar (industrial minimal) ─── */
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-visible); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-disabled); }
+
+/* ─── Selection ─── */
+
+::selection {
+  background: rgba(215, 25, 33, 0.2);
+  color: var(--text-display);
 }
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.2);
+
+/* ─── Segmented progress bar (Nothing signature) ─── */
+
+.segmented-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
 }
+
+.segmented-bar .segment {
+  flex: 1;
+  background: var(--border);
+  transition: background 200ms ease-out;
+}
+
+.segmented-bar .segment.filled {
+  background: var(--text-display);
+}
+
+.segmented-bar .segment.success { background: var(--success); }
+.segmented-bar .segment.warning { background: var(--warning); }
+.segmented-bar .segment.accent  { background: var(--accent); }

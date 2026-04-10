@@ -3,7 +3,7 @@ name = "uncommon-route"
 version = "0.4.1"
 description = "Local LLM router that cuts premium-model spend with adaptive 3-tier routing, OpenAI + Anthropic compatible"
 requires-python = ">=3.11"
-license = "LicenseRef-UncommonRoute-Modified-MIT"
+license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
 authors = [

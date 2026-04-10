@@ -18,7 +18,7 @@ UncommonRoute measures this, then fixes it — automatically.
 <td align="center"><h3>77%</h3><sub>cost savings (benchmarked)</sub></td>
 <td align="center"><h3>90.3%</h3><sub>tasks completed successfully</sub></td>
 <td align="center"><h3><10ms</h3><sub>routing overhead</sub></td>
-<td align="center"><h3>104</h3><sub>tests passing</sub></td>
+<td align="center"><h3>407</h3><sub>tests passing</sub></td>
 </tr>
 </table>
 
@@ -36,8 +36,7 @@ Built for <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Cursor</
 </p>
 
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>&nbsp;
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-Modified_MIT-22c55e?style=for-the-badge" alt="Modified MIT"></a>&nbsp;
-<a href="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml"><img src="https://github.com/CommonstackAI/UncommonRoute/actions/workflows/ci.yml/badge.svg" alt="CI"></a>&nbsp;
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge" alt="Modified MIT"></a>&nbsp;
 <a href="#2-minute-setup"><img src="https://img.shields.io/badge/Claude_Code-Ready-f97316?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>&nbsp;
 <a href="#2-minute-setup"><img src="https://img.shields.io/badge/Codex-Ready-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex"></a>&nbsp;
 <a href="#2-minute-setup"><img src="https://img.shields.io/badge/Cursor-Compatible-007acc?style=for-the-badge&logo=visual-studio-code&logoColor=white" alt="Cursor"></a>&nbsp;
@@ -178,7 +177,7 @@ Point your client at the proxy — one line change:
 |---|---|
 | **Codex / Cursor / OpenAI SDK** | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
 | **Claude Code** | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
-| **OpenClaw** | Plugin — see [OpenClaw integration](#openclaw-integration) |
+| **OpenClaw** | Plugin — see [openclaw.ai](https://openclaw.ai) |
 
 Done. Your existing workflow is already saving money.
 
@@ -317,7 +316,7 @@ print(decision.confidence)  # 0.87
 git clone https://github.com/CommonstackAI/UncommonRoute.git
 cd UncommonRoute
 pip install -e ".[dev]"
-python -m pytest tests -v  # 104 tests passing
+python -m pytest tests -v  # 407 tests passing
 ```
 
 ---

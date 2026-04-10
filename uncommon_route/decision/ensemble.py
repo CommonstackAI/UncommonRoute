@@ -42,7 +42,9 @@ class Ensemble:
         for vote, weight in zip(votes, self._weights):
             if vote.tier_id is None:
                 continue
-            w = vote.confidence * weight
+            # Adaptive weighting: confidence² amplifies high-confidence signals
+            # A signal at 0.9 confidence gets 0.81 weight vs 0.49 at 0.7 (LENS 2025)
+            w = vote.confidence * vote.confidence * weight
             tier_scores[vote.tier_id] += w
             total_weight += w
 

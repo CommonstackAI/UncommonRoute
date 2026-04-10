@@ -1,9 +1,15 @@
-"""Signal C: embedding KNN against labeled seed examples."""
+"""Signal C: embedding-based tier prediction.
+
+Uses frozen bge-small embeddings with either:
+  1. A trained classifier (logistic regression) — if embedding_classifier.pkl exists
+  2. KNN fallback — distance-weighted vote of K nearest neighbors
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import pickle
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -38,16 +44,37 @@ class EmbeddingSignal:
         index_path: Path | None = None,
         labels_path: Path | None = None,
         model_name: str | None = "BAAI/bge-small-en-v1.5",
+        classifier_path: Path | None = None,
     ):
         self._embeddings: np.ndarray | None = None
         self._labels: list[int] | None = None
         self._embed_fn: Callable[[str], np.ndarray] | None = None
+        self._classifier: Any = None  # sklearn classifier (optional)
 
         if index_path and Path(index_path).exists() and labels_path and Path(labels_path).exists():
             self._embeddings = np.load(index_path)
             with open(labels_path, encoding="utf-8") as f:
                 self._labels = json.load(f)
             logger.info(f"Loaded embedding index: {len(self._labels)} vectors")
+
+        # Try to load trained classifier
+        if classifier_path and Path(classifier_path).exists():
+            try:
+                with open(classifier_path, "rb") as f:
+                    self._classifier = pickle.load(f)
+                logger.info("Loaded trained embedding classifier from %s", classifier_path)
+            except Exception as e:
+                logger.warning("Failed to load classifier: %s — falling back to KNN", e)
+        elif index_path:
+            # Auto-detect classifier next to the index
+            auto_clf = Path(index_path).parent / "embedding_classifier.pkl"
+            if auto_clf.exists():
+                try:
+                    with open(auto_clf, "rb") as f:
+                        self._classifier = pickle.load(f)
+                    logger.info("Auto-loaded embedding classifier from %s", auto_clf)
+                except Exception:
+                    pass
 
         if model_name:
             try:
@@ -60,7 +87,7 @@ class EmbeddingSignal:
                 logger.warning(f"Failed to load embedding model {model_name}: {e}")
 
     def predict(self, row: dict[str, Any]) -> TierVote:
-        if self._embeddings is None or self._labels is None or self._embed_fn is None:
+        if self._embed_fn is None:
             return TierVote(tier_id=None, confidence=0.0)
 
         text = _extract_last_user_message(row.get("messages", []))
@@ -68,6 +95,29 @@ class EmbeddingSignal:
             return TierVote(tier_id=None, confidence=0.0)
 
         query_vec = self._embed_fn(text)
+
+        # Use trained classifier if available
+        if self._classifier is not None:
+            return self._predict_classifier(query_vec)
+
+        # Fallback to KNN
+        if self._embeddings is None or self._labels is None:
+            return TierVote(tier_id=None, confidence=0.0)
+        return self._predict_knn(query_vec)
+
+    def _predict_classifier(self, query_vec: np.ndarray) -> TierVote:
+        """Predict using trained logistic regression on frozen embedding."""
+        vec = query_vec.reshape(1, -1)
+        pred = int(self._classifier.predict(vec)[0])
+        proba = self._classifier.predict_proba(vec)[0]
+        confidence = float(proba[pred])
+
+        if confidence < MIN_CONFIDENCE_TO_VOTE:
+            return TierVote(tier_id=None, confidence=confidence)
+        return TierVote(tier_id=pred, confidence=confidence)
+
+    def _predict_knn(self, query_vec: np.ndarray) -> TierVote:
+        """Predict using KNN distance-weighted vote."""
         sims = _cosine_similarity(query_vec, self._embeddings)
 
         k = min(K_NEIGHBORS, len(self._labels))

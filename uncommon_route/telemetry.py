@@ -239,10 +239,8 @@ def buffer_record(record: TelemetryRecord) -> None:
         with open(buf, "a", encoding="utf-8") as f:
             f.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
 
-        # Auto-flush if buffer is large enough
-        line_count = sum(1 for _ in open(buf))
-        if line_count >= _BUFFER_FLUSH_THRESHOLD:
-            flush()
+        # NO auto-flush here — flush only on explicit command or shutdown
+        # This keeps telemetry off the hot routing path (no blocking network calls)
     except Exception as e:
         logger.debug("Telemetry buffer failed: %s", e)
 

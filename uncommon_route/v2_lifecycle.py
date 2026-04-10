@@ -111,22 +111,46 @@ def on_shutdown() -> None:
     save_state(state, _state_dir)
     logger.info("v2 lifecycle shutdown: state saved to %s", _state_dir)
 
+    # Complete any pending telemetry records with "unknown" outcome
+    for rid, rec in list(_pending_telemetry.items()):
+        try:
+            from uncommon_route import telemetry as _telem
+            rec.outcome = "session_end"
+            _telem.buffer_record(rec)
+        except Exception:
+            pass
+    _pending_telemetry.clear()
+
+    # Flush telemetry buffer on shutdown
+    try:
+        from uncommon_route import telemetry as _telem
+        if _telem.is_enabled():
+            count = _telem.flush()
+            if count:
+                logger.info("v2 telemetry: flushed %d records on shutdown", count)
+    except Exception:
+        pass
+
     if _metrics:
         snap = _metrics.snapshot()
         logger.info("v2 session metrics: %s", snap)
 
 
 def associate_request_id(request_id: str) -> None:
-    """Link a request_id to the most recent un-linked prediction.
+    """Link a request_id to the most recent un-linked prediction AND telemetry record.
 
     Called by proxy after route() returns and request_id is assigned.
     """
-    # Find the most recent prediction with empty request_id and link it
+    # Link prediction
     for i in range(len(_recent_predictions) - 1, -1, -1):
         rid, pred = _recent_predictions[i]
         if rid == "":
             _recent_predictions[i] = (request_id, pred)
-            return
+            break
+
+    # Re-key pending telemetry record
+    if "" in _pending_telemetry:
+        _pending_telemetry[request_id] = _pending_telemetry.pop("")
 
 
 def on_route_complete(
@@ -197,7 +221,10 @@ def on_route_complete(
             import time
             emb_list = None
             if query_embedding is not None:
-                token_est = max(20, int(confidence * 100))  # rough proxy
+                # Estimate token count from message_count as proxy for text length
+                # message_count < 3 is likely short (under 20 tokens) → skip
+                # This respects the short-message privacy rule
+                token_est = message_count * 15 if message_count > 0 else 5
                 emb_list = _telem.prepare_embedding(query_embedding, token_est)
             rec = _telem.TelemetryRecord(
                 schema_version=1,

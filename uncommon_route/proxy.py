@@ -3043,6 +3043,17 @@ def create_app(
                     feature_tags=feature_tags,
                     answer_depth=answer_depth_value,
                 ))
+                # ─── v2 telemetry Stage 2: complete record with outcome ───
+                try:
+                    from uncommon_route.v2_lifecycle import complete_telemetry
+                    complete_telemetry(
+                        request_id=request_id,
+                        outcome="success",
+                        final_tier=int(decision.tier.value == "COMPLEX") * 3 if is_virtual else -1,
+                        final_model=selected_model,
+                    )
+                except Exception:
+                    pass
             else:
                 _stats.record(RouteRecord(
                     timestamp=time.time(),

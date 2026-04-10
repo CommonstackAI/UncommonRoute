@@ -8,7 +8,7 @@ UncommonRoute can optionally collect pseudonymous routing metadata to improve ro
 - Routing confidence score
 - Routing outcome (success, failure, retry)
 - User feedback signal (ok, weak, strong) — if you provide it
-- Conversation metadata: message count, whether tools are present, tool count
+- Conversation metadata: message count, whether tools are present, tool count (best-effort; may be 0 in some code paths)
 - A noised embedding vector (384-dim, with Gaussian noise added for privacy)
 - Client version, platform (darwin/linux/win32), day-level timestamp
 

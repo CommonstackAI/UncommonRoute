@@ -1,11 +1,14 @@
 """Public API — the route() entry point.
 
-v2: No hardcoded overrides (no tier_floor, tier_cap, complexity_floor,
-keyword-based is_coding/is_agentic inference).  All signals are features
-fed to the classifier; the classifier decides difficulty.
+v2: Uses multi-signal ensemble (metadata heuristics + embedding KNN) instead
+of v1's single text classifier. The ensemble determines tier, which maps to
+a complexity score. Model selection (select_from_pool) is unchanged.
 """
 
 from __future__ import annotations
+
+import logging
+from typing import Any
 
 from uncommon_route.calibration import get_active_route_confidence_calibrator
 from uncommon_route.router.types import (
@@ -22,7 +25,6 @@ from uncommon_route.router.types import (
     WorkloadHints,
 )
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING
-from uncommon_route.router.classifier import classify
 from uncommon_route.router.selector import select_from_pool, _derive_tier
 from uncommon_route.router.structural import estimate_tokens
 from uncommon_route.router.config import (
@@ -30,6 +32,127 @@ from uncommon_route.router.config import (
     get_bandit_config,
     get_selection_weights,
 )
+from uncommon_route.signals.base import TierVote
+from uncommon_route.signals.metadata import MetadataSignal
+from uncommon_route.signals.embedding import EmbeddingSignal
+from uncommon_route.decision.ensemble import Ensemble
+
+logger = logging.getLogger("uncommon-route")
+
+# ─── v2 Signal Singletons ───
+
+_v2_sig_a: MetadataSignal | None = None
+_v2_sig_c: EmbeddingSignal | None = None
+_v2_initialized = False
+
+# tier_id → complexity (inverse of _derive_tier boundaries)
+_TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.65, 3: 0.90}
+
+
+def _ensure_v2_signals() -> None:
+    global _v2_sig_a, _v2_sig_c, _v2_initialized
+    if _v2_initialized:
+        return
+    _v2_initialized = True
+    _v2_sig_a = MetadataSignal()
+    # Try to load embedding index from default location
+    try:
+        from uncommon_route.paths import data_dir
+        from pathlib import Path
+        splits_dir = data_dir() / "v2_splits"
+        emb_path = splits_dir / "seed_embeddings.npy"
+        labels_path = splits_dir / "seed_labels.json"
+        if emb_path.exists() and labels_path.exists():
+            _v2_sig_c = EmbeddingSignal(
+                index_path=emb_path,
+                labels_path=labels_path,
+                model_name="BAAI/bge-small-en-v1.5",
+            )
+            logger.info("v2 embedding signal loaded from %s", splits_dir)
+        else:
+            _v2_sig_c = EmbeddingSignal(model_name=None)
+            logger.info("v2 embedding index not found at %s — Signal C will abstain", splits_dir)
+    except Exception as e:
+        _v2_sig_c = EmbeddingSignal(model_name=None)
+        logger.warning("v2 embedding signal init failed: %s — Signal C will abstain", e)
+
+
+def _build_signal_row(
+    prompt: str,
+    system_prompt: str | None,
+    messages: list[dict[str, Any]] | None,
+    routing_features: RoutingFeatures | None,
+    context_features: dict[str, float] | None,
+) -> dict[str, Any]:
+    """Build a row dict for v2 signals from available proxy data."""
+    # If full messages available, use them directly
+    if messages:
+        msgs = messages
+    else:
+        # Reconstruct from prompt + system_prompt
+        msgs = []
+        if system_prompt:
+            msgs.append({"role": "system", "content": system_prompt})
+        msgs.append({"role": "user", "content": prompt})
+
+    # Estimate step_index from conversation depth
+    msg_count = len(msgs)
+    step_index = max(1, msg_count // 2)  # rough: 2 messages per turn
+    total_steps = max(step_index, 1)
+
+    # Determine scenario from step_type
+    scenario = "general"
+    if routing_features:
+        if routing_features.is_coding:
+            scenario = "code_swe"
+        elif routing_features.step_type == "tool-result-followup":
+            scenario = "general_agent"
+
+    return {
+        "messages": msgs,
+        "benchmark": "",  # not available in production
+        "scenario": scenario,
+        "step_index": step_index,
+        "total_steps": total_steps,
+    }
+
+
+def _v2_classify(
+    prompt: str,
+    system_prompt: str | None,
+    messages: list[dict[str, Any]] | None,
+    routing_features: RoutingFeatures | None,
+    context_features: dict[str, float] | None,
+    risk_tolerance: float = 0.5,
+) -> tuple[float, float, tuple[str, ...]]:
+    """Run v2 signal ensemble. Returns (complexity, confidence, signals)."""
+    _ensure_v2_signals()
+
+    row = _build_signal_row(prompt, system_prompt, messages, routing_features, context_features)
+    vote_a = _v2_sig_a.predict(row) if _v2_sig_a else TierVote(tier_id=1, confidence=0.4)
+    vote_c = _v2_sig_c.predict(row) if _v2_sig_c else TierVote(tier_id=None, confidence=0.0)
+
+    # Build ensemble with active (non-abstaining) signals
+    active_votes = [vote_a]
+    active_weights = [0.55]
+    if not vote_c.abstained:
+        active_votes.append(vote_c)
+        active_weights.append(0.45)
+
+    ensemble = Ensemble(weights=active_weights, risk_tolerance=risk_tolerance)
+    result = ensemble.decide(active_votes)
+
+    tier_id = result.tier_id if result.tier_id is not None else 1
+    complexity = _TIER_ID_TO_COMPLEXITY.get(tier_id, 0.40)
+    confidence = result.confidence
+
+    signals = (
+        f"v2:metadata={vote_a.tier_id}({vote_a.confidence:.2f})",
+        f"v2:embedding={vote_c.tier_id}({vote_c.confidence:.2f})",
+        f"v2:tier={tier_id} complexity={complexity:.2f} method={result.method}",
+    )
+
+    return complexity, confidence, signals
 
 
 def route(
@@ -50,19 +173,16 @@ def route(
     pricing: dict[str, ModelPricing] | None = None,
     available_models: list[str] | None = None,
     model_capabilities: dict[str, ModelCapabilities] | None = None,
+    messages: list[dict[str, Any]] | None = None,
     # Legacy parameters — accepted but ignored
     tier_cap: Tier | None = None,
     tier_floor: Tier | None = None,
 ) -> RoutingDecision:
-    """Route a prompt to the best model.
+    """Route a prompt to the best model using v2 multi-signal ensemble.
 
-    <1ms, pure local, no external calls.  The classifier uses structural
-    + Unicode + n-gram features to estimate difficulty.  No keyword lists,
-    no hardcoded tier overrides.
-
-    Context features (tools_present, conversation_depth, etc.) are passed
-    as numerical signals that the classifier can learn from, not as binary
-    flags that override its judgment.
+    The v2 ensemble (metadata heuristics + embedding KNN) determines the
+    difficulty tier. Model selection via Thompson Sampling + multi-factor
+    scoring is unchanged from v1.
     """
     cfg = config or DEFAULT_CONFIG
     constraints = routing_constraints or RoutingConstraints()
@@ -74,7 +194,11 @@ def route(
     effective_max_output_tokens = features.requested_max_output_tokens or max_output_tokens
 
     estimated_tokens = estimate_tokens(prompt)
-    result = classify(prompt, system_prompt, cfg.scoring, context_features=context_features)
+
+    # ─── v2: multi-signal ensemble replaces v1 classify() ───
+    complexity, v2_confidence, v2_signals = _v2_classify(
+        prompt, system_prompt, messages, features, context_features,
+    )
 
     sel_weights = get_selection_weights(cfg, mode)
     bc = get_bandit_config(cfg, mode)
@@ -82,13 +206,11 @@ def route(
     pool = list(DEFAULT_MODEL_PRICING.keys()) if available_models is None else available_models
     effective_pricing = DEFAULT_MODEL_PRICING if pricing is None else pricing
 
-    complexity = result.complexity
-
     confidence_calibrator = route_confidence_calibrator or get_active_route_confidence_calibrator()
 
     final_tier = _derive_tier(complexity)
     confidence_estimate = confidence_calibrator.calibrate(
-        result.confidence,
+        v2_confidence,
         mode=mode,
         tier=final_tier,
         complexity=complexity,
@@ -99,7 +221,7 @@ def route(
         feature_tags=features.tags(),
         streaming=features.streaming,
     )
-    reasoning = ", ".join(result.signals)
+    reasoning = ", ".join(v2_signals)
 
     return select_from_pool(
         complexity=complexity,

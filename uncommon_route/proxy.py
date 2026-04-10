@@ -2095,6 +2095,7 @@ def create_app(
                         _mapper.available_models if _mapper.discovered else []
                     ) or None,
                     model_capabilities=_routing_config.model_capabilities,
+                    messages=body.get("messages"),
                 )
             except RoutingInfeasibleError as exc:
                 return _routing_infeasible_response(exc, api_format=api_format)

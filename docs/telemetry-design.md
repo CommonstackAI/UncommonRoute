@@ -84,7 +84,7 @@ We do NOT call this data "anonymous." Per GDPR Recital 26, data is anonymous onl
 | 1. Noise | Add N(0, 0.02) Gaussian noise + re-normalize | Degrades exact nearest-neighbor matching |
 | 2. Short-message skip | Skip embedding for messages < 20 tokens | Small candidate space = higher risk |
 | 3. Private storage | Raw embeddings go to private endpoint only | Not publicly accessible |
-| 4. Public = aggregates only | Public dataset contains metadata + outcomes, NOT embeddings | Eliminates public attack surface |
+| 4. Public = aggregates only | Public dataset contains ONLY aggregated statistics (tier distributions, accuracy metrics), NO individual records or embeddings | Eliminates public attack surface |
 | 5. Retention limit | Embeddings deleted after model retraining (max 90 days) | Limits exposure window |
 
 ```python
@@ -101,9 +101,14 @@ def _prepare_embedding(raw: np.ndarray, text_tokens: int) -> list[float] | None:
 v1 design had `install_id`. **Removed.** Each record is independent with no cross-session linking. This means:
 - Cannot track a user across sessions
 - Cannot build a user profile from multiple records
-- "Right to erasure" is moot — there's nothing to link records to a person
 
-Trade-off: We lose the ability to group records from the same conversation. Accepted — privacy > analytics convenience.
+**Erasure implications:** Without a persistent ID, we cannot identify which records in the private store belong to a specific user. This is a privacy feature (we literally cannot build a user profile), but it means:
+- Standard "delete my data" requests cannot be fulfilled for already-submitted records (no way to identify them)
+- This is disclosed in TELEMETRY.md: "Because we store no identifier, we cannot locate or delete specific user records after submission. If this is unacceptable, do not opt in."
+- Users can always prevent future submissions via `telemetry disable`
+- The 90-day retention limit means all raw records are automatically purged
+
+Trade-off: We lose the ability to group records or fulfill post-hoc deletion. Accepted — privacy > analytics convenience.
 
 ---
 
@@ -112,11 +117,12 @@ Trade-off: We lose the ability to group records from the same conversation. Acce
 ### Precedence rules (highest to lowest):
 
 ```
-1. DO_NOT_TRACK=1             → off (universal standard, always wins)
-2. UNCOMMON_ROUTE_TELEMETRY   → on/off (explicit per-tool setting)
-3. Config file                → on/off (persisted choice)
-4. Interactive prompt         → ask once, persist to config
-5. No TTY / CI=true / Docker  → off (never prompt non-interactive)
+1. DO_NOT_TRACK=1              → off (universal standard, always wins)
+2. UNCOMMON_ROUTE_TELEMETRY    → on/off (explicit per-tool setting)
+3. Non-interactive environment → off (no TTY, CI=true, read-only $HOME)
+   (Docker: off unless UNCOMMON_ROUTE_TELEMETRY=on explicitly set)
+4. Config file                 → on/off (persisted choice)
+5. Interactive prompt          → ask once, persist to config
 ```
 
 ### Interactive prompt (first run only, if layers 1-4 are unset):
@@ -124,7 +130,7 @@ Trade-off: We lose the ability to group records from the same conversation. Acce
 ```
 ────────────────────────────────────────────────────
 Help improve UncommonRoute's routing accuracy by
-sharing anonymous routing metadata?
+sharing pseudonymous routing metadata?
 
   ✓ Routing predictions, model selections, outcomes
   ✗ NO prompts, responses, API keys, or personal info
@@ -134,7 +140,7 @@ sharing anonymous routing metadata?
 
   Details: https://github.com/CommonstackAI/UncommonRoute/blob/main/TELEMETRY.md
 ────────────────────────────────────────────────────
-Share routing data? [y/N]:
+Share pseudonymous routing data? [y/N]:
 ```
 
 ### Headless / Container / Read-only $HOME:
@@ -151,7 +157,7 @@ Share routing data? [y/N]:
 ```bash
 uncommon-route telemetry status      # Show current state + pending count
 uncommon-route telemetry enable      # Opt in
-uncommon-route telemetry disable     # Opt out + flush pending
+uncommon-route telemetry disable     # Opt out + discard pending (unsent data deleted)
 uncommon-route telemetry show-sent   # Show successfully sent records only
 uncommon-route telemetry flush       # Send pending records now
 ```
@@ -362,7 +368,7 @@ We do **not** claim anonymity. The data is **pseudonymous** under GDPR because:
 | Data minimization | Only routing metadata + noised embeddings |
 | Transparency | TELEMETRY.md + local audit log |
 | Right to withdraw | `telemetry disable` at any time |
-| Right to erasure | No persistent ID to link records; on request, we delete records matching provided criteria from private store |
+| Right to erasure | No persistent ID — cannot locate specific user's records post-submission. Disclosed upfront. 90-day auto-purge of all raw records. |
 | Data controller | Commonstack AI (contact: privacy@commonstack.ai) |
 | Retention period | Raw records: max 90 days. Aggregates: indefinite. |
 | Cross-border | Private endpoint in US (Cloudflare). TELEMETRY.md discloses this. |
@@ -373,7 +379,7 @@ We do **not** claim anonymity. The data is **pseudonymous** under GDPR because:
 |---|---|
 | "Sale" of data | No sale — data used only for routing quality improvement |
 | Right to know | TELEMETRY.md documents all collected fields |
-| Right to delete | Honored on request (email privacy@commonstack.ai) |
+| Right to delete | No persistent ID — cannot locate specific records. 90-day auto-purge. Disclosed in TELEMETRY.md. |
 | Opt-out | Opt-in by default — no opt-out needed |
 
 ### Schema Version Policy

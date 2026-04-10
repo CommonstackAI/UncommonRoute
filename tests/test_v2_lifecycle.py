@@ -11,6 +11,7 @@ def _reset_lifecycle():
     lc._metrics = None
     lc._shadow = None
     lc._weight_tracker = None
+    lc._index_manager = None
     lc._state_dir = None
     lc._initialized = False
 
@@ -114,6 +115,38 @@ def test_signal_b_not_promoted_initially(tmp_path):
     _reset_lifecycle()
     lc.on_startup(tmp_path)
     assert not lc.is_signal_b_promoted()
+    _reset_lifecycle()
+
+
+def test_index_manager_initialized(tmp_path):
+    """EmbeddingIndexManager should be initialized if seed index exists."""
+    _reset_lifecycle()
+    # Create a minimal seed index
+    import numpy as np
+    import json
+    splits = tmp_path / "v2_splits"
+    splits.mkdir()
+    embs = np.random.randn(5, 384).astype(np.float32)
+    embs = embs / np.linalg.norm(embs, axis=1, keepdims=True)
+    np.save(splits / "seed_embeddings.npy", embs)
+    with open(splits / "seed_labels.json", "w") as f:
+        json.dump([0, 1, 2, 3, 0], f)
+
+    lc.on_startup(tmp_path)
+    assert lc._index_manager is not None
+    assert lc._index_manager.size == 5
+
+    # Test growth
+    from uncommon_route.v2_lifecycle import on_confident_routing
+    new_vec = np.random.randn(384).astype(np.float32)
+    new_vec = new_vec / np.linalg.norm(new_vec)
+    added = on_confident_routing(new_vec, tier_id=1)
+    assert added
+    assert lc._index_manager.size == 6
+
+    # Test save on shutdown
+    lc.on_shutdown()
+    assert (splits / "seed_embeddings.npy").exists()
     _reset_lifecycle()
 
 

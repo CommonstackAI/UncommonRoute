@@ -16,6 +16,7 @@ from uncommon_route.observability import RoutingMetrics, RoutingLogEntry
 from uncommon_route.persistence import LearnedState, save_state, load_state
 from uncommon_route.learning.weights import SignalWeightTracker
 from uncommon_route.learning.shadow import ShadowTracker
+from uncommon_route.learning.index_growth import EmbeddingIndexManager
 
 logger = logging.getLogger("uncommon-route.v2")
 
@@ -23,13 +24,14 @@ logger = logging.getLogger("uncommon-route.v2")
 _metrics: RoutingMetrics | None = None
 _shadow: ShadowTracker | None = None
 _weight_tracker: SignalWeightTracker | None = None
+_index_manager: EmbeddingIndexManager | None = None
 _state_dir: Path | None = None
 _initialized = False
 
 
 def on_startup(data_dir: Path | None = None) -> None:
     """Initialize all v2 subsystems. Call once at proxy startup."""
-    global _metrics, _shadow, _weight_tracker, _state_dir, _initialized
+    global _metrics, _shadow, _weight_tracker, _index_manager, _state_dir, _initialized
 
     if _initialized:
         return
@@ -54,18 +56,40 @@ def on_startup(data_dir: Path | None = None) -> None:
     _shadow._consecutive_wins = state.shadow_consecutive_wins
     _shadow._promoted = state.shadow_promoted
 
+    # Embedding index manager for index growth
+    try:
+        splits_dir = data_dir / "v2_splits"
+        emb_path = splits_dir / "seed_embeddings.npy"
+        labels_path = splits_dir / "seed_labels.json"
+        if emb_path.exists() and labels_path.exists():
+            _index_manager = EmbeddingIndexManager(
+                index_path=emb_path, labels_path=labels_path,
+                max_size=10_000, dedup_threshold=0.95,
+            )
+            logger.info("v2 embedding index manager loaded (%d entries)", _index_manager.size)
+    except Exception as e:
+        logger.warning("v2 embedding index manager init failed: %s", e)
+
 
 def on_shutdown() -> None:
     """Persist all v2 state. Call at proxy shutdown."""
     if _state_dir is None or not _initialized:
         return
 
+    # Save embedding index if it grew
+    if _index_manager:
+        try:
+            _index_manager.save()
+            logger.info("v2 embedding index saved (%d entries)", _index_manager.size)
+        except Exception as e:
+            logger.warning("v2 embedding index save failed: %s", e)
+
     state = LearnedState(
         signal_weights=_weight_tracker.weights if _weight_tracker else [0.55, 0.45],
         calibration_temperature=1.0,
         shadow_consecutive_wins=_shadow.consecutive_wins if _shadow else 0,
         shadow_promoted=_shadow.promoted if _shadow else False,
-        embedding_index_size=0,
+        embedding_index_size=_index_manager.size if _index_manager else 0,
         model_priors={},
     )
     save_state(state, _state_dir)
@@ -144,6 +168,21 @@ def get_metrics() -> dict[str, Any] | None:
     return _metrics.snapshot() if _metrics else None
 
 
+def on_confident_routing(embedding: "np.ndarray", tier_id: int) -> bool:
+    """Add a high-confidence routing to the embedding index. Returns True if added."""
+    if _index_manager is None:
+        return False
+    try:
+        return _index_manager.add(embedding, tier_id)
+    except Exception:
+        return False
+
+
 def is_signal_b_promoted() -> bool:
     """Check if shadow mode has promoted Signal B."""
     return _shadow.promoted if _shadow else False
+
+
+def get_index_size() -> int:
+    """Current embedding index size."""
+    return _index_manager.size if _index_manager else 0

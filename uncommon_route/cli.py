@@ -63,6 +63,7 @@ Commands:
   provider <sub>                    API key management (list|add|remove|models)
   config <sub>                      Routing config (show|set-default-mode|set-tier|reset-tier|reset)
   stats [sub]                       Routing analytics (summary|history|reset)
+  explain <prompt>                  Show v2 signal breakdown for a prompt
   --version                         Show version
 
 Route options:

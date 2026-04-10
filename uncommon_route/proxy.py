@@ -1957,6 +1957,22 @@ def create_app(
                 break
         return JSONResponse(visible_records)
 
+    async def handle_route_preview(request: Request) -> JSONResponse:
+        """POST /v1/route-preview — preview routing decision without sending request."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        from uncommon_route.api_v2 import route_preview
+        result = route_preview(
+            prompt=body.get("prompt", ""),
+            risk_tolerance=body.get("risk_tolerance", 0.5),
+            system_prompt=body.get("system_prompt"),
+            step_index=body.get("step_index", 1),
+            total_steps=body.get("total_steps", 1),
+        )
+        return JSONResponse(result)
+
     async def _handle_chat_core(
         body: dict,
         request: Request,
@@ -3288,6 +3304,7 @@ def create_app(
         Route("/v1/artifacts/{artifact_id:str}", handle_artifact, methods=["GET"]),
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
+        Route("/v1/route-preview", handle_route_preview, methods=["POST"]),
     ]
     if _dashboard_mount is not None:
         routes.append(Mount("/dashboard", app=_dashboard_mount))

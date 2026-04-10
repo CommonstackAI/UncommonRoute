@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { TierBadge } from "./TierBadge";
 import { SignalCard } from "./SignalCard";
 import { CostComparison } from "./CostComparison";
-import { fetchRoutePreview, type RoutePreviewResult } from "../api";
+import { type RoutePreviewResult } from "../api";
 
 const TIER_NAMES = ["low", "mid", "mid_high", "high"];
 
@@ -13,19 +13,49 @@ export default function Playground() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!prompt.trim()) { setResult(null); setError(null); return; }
+    if (!prompt.trim()) { setResult(null); setError(null); setLoading(false); return; }
+
     debounceRef.current = setTimeout(async () => {
+      // Cancel any in-flight request
+      if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       setLoading(true);
       setError(null);
-      const data = await fetchRoutePreview(prompt, riskTolerance);
-      if (data) { setResult(data); } else { setError("Preview failed"); }
-      setLoading(false);
+      try {
+        const res = await fetch("/v1/route-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, risk_tolerance: riskTolerance }),
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return; // stale
+        if (!res.ok) { setError("Preview failed"); setResult(null); return; }
+        const data: RoutePreviewResult = await res.json();
+        if (controller.signal.aborted) return; // stale
+        setResult(data);
+        setError(null);
+      } catch (e: any) {
+        if (e.name === "AbortError") return; // cancelled, ignore
+        setError("Preview failed — is the proxy running?");
+        setResult(null);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
     }, 300);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, [prompt, riskTolerance]);
+
+  // Cleanup abort on unmount
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   return (
     <div>

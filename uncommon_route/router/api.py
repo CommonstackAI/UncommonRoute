@@ -46,7 +46,7 @@ _v2_sig_c: EmbeddingSignal | None = None
 _v2_initialized = False
 
 # tier_id → complexity (inverse of _derive_tier boundaries)
-_TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.65, 3: 0.90}
+_TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.68, 3: 0.90}
 
 
 def _ensure_v2_signals() -> None:
@@ -85,9 +85,19 @@ def _build_signal_row(
     context_features: dict[str, float] | None,
 ) -> dict[str, Any]:
     """Build a row dict for v2 signals from available proxy data."""
-    # If full messages available, use them directly
+    # If full messages available, normalize content to strings
     if messages:
-        msgs = messages
+        msgs = []
+        for m in messages:
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                # Content-array (e.g. vision) → extract text parts only
+                if isinstance(content, list):
+                    parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    content = " ".join(parts)
+                else:
+                    content = str(content)
+            msgs.append({"role": m.get("role", "user"), "content": content})
     else:
         # Reconstruct from prompt + system_prompt
         msgs = []
@@ -98,7 +108,9 @@ def _build_signal_row(
     # Estimate step_index from conversation depth
     msg_count = len(msgs)
     step_index = max(1, msg_count // 2)  # rough: 2 messages per turn
-    total_steps = max(step_index, 1)
+    # Estimate total_steps higher than current to avoid step_ratio=1.0
+    # A typical agent session has 5-10 steps; use 10 as a reasonable ceiling
+    total_steps = max(step_index + 3, 10)
 
     # Determine scenario from step_type
     scenario = "general"

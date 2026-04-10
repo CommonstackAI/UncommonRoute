@@ -1458,6 +1458,7 @@ def create_app(
             pricing=_get_pricing(),
             available_models=_mapper.available_models if _mapper.discovered else None,
             model_capabilities=_routing_config.model_capabilities,
+            messages=body.get("messages"),
         )
 
         effective_requirements = decision.routing_features.request_requirements()

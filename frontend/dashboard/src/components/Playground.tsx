@@ -9,7 +9,7 @@
  * Industrial: textarea as raw input field, signal data as instrument readout
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { type RoutePreviewResult } from "../api";
 
 const TIER_NAMES = ["LOW", "MID", "MID_HIGH", "HIGH"];
@@ -22,6 +22,8 @@ export default function Playground() {
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   const abortRef = useRef<AbortController | null>(null);
+  const firstLoadRef = useRef(true);
+  const loadStartRef = useRef<number>(0);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -34,7 +36,7 @@ export default function Playground() {
       if (abortRef.current) abortRef.current.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-      setLoading(true); setError(null);
+      setLoading(true); setError(null); loadStartRef.current = Date.now();
       try {
         const res = await fetch("/v1/route-preview", {
           method: "POST",
@@ -47,8 +49,9 @@ export default function Playground() {
         const data: RoutePreviewResult = await res.json();
         if (controller.signal.aborted) return;
         setResult(data); setError(null);
-      } catch (e: any) {
-        if (e.name === "AbortError") return;
+        firstLoadRef.current = false;
+      } catch (e: unknown) {
+        if (e instanceof Error && e.name === "AbortError") return;
         setError("[ERROR: PROXY UNREACHABLE]"); setResult(null);
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -63,7 +66,7 @@ export default function Playground() {
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   return (
-    <div>
+    <div className="animate-fadeIn">
       {/* Header */}
       <div className="mb-8">
         <h1 className="font-display text-[36px] text-n-display tracking-tight">PLAYGROUND</h1>
@@ -106,7 +109,7 @@ export default function Playground() {
               />
             ))}
           </div>
-          <div className="mt-1 flex justify-between font-mono text-[9px] text-n-disabled tracking-[0.06em]" style={{ maxWidth: 300 }}>
+          <div className="mt-1 flex justify-between font-mono text-[11px] text-n-disabled tracking-[0.06em]" style={{ maxWidth: 300 }}>
             <span>CONSERVATIVE</span>
             <span>AGGRESSIVE</span>
           </div>
@@ -161,14 +164,14 @@ export default function Playground() {
                 {result.signals?.map((s) => (
                   <div
                     key={s.name}
-                    className="flex items-center justify-between py-2.5 border-b border-n-border"
+                    className="flex items-center justify-between py-2.5 border-b border-n-border transition-micro"
                   >
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[11px] tracking-[0.06em] text-n-secondary uppercase w-24">
                         {s.name}
                       </span>
                       {s.shadow && (
-                        <span className="font-mono text-[9px] text-n-disabled border border-n-border px-1.5 py-0.5">
+                        <span className="font-mono text-[11px] text-n-disabled border border-n-border px-1.5 py-0.5">
                           SHADOW
                         </span>
                       )}
@@ -186,14 +189,38 @@ export default function Playground() {
               </div>
             </div>
           ) : (
-            <div className="flex items-center justify-center h-64 border border-dashed border-n-border rounded-compact">
-              <span className="font-mono text-[11px] text-n-disabled tracking-[0.08em]">
-                {loading ? "[ANALYZING...]" : "[AWAITING INPUT]"}
-              </span>
+            <div className="flex items-center justify-center h-64 border border-dashed border-n-border rounded-compact dot-grid-subtle animate-pulse" style={{ animationDuration: '3s' }}>
+              <LoadingLabel loading={loading} firstLoad={firstLoadRef.current} loadStart={loadStartRef.current} />
             </div>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function LoadingLabel({ loading, firstLoad, loadStart }: { loading: boolean; firstLoad: boolean; loadStart: number }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  const tick = useCallback(() => {
+    if (loadStart > 0) setElapsed(Date.now() - loadStart);
+  }, [loadStart]);
+
+  useEffect(() => {
+    if (!loading) { setElapsed(0); return; }
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [loading, tick]);
+
+  let text = "[AWAITING INPUT]";
+  if (loading) {
+    text = firstLoad && elapsed > 2000 ? "[LOADING EMBEDDING MODEL...]" : "[ANALYZING...]";
+  }
+
+  return (
+    <span className="font-mono text-[11px] text-n-disabled tracking-[0.08em]">
+      {text}
+    </span>
   );
 }

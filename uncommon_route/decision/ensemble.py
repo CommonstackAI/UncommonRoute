@@ -10,13 +10,18 @@ from uncommon_route.signals.base import TierVote
 if TYPE_CHECKING:
     from uncommon_route.decision.calibration import PlattCalibrator
 
+# When the ensemble predicts LOW with confidence below this threshold,
+# escalate to MID. Tuned on holdout: 0.60 gives +0.7% pass rate with
+# zero accuracy loss vs no escalation. See benchmark comparison in commit.
+_LOW_ESCALATION_THRESHOLD = 0.60
+
 
 @dataclass(frozen=True, slots=True)
 class EnsembleResult:
     tier_id: int | None
     confidence: float
     raw_confidence: float
-    method: str  # "direct" | "conservative" | "abstain"
+    method: str  # "direct" | "escalated" | "conservative" | "abstain"
     tier_scores: list[float]
 
 
@@ -64,6 +69,14 @@ class Ensemble:
             confidence = self._calibrator.calibrate(raw_confidence)
 
         if confidence >= self._threshold:
+            # Low-confidence escalation: LOW predictions below 0.70 confidence
+            # are unreliable — niche topics, ambiguous prompts. Bump to MID
+            # where a more capable model reduces hallucination risk.
+            if best_tier == 0 and confidence < _LOW_ESCALATION_THRESHOLD:
+                return EnsembleResult(
+                    tier_id=1, confidence=confidence, raw_confidence=raw_confidence,
+                    method="escalated", tier_scores=normalized,
+                )
             return EnsembleResult(
                 tier_id=best_tier, confidence=confidence, raw_confidence=raw_confidence,
                 method="direct", tier_scores=normalized,

@@ -35,7 +35,7 @@ export default function Explainer() {
   const normTier = (t?: string) => TIER_NAMES[t || ""] || (t || "—").toUpperCase();
 
   return (
-    <div>
+    <div className="animate-fadeIn">
       <div className="mb-8">
         <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN</h1>
         <p className="mt-2 text-[14px] text-n-secondary">
@@ -59,15 +59,15 @@ export default function Explainer() {
               <button
                 key={req.request_id || i}
                 onClick={() => setSelected(req)}
-                className={`w-full text-left py-3 px-2 border-b border-n-border transition-colors duration-150 ${
+                className={`w-full text-left py-3 px-2 border-b border-n-border transition-micro ${
                   selected === req ? "bg-n-surface" : "hover:bg-n-surface/50"
                 }`}
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className="font-mono text-[10px] tracking-[0.06em] text-n-secondary">
+                  <span className="font-mono text-[12px] tracking-[0.06em] text-n-secondary">
                     {normTier(req.tier)}
                   </span>
-                  <span className="font-mono text-[10px] text-n-disabled truncate ml-2">
+                  <span className="font-mono text-[12px] text-n-disabled truncate ml-2">
                     {(req.model || "").split("/").pop()}
                   </span>
                 </div>
@@ -119,40 +119,18 @@ export default function Explainer() {
                     ${(selected.cost ?? 0.001).toFixed(4)}
                   </div>
                 </div>
-                <div>
-                  <div className="label mb-1">VS PREMIUM</div>
-                  <div className="font-mono text-[20px] text-n-disabled line-through">$0.0200</div>
-                </div>
               </div>
 
-              {/* Signal breakdown — placeholder */}
+              {/* Signal breakdown — not yet stored per-request */}
               <div className="label mb-3">SIGNAL BREAKDOWN</div>
-              <div className="border-t border-n-border">
-                {[
-                  { name: "METADATA", tier: "LOW", conf: "85%", shadow: false },
-                  { name: "STRUCTURAL", tier: "MID", conf: "70%", shadow: true },
-                  { name: "EMBEDDING", tier: "LOW", conf: "80%", shadow: false },
-                ].map((s) => (
-                  <div key={s.name} className="flex items-center justify-between py-2.5 border-b border-n-border">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[11px] tracking-[0.06em] text-n-secondary w-24">{s.name}</span>
-                      {s.shadow && (
-                        <span className="font-mono text-[9px] text-n-disabled border border-n-border px-1.5 py-0.5">SHADOW</span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="font-mono text-[12px] text-n-display">{s.tier}</span>
-                      <span className="font-mono text-[11px] text-n-secondary">{s.conf}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 font-mono text-[10px] text-n-disabled tracking-[0.04em]">
-                SIGNAL DATA IS PLACEHOLDER. PER-REQUEST STORAGE COMING IN A FUTURE UPDATE.
+              <div className="flex items-center justify-center h-32 border border-dashed border-n-border rounded-compact">
+                <span className="font-mono text-[11px] text-n-disabled tracking-[0.06em]">
+                  [PER-REQUEST SIGNAL DATA NOT YET AVAILABLE]
+                </span>
               </div>
             </div>
           ) : (
-            <div className="flex items-center justify-center h-96 border border-dashed border-n-border rounded-compact">
+            <div className="flex items-center justify-center h-48 border border-dashed border-n-border rounded-compact dot-grid-subtle">
               <span className="font-mono text-[11px] text-n-disabled tracking-[0.08em]">
                 [SELECT A REQUEST]
               </span>

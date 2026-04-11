@@ -180,9 +180,9 @@ export default function Routing({ onRefresh }: Props) {
         </div>
       ) : null}
 
-      <div className="space-y-6">
+      <div className="space-y-6 animate-fadeIn">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-n-display">Routing</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">ROUTING</h1>
           <p className="mt-1 text-[13px] text-n-secondary">
             Choose the default mode used when a request does not explicitly set a virtual model.
           </p>
@@ -236,7 +236,7 @@ export default function Routing({ onRefresh }: Props) {
                       <div className="mt-2 text-[12px] text-n-secondary">{getModeMeta(mode).description}</div>
                     </div>
                     {active ? (
-                      <span className="label rounded-pill border border-n-border-vis px-2 py-0.5 text-[10px]">
+                      <span className="label rounded-pill border border-n-border-vis px-2 py-0.5 text-[12px]">
                         ACTIVE
                       </span>
                     ) : null}
@@ -377,15 +377,15 @@ function EditableTierCard({
   const resetBusy = busyKey === `reset:${mode}:${tier}`;
 
   return (
-    <div className="rounded-compact border border-n-border bg-n-raised px-4 py-4">
+    <div className="rounded-compact border border-n-border bg-n-raised px-4 py-4 transition-micro hover:border-n-border-vis">
       <div className="flex items-center justify-between">
         <span className="font-mono text-[12px] font-semibold uppercase tracking-wider text-n-display">{tier}</span>
         {overridden ? (
-          <span className="rounded-pill border border-n-accent px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-n-accent">
+          <span className="rounded-pill border border-n-accent px-2 py-0.5 font-mono text-[12px] uppercase tracking-wider text-n-accent">
             OVERRIDE
           </span>
         ) : (
-          <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-n-secondary">
+          <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary">
             DEFAULT
           </span>
         )}

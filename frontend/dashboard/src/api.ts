@@ -180,13 +180,16 @@ export const fetchRoutingConfig = () => get<RoutingConfigState>("/v1/routing-con
 
 export async function updateConnections(
   upstream: string,
-  apiKey: string,
+  apiKey: string | undefined,
 ): Promise<ConnectionState | null> {
   try {
+    const body: Record<string, string> = { upstream };
+    // undefined = keep current key; empty string = clear key; non-empty = set new key
+    if (apiKey !== undefined) body.api_key = apiKey;
     const res = await fetch("/v1/connections", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upstream, api_key: apiKey }),
+      body: JSON.stringify(body),
     });
     return res.ok ? ((await res.json()) as ConnectionState) : null;
   } catch {

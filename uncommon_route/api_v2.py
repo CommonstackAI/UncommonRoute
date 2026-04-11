@@ -18,17 +18,37 @@ _sig_c: EmbeddingSignal | None = None
 
 
 def init_signals(index_dir=None):
-    """Initialize signal singletons. Call once at proxy startup."""
+    """Initialize signal singletons. Call once at proxy startup.
+
+    If index_dir is not provided, auto-discovers the seed index
+    from the standard user data directory (~/.uncommon-route/v2_splits/).
+    """
     global _sig_a, _sig_b, _sig_c
     _sig_a = MetadataSignal()
     _sig_b = StructuralSignal()
+
+    # Auto-discover seed index if not explicitly provided
+    if not index_dir:
+        try:
+            from uncommon_route.paths import data_dir
+            candidate = data_dir() / "v2_splits"
+            if (candidate / "seed_embeddings.npy").exists():
+                index_dir = str(candidate)
+        except Exception:
+            pass
+
     if index_dir:
         from pathlib import Path
         d = Path(index_dir)
+        # For preview: use KNN (no classifier) because the logistic regression
+        # classifier is heavily biased toward LOW on the imbalanced training set.
+        # KNN preserves semantic similarity — e.g. "prove Kepler conjecture"
+        # correctly matches complex math/reasoning neighbors.
         _sig_c = EmbeddingSignal(
             index_path=d / "seed_embeddings.npy",
             labels_path=d / "seed_labels.json",
             model_name="BAAI/bge-small-en-v1.5",
+            use_classifier=False,  # force KNN — classifier is biased toward LOW
         )
     else:
         _sig_c = EmbeddingSignal(model_name=None)
@@ -58,12 +78,23 @@ def route_preview(
     vote_b = _sig_b.predict(row)
     vote_c = _sig_c.predict(row) if _sig_c else None
 
-    # 2-signal ensemble (A+C) with B in shadow
-    active_votes = [vote_a]
-    active_weights = [0.55]
+    # 3-signal ensemble for preview with adaptive weights.
+    # MetadataSignal is constant for single prompts (always LOW 0.75) — low weight.
+    # Short prompts: structural features are unreliable, trust embedding semantics.
+    # Long prompts: structural features are informative, trust them more.
+    word_count = len(prompt.split())
+    if word_count <= 8:
+        w_a, w_b, w_c = 0.10, 0.20, 0.70
+    elif word_count <= 20:
+        w_a, w_b, w_c = 0.15, 0.35, 0.50
+    else:
+        w_a, w_b, w_c = 0.20, 0.45, 0.35
+
+    active_votes = [vote_a, vote_b]
+    active_weights = [w_a, w_b]
     if vote_c and not vote_c.abstained:
         active_votes.append(vote_c)
-        active_weights.append(0.45)
+        active_weights.append(w_c)
 
     ensemble = Ensemble(weights=active_weights, risk_tolerance=risk_tolerance)
     result = ensemble.decide(active_votes)
@@ -71,7 +102,7 @@ def route_preview(
 
     signals = [
         {"name": "metadata", "tier": vote_a.tier_id, "confidence": round(vote_a.confidence, 4)},
-        {"name": "structural", "tier": vote_b.tier_id, "confidence": round(vote_b.confidence, 4), "shadow": True},
+        {"name": "structural", "tier": vote_b.tier_id, "confidence": round(vote_b.confidence, 4)},
     ]
     if vote_c:
         signals.append({"name": "embedding", "tier": vote_c.tier_id, "confidence": round(vote_c.confidence, 4)})

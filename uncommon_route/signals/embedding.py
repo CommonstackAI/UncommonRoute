@@ -45,6 +45,7 @@ class EmbeddingSignal:
         labels_path: Path | None = None,
         model_name: str | None = "BAAI/bge-small-en-v1.5",
         classifier_path: Path | None = None,
+        use_classifier: bool = True,
     ):
         self._embeddings: np.ndarray | None = None
         self._labels: list[int] | None = None
@@ -57,24 +58,25 @@ class EmbeddingSignal:
                 self._labels = json.load(f)
             logger.info(f"Loaded embedding index: {len(self._labels)} vectors")
 
-        # Try to load trained classifier
-        if classifier_path and Path(classifier_path).exists():
-            try:
-                with open(classifier_path, "rb") as f:
-                    self._classifier = pickle.load(f)
-                logger.info("Loaded trained embedding classifier from %s", classifier_path)
-            except Exception as e:
-                logger.warning("Failed to load classifier: %s — falling back to KNN", e)
-        elif index_path:
-            # Auto-detect classifier next to the index
-            auto_clf = Path(index_path).parent / "embedding_classifier.pkl"
-            if auto_clf.exists():
+        # Try to load trained classifier (skip entirely when use_classifier=False)
+        if use_classifier:
+            if classifier_path and Path(classifier_path).exists():
                 try:
-                    with open(auto_clf, "rb") as f:
+                    with open(classifier_path, "rb") as f:
                         self._classifier = pickle.load(f)
-                    logger.info("Auto-loaded embedding classifier from %s", auto_clf)
-                except Exception:
-                    pass
+                    logger.info("Loaded trained embedding classifier from %s", classifier_path)
+                except Exception as e:
+                    logger.warning("Failed to load classifier: %s — falling back to KNN", e)
+            elif index_path:
+                # Auto-detect classifier next to the index
+                auto_clf = Path(index_path).parent / "embedding_classifier.pkl"
+                if auto_clf.exists():
+                    try:
+                        with open(auto_clf, "rb") as f:
+                            self._classifier = pickle.load(f)
+                        logger.info("Auto-loaded embedding classifier from %s", auto_clf)
+                    except Exception:
+                        pass
 
         if model_name:
             try:
@@ -124,6 +126,12 @@ class EmbeddingSignal:
         top_k_idx = np.argsort(sims)[-k:][::-1]
         top_k_sims = sims[top_k_idx]
         top_k_labels = [self._labels[i] for i in top_k_idx]
+
+        # If top neighbors aren't similar enough, abstain — the query is
+        # out-of-distribution relative to our training set.
+        avg_top_sim = float(np.mean(top_k_sims[:3]))
+        if avg_top_sim < 0.60:
+            return TierVote(tier_id=None, confidence=0.0)
 
         tier_scores: dict[int, float] = Counter()
         for label, sim in zip(top_k_labels, top_k_sims):

@@ -41,6 +41,7 @@ class RoutingMetrics:
         self.requests_by_model: dict[str, int] = defaultdict(int)
         self.cascade_count = 0
         self.conservative_count = 0
+        self.escalated_count = 0
         self._confidence_sum = 0.0
         self._signal_agreement_count = 0
 
@@ -60,6 +61,8 @@ class RoutingMetrics:
             self.cascade_count += 1
         elif method == "conservative":
             self.conservative_count += 1
+        elif method == "escalated":
+            self.escalated_count += 1
         if signals_agreed:
             self._signal_agreement_count += 1
 
@@ -72,6 +75,7 @@ class RoutingMetrics:
             "requests_by_model": dict(self.requests_by_model),
             "cascade_count": self.cascade_count,
             "conservative_count": self.conservative_count,
+            "escalated_count": self.escalated_count,
             "avg_confidence": round(avg_conf, 4),
             "signal_agreement_rate": round(agreement, 4),
         }

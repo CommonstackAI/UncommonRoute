@@ -9,6 +9,7 @@ import {
   fetchStats,
   fetchMapping,
   fetchSpend,
+  fetchRecent,
   type Health,
   type Stats,
   type Mapping,
@@ -35,14 +36,22 @@ export default function App() {
   const [spend, setSpend] = useState<Spend | null>(null);
   const [ready, setReady] = useState(false);
 
+  const [feedbackPending, setFeedbackPending] = useState(0);
+
   const refresh = useCallback(async () => {
-    const [h, st, m, sp] = await Promise.all([
-      fetchHealth(), fetchStats(), fetchMapping(), fetchSpend(),
+    const [h, st, m, sp, recent] = await Promise.all([
+      fetchHealth(), fetchStats(), fetchMapping(), fetchSpend(), fetchRecent(30),
     ]);
     if (h) { setHealth(h); setReady(true); }
     if (st) setStats(st);
     if (m) setMapping(m);
     if (sp) setSpend(sp);
+    // Compute actual pending count from recent — matches Feedback page's pendingCount logic
+    if (recent) {
+      setFeedbackPending(recent.filter(r => r.feedback_pending && (!r.feedback_action || r.feedback_action === "expired")).length);
+    } else {
+      setFeedbackPending(0);
+    }
   }, []);
 
   useEffect(() => {
@@ -54,7 +63,6 @@ export default function App() {
   const upstream = health?.upstream?.replace(/^https?:\/\//, "").replace(/\/v1$/, "") ?? "";
   const isUp = health?.model_mapper?.discovered ?? false;
   const version = health?.version ?? "—";
-  const feedbackPending = health?.feedback?.pending ?? 0;
 
   if (!ready) {
     return (

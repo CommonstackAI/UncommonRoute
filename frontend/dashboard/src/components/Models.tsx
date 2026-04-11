@@ -32,10 +32,10 @@ export default function Models({ mapping }: Props) {
   const providers = Object.keys(grouped).sort();
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-n-display">Models</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">MODELS</h1>
           <p className="mt-1 text-[13px] text-n-secondary">
             {pool.length} models from {new Set(pool.map(m => m.provider)).size} providers
           </p>
@@ -96,7 +96,11 @@ export default function Models({ mapping }: Props) {
       ))}
 
       {providers.length === 0 && (
-        <div className="py-20 text-center font-mono text-[14px] text-n-disabled">No models match your search.</div>
+        <div className="py-20 text-center font-mono text-[14px] text-n-disabled">
+          {pool.length === 0
+            ? "Connect an upstream provider to discover available models."
+            : "No models match your search."}
+        </div>
       )}
     </div>
   );
@@ -104,7 +108,7 @@ export default function Models({ mapping }: Props) {
 
 function Tag({ children, accent }: { children: React.ReactNode; accent?: boolean }) {
   return (
-    <span className={`rounded-pill border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+    <span className={`rounded-pill border px-2 py-0.5 font-mono text-[12px] uppercase tracking-wider ${
       accent
         ? "border-n-success text-n-success"
         : "border-n-border-vis text-n-secondary"

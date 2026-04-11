@@ -9,10 +9,10 @@
   --black: #000000;
   --surface: #111111;
   --surface-raised: #1A1A1A;
-  --border: #222222;
-  --border-visible: #333333;
-  --text-disabled: #666666;
-  --text-secondary: #999999;
+  --border: #2A2A2A;
+  --border-visible: #444444;
+  --text-disabled: #808080;
+  --text-secondary: #B0B0B0;
   --text-primary: #E8E8E8;
   --text-display: #FFFFFF;
 
@@ -42,9 +42,9 @@ body {
 
 .label {
   font-family: "Space Mono", monospace;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-secondary);
 }
@@ -96,3 +96,26 @@ body {
 .segmented-bar .segment.success { background: var(--success); }
 .segmented-bar .segment.warning { background: var(--warning); }
 .segmented-bar .segment.accent  { background: var(--accent); }
+
+/* ─── Percussive micro-transitions (Nothing: mechanical, not fluid) ─── */
+
+.transition-micro {
+  transition: color 150ms ease-out, border-color 150ms ease-out, opacity 150ms ease-out, background-color 150ms ease-out;
+}
+
+/* Page content fade-in */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fadeIn {
+  animation: fadeIn 300ms ease-out;
+}
+
+/* Hover brightening for data rows */
+.row-hover {
+  transition: background-color 150ms ease-out;
+}
+.row-hover:hover {
+  background-color: var(--surface);
+}

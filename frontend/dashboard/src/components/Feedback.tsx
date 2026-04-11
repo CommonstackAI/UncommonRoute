@@ -87,10 +87,10 @@ export default function Feedback() {
   const pendingCount = visibleRequests.filter((r) => r.feedback_pending && !(submitted[r.request_id] ?? storedFeedback(r))).length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div>
         <div className="flex items-baseline gap-3 mb-1">
-          <h1 className="text-xl font-semibold tracking-tight text-n-display">Feedback</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">FEEDBACK</h1>
           {pendingCount > 0 && (
             <span className="rounded-pill border border-n-warning px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-warning">
               {pendingCount} AWAITING
@@ -117,7 +117,7 @@ export default function Feedback() {
           </thead>
           <tbody>
             {visibleRequests.length === 0 ? (
-              <tr><td colSpan={7} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet.</td></tr>
+              <tr><td colSpan={7} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet. Send requests through the proxy to start collecting feedback.</td></tr>
             ) : (
               visibleRequests.map((r) => {
                 const fb = submitted[r.request_id] ?? storedFeedback(r);
@@ -125,7 +125,7 @@ export default function Feedback() {
                 const displayTier = normalizeTier(r.tier);
 
                 return (
-                  <tr key={r.request_id} className="border-b border-n-border last:border-0 transition-colors hover:bg-n-raised">
+                  <tr key={r.request_id} className="border-b border-n-border last:border-0 row-hover hover:bg-n-raised">
                     <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{fmtTime(r.timestamp)}</td>
                     <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{r.mode || "auto"}</td>
                     <td className="px-6 py-4">
@@ -172,21 +172,21 @@ export default function Feedback() {
                             onClick={() => handle(r.request_id, "strong")}
                             className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
                           >
-                            CHEAPER
+                            TOO STRONG
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "ok")}
                             className="rounded-pill bg-n-display px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
                           >
-                            RIGHT
+                            JUST RIGHT
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "weak")}
                             className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
                           >
-                            STRONGER
+                            TOO WEAK
                           </button>
                         </div>
                       )}

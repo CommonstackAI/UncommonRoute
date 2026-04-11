@@ -10,6 +10,23 @@ interface Props {
 export default function Activity({ stats }: Props) {
   const [usageView, setUsageView] = useState<UsageView>("requests");
 
+  const models = useMemo(() => {
+    if (!stats) return [];
+    const rows = Object.entries(stats.by_model).map(([name, data]) => {
+      const avgCost = data.count > 0 ? data.total_cost / data.count : 0;
+      return {
+        name,
+        count: data.count,
+        total_cost: data.total_cost,
+        avg_cost: avgCost,
+        share: stats.total_requests > 0 ? (data.count / stats.total_requests) * 100 : 0,
+      };
+    });
+
+    rows.sort((a, b) => getUsageValue(b, usageView) - getUsageValue(a, usageView));
+    return rows;
+  }, [stats, usageView]);
+
   if (!stats || stats.total_requests === 0) {
     return <div className="flex items-center justify-center py-20 font-mono text-[14px] text-n-disabled">No activity recorded yet.</div>;
   }
@@ -48,28 +65,12 @@ export default function Activity({ stats }: Props) {
       ...getModeMeta(mode),
     }));
 
-  const models = useMemo(() => {
-    const rows = Object.entries(stats.by_model).map(([name, data]) => {
-      const avgCost = data.count > 0 ? data.total_cost / data.count : 0;
-      return {
-        name,
-        count: data.count,
-        total_cost: data.total_cost,
-        avg_cost: avgCost,
-        share: stats.total_requests > 0 ? (data.count / stats.total_requests) * 100 : 0,
-      };
-    });
-
-    rows.sort((a, b) => getUsageValue(b, usageView) - getUsageValue(a, usageView));
-    return rows;
-  }, [stats.by_model, stats.total_requests, usageView]);
-
   const maxUsageValue = Math.max(...models.map((row) => getUsageValue(row, usageView)), 0.000001);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-n-display">Activity</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">ACTIVITY</h1>
         <p className="mt-1 text-[13px] text-n-secondary">
           {formatTimeRange(stats.time_range_s)} · {stats.total_requests.toLocaleString()} routed requests
         </p>
@@ -121,7 +122,7 @@ export default function Activity({ stats }: Props) {
               </div>
 
               {/* Segmented bar for tier distribution */}
-              <div className="segmented-bar" style={{ height: "6px" }}>
+              <div className="segmented-bar" style={{ height: "8px" }}>
                 {tierSegments.map((bucket) => {
                   const segCount = Math.max(Math.round(bucket.pct / 5), bucket.count > 0 ? 1 : 0);
                   return Array.from({ length: segCount }).map((_, i) => (
@@ -238,7 +239,7 @@ export default function Activity({ stats }: Props) {
                   const focusValue = getUsageValue(row, usageView);
                   const focusWidth = Math.max((focusValue / maxUsageValue) * 100, 3);
                   return (
-                    <tr key={row.name} className="border-b border-n-border last:border-0 transition-colors hover:bg-n-raised">
+                    <tr key={row.name} className="border-b border-n-border last:border-0 row-hover hover:bg-n-raised">
                       <td className="px-6 py-3.5">
                         <div className="flex items-center gap-3">
                           <div className="flex w-24 gap-[1px]" style={{ height: "4px" }}>

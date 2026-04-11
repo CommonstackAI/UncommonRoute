@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { setSpendLimit, clearSpendLimit, type Spend } from "../api";
 
+function formatWindowName(w: string): string {
+  return w.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 const WINDOWS = ["per_request", "hourly", "daily"];
 
 interface Props {
@@ -38,9 +42,9 @@ export default function SpendPanel({ spend, onRefresh }: Props) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-n-display">Budget</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">BUDGET</h1>
         <p className="mt-1 text-[13px] text-n-secondary">{calls} total calls</p>
       </div>
 
@@ -68,7 +72,7 @@ export default function SpendPanel({ spend, onRefresh }: Props) {
               return (
                 <div key={w}>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="label">{w.toUpperCase()}</span>
+                    <span className="label">{formatWindowName(w).toUpperCase()}</span>
                     <span className={`font-mono text-[12px] ${isLow ? "text-n-accent" : "text-n-primary"}`}>
                       ${spentVal.toFixed(4)} / ${limit.toFixed(2)}
                     </span>
@@ -101,7 +105,7 @@ export default function SpendPanel({ spend, onRefresh }: Props) {
             <select value={window} onChange={(e) => setWindow(e.target.value)}
               className="rounded-compact border border-n-border-vis bg-n-surface px-3 py-2.5 font-mono text-[13px] text-n-primary focus:border-n-display focus:outline-none"
             >
-              {WINDOWS.map((w) => <option key={w} value={w}>{w}</option>)}
+              {WINDOWS.map((w) => <option key={w} value={w}>{formatWindowName(w)}</option>)}
             </select>
           </div>
           <div>
@@ -111,10 +115,10 @@ export default function SpendPanel({ spend, onRefresh }: Props) {
             />
           </div>
           <button disabled={busy} onClick={handleSet}
-            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
+            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >SET LIMIT</button>
           <button disabled={busy} onClick={handleClear}
-            className="rounded-pill border border-n-border-vis px-5 py-2.5 font-mono text-[13px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
+            className="rounded-pill border border-n-border-vis px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
           >CLEAR</button>
         </div>
       </div>
@@ -137,8 +141,8 @@ export default function SpendPanel({ spend, onRefresh }: Props) {
             {activeWindows.length > 0 ? activeWindows.map((w) => {
               const isLow = remaining[w] != null && remaining[w] < limits[w] * 0.2;
               return (
-                <tr key={w} className="border-b border-n-border last:border-0 transition-colors hover:bg-n-raised">
-                  <td className="px-6 py-3.5 font-mono text-[13px] text-n-primary">{w}</td>
+                <tr key={w} className="border-b border-n-border last:border-0 row-hover hover:bg-n-raised">
+                  <td className="px-6 py-3.5 font-mono text-[13px] text-n-primary">{formatWindowName(w)}</td>
                   <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-display">${limits[w].toFixed(2)}</td>
                   <td className="px-6 py-3.5 text-right font-mono text-[13px] text-n-secondary">${(spent[w] ?? 0).toFixed(4)}</td>
                   <td className={`px-6 py-3.5 text-right font-mono text-[13px] font-semibold ${isLow ? "text-n-accent" : "text-n-success"}`}>

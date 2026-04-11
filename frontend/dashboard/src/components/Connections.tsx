@@ -36,6 +36,15 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
   const [providers, setProviders] = useState<ProviderRecord[]>([]);
   const [upstream, setUpstream] = useState(initialConnection?.upstream ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [formDirty, setFormDirty] = useState(false);
+
+  // Sync with parent health poll updates — but only when user hasn't started editing
+  useEffect(() => {
+    if (initialConnection && !formDirty) {
+      setConnection(initialConnection);
+      setUpstream(initialConnection.upstream);
+    }
+  }, [initialConnection, formDirty]);
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>(EMPTY_PROVIDER);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
@@ -61,11 +70,13 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
   async function handleSaveConnection() {
     setBusyKey("primary");
     setMessage("");
-    const updated = await updateConnections(upstream.trim(), apiKey.trim());
+    // Pass undefined when field is empty to keep current key; pass string to change/clear
+    const updated = await updateConnections(upstream.trim(), apiKey === "" ? undefined : apiKey.trim());
     if (updated) {
       setConnection(updated);
       setUpstream(updated.upstream);
       setApiKey("");
+      setFormDirty(false);
       setMessage("Primary upstream updated.");
       onRefresh();
     } else {
@@ -131,9 +142,9 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
   const connectionEditable = connection?.editable ?? true;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-n-display">Connections</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">CONNECTIONS</h1>
         <p className="mt-1 text-[13px] text-n-secondary">
           Manage the primary upstream and live BYOK provider keys.
         </p>
@@ -171,14 +182,14 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
           <Field
             label="UPSTREAM URL"
             value={upstream}
-            onChange={setUpstream}
+            onChange={(v) => { setUpstream(v); setFormDirty(true); }}
             placeholder="https://api.commonstack.ai/v1"
             disabled={!connectionEditable || busyKey === "primary"}
           />
           <Field
             label="API KEY"
             value={apiKey}
-            onChange={setApiKey}
+            onChange={(v) => { setApiKey(v); setFormDirty(true); }}
             placeholder={connection?.has_api_key ? "Leave empty to keep current key" : "sk-..."}
             disabled={!connectionEditable || busyKey === "primary"}
             type="password"
@@ -194,7 +205,7 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
           <button
             disabled={!connectionEditable || busyKey === "primary"}
             onClick={handleSaveConnection}
-            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
+            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >
             SAVE PRIMARY
           </button>
@@ -263,7 +274,7 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
           <button
             disabled={busyKey === "provider:add"}
             onClick={handleSaveProvider}
-            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
+            className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >
             ADD PROVIDER
           </button>
@@ -348,7 +359,7 @@ function Field({ label, value, onChange, placeholder, disabled = false, type = "
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         disabled={disabled}
-        className="w-full border-b border-n-border-vis bg-transparent px-0 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-display focus:outline-none disabled:opacity-50"
+        className="w-full border-b border-n-border-vis bg-transparent px-0 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-display focus:outline-none disabled:opacity-50 transition-colors duration-150"
       />
     </div>
   );

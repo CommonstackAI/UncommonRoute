@@ -1686,7 +1686,13 @@ def create_app(
     _dashboard_mount = None
     try:
         import importlib.resources as _pkg
+        from pathlib import Path as _P
         _static_dir = str(_pkg.files("uncommon_route") / "static")
+        # Fallback: if importlib points to stale site-packages, use local package dir
+        if not (_P(_static_dir) / "index.html").exists():
+            _local_static = _P(__file__).resolve().parent / "static"
+            if (_local_static / "index.html").exists():
+                _static_dir = str(_local_static)
         _dashboard_mount = StaticFiles(directory=_static_dir, html=True)
     except Exception:  # noqa: BLE001
         pass

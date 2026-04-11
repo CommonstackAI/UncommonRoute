@@ -8,10 +8,17 @@ from uncommon_route.signals.embedding import EmbeddingSignal, _extract_last_user
 def _make_seed_index(tmp_path: Path):
     dim = 384
     rng = np.random.RandomState(42)
-    embeddings = rng.randn(4, dim).astype(np.float32)
+    # Create cluster of similar vectors for tier 0 so KNN has enough
+    # same-label neighbors to exceed MIN_CONFIDENCE_TO_VOTE (0.30).
+    base = rng.randn(dim).astype(np.float32)
+    vecs = [base + rng.randn(dim).astype(np.float32) * 0.2 for _ in range(5)]
+    # Add a distant vector for tier 3
+    far = rng.randn(dim).astype(np.float32)
+    vecs.append(far)
+    embeddings = np.array(vecs, dtype=np.float32)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / norms
-    labels = [0, 1, 2, 3]
+    labels = [0, 0, 0, 0, 0, 3]
     np.save(tmp_path / "seed_embeddings.npy", embeddings)
     with open(tmp_path / "seed_labels.json", "w") as f:
         json.dump(labels, f)

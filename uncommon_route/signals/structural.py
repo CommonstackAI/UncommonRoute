@@ -39,11 +39,21 @@ class StructuralSignal:
 
         result = classify(text)
         tier_id = _map_v1_to_v2_tier_id(result.tier, result.complexity)
+        confidence = max(0.0, min(1.0, result.confidence))
+
+        # Dampen confidence for very short prompts — structural features
+        # are unreliable when there's little text to analyze.
+        # Use word count for Latin scripts, character count for CJK.
+        word_count = len(text.split())
+        if word_count <= 2 and len(text) > 15:
+            # CJK or no-space script: use character length instead
+            word_count = len(text) // 3  # rough CJK word estimate
+        if word_count <= 8:
+            confidence = min(confidence, 0.50)
+        elif word_count <= 15:
+            confidence = min(confidence, 0.70)
 
         if tier_id is None:
-            return TierVote(tier_id=None, confidence=max(0.0, min(1.0, result.confidence)))
+            return TierVote(tier_id=None, confidence=confidence)
 
-        return TierVote(
-            tier_id=tier_id,
-            confidence=max(0.0, min(1.0, result.confidence)),
-        )
+        return TierVote(tier_id=tier_id, confidence=confidence)

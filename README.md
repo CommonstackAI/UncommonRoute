@@ -89,6 +89,24 @@ Signals vote. The ensemble picks the tier. The router selects the cheapest model
 
 ---
 
+## Why v2
+
+Our v1 classifier hit 88.5% accuracy on clean benchmark data. We shipped it.
+
+Then we tested on real agent conversations — multi-turn, tool-calling, messy context — and accuracy dropped to 43%. More than half the routing decisions were wrong.
+
+We didn't patch it. We rebuilt from scratch.
+
+| | v1 | v2 |
+|---|---|---|
+| **Accuracy** | 43% | **72.7%** |
+| **Task pass rate** | 100% (cheated — always chose most expensive) | **90.3%** (real routing) |
+| **Cost savings** | 0% | **77%** |
+
+We're telling you this because we'd rather you trust our numbers than be impressed by them.
+
+---
+
 ## Benchmarks
 
 Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 762 real agent task traces. All numbers measured end-to-end through the production code path.

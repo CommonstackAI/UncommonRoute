@@ -91,7 +91,7 @@ Signals vote. The ensemble picks the tier. The router selects the cheapest model
 
 ## Benchmarks
 
-Tested on [LLMRouterBench](../LLMRouterBench) — 762 real agent task traces. All numbers measured end-to-end through the production code path.
+Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 762 real agent task traces. All numbers measured end-to-end through the production code path.
 
 | Metric | Value |
 |---|---|

@@ -802,8 +802,11 @@ class OpenAIToAnthropicStreamConverter:
         delta = choices[0].get("delta", {})
         finish_reason = choices[0].get("finish_reason")
 
-        # Text content
+        # Text content (fall back to reasoning_content for models that
+        # return thinking/reasoning in a separate field with content=null)
         content = delta.get("content")
+        if (content is None or content == "") and delta.get("reasoning_content"):
+            content = delta["reasoning_content"]
         if content is not None and content != "":
             if self._block_type != "text":
                 if self._block_type is not None:

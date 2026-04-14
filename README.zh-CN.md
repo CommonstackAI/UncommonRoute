@@ -131,7 +131,7 @@ uncommon-route serve
 # → http://localhost:8403/dashboard/
 ```
 
-实时监控、交互式 Playground、成本追踪、路由配置——采用 [Nothing Design](https://nothing.tech) 风格的深色界面。
+实时监控、交互式 Playground、成本追踪、路由配置——采用 Nothing Design 风格的深色界面。
 
 ---
 

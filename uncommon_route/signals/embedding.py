@@ -46,11 +46,13 @@ class EmbeddingSignal:
         model_name: str | None = "BAAI/bge-small-en-v1.5",
         classifier_path: Path | None = None,
         use_classifier: bool = True,
+        classifier_fallback_threshold: float = 0.80,
     ):
         self._embeddings: np.ndarray | None = None
         self._labels: list[int] | None = None
         self._embed_fn: Callable[[str], np.ndarray] | None = None
         self._classifier: Any = None  # sklearn classifier (optional)
+        self._clf_fallback_threshold = classifier_fallback_threshold
 
         if index_path and Path(index_path).exists() and labels_path and Path(labels_path).exists():
             self._embeddings = np.load(index_path)
@@ -98,11 +100,18 @@ class EmbeddingSignal:
 
         query_vec = self._embed_fn(text)
 
-        # Use trained classifier if available
+        # Hybrid: classifier first, KNN fallback when classifier is uncertain.
+        # This is the unified approach for both production and preview paths.
         if self._classifier is not None:
-            return self._predict_classifier(query_vec)
+            vote = self._predict_classifier(query_vec)
+            if vote.confidence >= self._clf_fallback_threshold:
+                return vote
+            # Classifier unsure — fall back to KNN for semantic grounding
+            if self._embeddings is not None and self._labels is not None:
+                return self._predict_knn(query_vec)
+            return vote
 
-        # Fallback to KNN
+        # No classifier — KNN only
         if self._embeddings is None or self._labels is None:
             return TierVote(tier_id=None, confidence=0.0)
         return self._predict_knn(query_vec)

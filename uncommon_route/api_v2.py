@@ -40,15 +40,12 @@ def init_signals(index_dir=None):
     if index_dir:
         from pathlib import Path
         d = Path(index_dir)
-        # For preview: use KNN (no classifier) because the logistic regression
-        # classifier is heavily biased toward LOW on the imbalanced training set.
-        # KNN preserves semantic similarity — e.g. "prove Kepler conjecture"
-        # correctly matches complex math/reasoning neighbors.
+        # Unified hybrid: classifier when confident, KNN fallback when uncertain.
+        # Same behavior as production path — no more prod/preview split.
         _sig_c = EmbeddingSignal(
             index_path=d / "seed_embeddings.npy",
             labels_path=d / "seed_labels.json",
             model_name="BAAI/bge-small-en-v1.5",
-            use_classifier=False,  # force KNN — classifier is biased toward LOW
         )
     else:
         _sig_c = EmbeddingSignal(model_name=None)

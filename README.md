@@ -131,7 +131,7 @@ uncommon-route serve
 # → http://localhost:8403/dashboard/
 ```
 
-Real-time monitoring, interactive playground, cost tracking, and model routing configuration — all in a [Nothing Design](https://nothing.tech)-inspired interface.
+Real-time monitoring, interactive playground, cost tracking, and model routing configuration — all in a Nothing Design-inspired interface.
 
 ---
 

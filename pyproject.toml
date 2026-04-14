@@ -1,6 +1,6 @@
 [project]
 name = "uncommon-route"
-version = "0.5.1"
+version = "0.5.2"
 description = "Local LLM router that cuts premium-model spend with adaptive 3-tier routing, OpenAI + Anthropic compatible"
 requires-python = ">=3.11"
 license = "MIT"
@@ -24,9 +24,13 @@ dependencies = [
     "httpx>=0.27",
     "uvicorn>=0.30",
     "starlette>=0.38",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
+v2 = [
+    "sentence-transformers>=2.2",
+]
 dev = [
     "build>=1.2",
     "pytest>=8.0",

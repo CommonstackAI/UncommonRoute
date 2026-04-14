@@ -14,9 +14,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
-import numpy as np
-
 from uncommon_route.signals.base import TierVote
+
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
 
 logger = logging.getLogger("uncommon-route.embedding")
 
@@ -48,11 +51,15 @@ class EmbeddingSignal:
         use_classifier: bool = True,
         classifier_fallback_threshold: float = 0.80,
     ):
-        self._embeddings: np.ndarray | None = None
+        self._embeddings: Any = None
         self._labels: list[int] | None = None
-        self._embed_fn: Callable[[str], np.ndarray] | None = None
+        self._embed_fn: Callable | None = None
         self._classifier: Any = None  # sklearn classifier (optional)
         self._clf_fallback_threshold = classifier_fallback_threshold
+
+        if np is None:
+            logger.info("numpy not installed; embedding signal disabled")
+            return
 
         if index_path and Path(index_path).exists() and labels_path and Path(labels_path).exists():
             self._embeddings = np.load(index_path)

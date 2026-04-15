@@ -10,6 +10,22 @@ import numpy as np
 from pathlib import Path
 
 
+def _extract_text(content) -> str:
+    """Normalize message content — handles both string and list formats."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # OpenAI multi-part format: [{"type": "text", "text": "..."}, ...]
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        return " ".join(parts)
+    return str(content) if content else ""
+
+
 def main():
     train_path = Path("uncommon_route/data/v2_splits/train.jsonl")
     if not train_path.exists():
@@ -29,8 +45,8 @@ def main():
     for row in rows:
         for m in reversed(row.get("messages", [])):
             if m.get("role") == "user":
-                text = m.get("content", "")
-                if isinstance(text, str) and text.strip():
+                text = _extract_text(m.get("content", ""))
+                if text.strip():
                     texts.append(text)
                     labels.append(row["target_tier_id"])
                 break

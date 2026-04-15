@@ -27,11 +27,25 @@ K_NEIGHBORS = 7
 MIN_CONFIDENCE_TO_VOTE = 0.3
 
 
+def _normalize_content(content: Any) -> str:
+    """Normalize message content — handles string and list formats."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        return " ".join(parts)
+    return str(content) if content else ""
+
+
 def _extract_last_user_message(messages: list[dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            content = m.get("content", "")
-            return content if isinstance(content, str) else str(content)
+            return _normalize_content(m.get("content", ""))
     return ""
 
 
@@ -49,12 +63,13 @@ class EmbeddingSignal:
         model_name: str | None = "BAAI/bge-small-en-v1.5",
         classifier_path: Path | None = None,
         use_classifier: bool = True,
-        classifier_fallback_threshold: float = 0.80,
+        classifier_fallback_threshold: float = 0.95,
     ):
         self._embeddings: Any = None
         self._labels: list[int] | None = None
         self._embed_fn: Callable | None = None
         self._classifier: Any = None  # sklearn classifier (optional)
+        self._meta_scaler: Any = None  # StandardScaler for metadata features
         self._clf_fallback_threshold = classifier_fallback_threshold
 
         if np is None:
@@ -74,6 +89,7 @@ class EmbeddingSignal:
                     with open(classifier_path, "rb") as f:
                         self._classifier = pickle.load(f)
                     logger.info("Loaded trained embedding classifier from %s", classifier_path)
+                    self._try_load_scaler(Path(classifier_path).parent)
                 except Exception as e:
                     logger.warning("Failed to load classifier: %s — falling back to KNN", e)
             elif index_path:
@@ -84,6 +100,7 @@ class EmbeddingSignal:
                         with open(auto_clf, "rb") as f:
                             self._classifier = pickle.load(f)
                         logger.info("Auto-loaded embedding classifier from %s", auto_clf)
+                        self._try_load_scaler(Path(index_path).parent)
                     except Exception:
                         pass
 
@@ -97,23 +114,46 @@ class EmbeddingSignal:
             except Exception as e:
                 logger.warning(f"Failed to load embedding model {model_name}: {e}")
 
+    def _try_load_scaler(self, directory: Path) -> None:
+        """Load metadata feature scaler if available."""
+        scaler_path = directory / "meta_scaler.pkl"
+        if scaler_path.exists():
+            try:
+                with open(scaler_path, "rb") as f:
+                    self._meta_scaler = pickle.load(f)
+                logger.info("Loaded metadata scaler from %s", scaler_path)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _extract_meta_features(messages: list[dict[str, Any]], text: str) -> list[float]:
+        """Extract metadata features to augment embedding vector."""
+        msg_count = len(messages)
+        has_tools = int(any(m.get("role") == "tool" or m.get("tool_calls") for m in messages))
+        tool_count = sum(1 for m in messages if m.get("role") == "tool" or m.get("tool_calls"))
+        user_len = len(text)
+        user_words = len(text.split())
+        has_code = int("```" in text)
+        has_question = int("?" in text[-50:] if len(text) > 50 else "?" in text)
+        return [msg_count, has_tools, tool_count, user_len, user_words, has_code, has_question]
+
     def predict(self, row: dict[str, Any]) -> TierVote:
         if self._embed_fn is None:
             return TierVote(tier_id=None, confidence=0.0)
 
-        text = _extract_last_user_message(row.get("messages", []))
+        messages = row.get("messages", [])
+        text = _extract_last_user_message(messages)
         if not text.strip():
             return TierVote(tier_id=None, confidence=0.0)
 
         query_vec = self._embed_fn(text)
+        meta_feats = self._extract_meta_features(messages, text)
 
         # Hybrid: classifier first, KNN fallback when classifier is uncertain.
-        # This is the unified approach for both production and preview paths.
         if self._classifier is not None:
-            vote = self._predict_classifier(query_vec)
+            vote = self._predict_classifier(query_vec, meta_feats)
             if vote.confidence >= self._clf_fallback_threshold:
                 return vote
-            # Classifier unsure — fall back to KNN for semantic grounding
             if self._embeddings is not None and self._labels is not None:
                 return self._predict_knn(query_vec)
             return vote
@@ -123,9 +163,13 @@ class EmbeddingSignal:
             return TierVote(tier_id=None, confidence=0.0)
         return self._predict_knn(query_vec)
 
-    def _predict_classifier(self, query_vec: np.ndarray) -> TierVote:
-        """Predict using trained logistic regression on frozen embedding."""
+    def _predict_classifier(self, query_vec: np.ndarray, meta_feats: list[float] | None = None) -> TierVote:
+        """Predict using classifier on embedding + optional metadata features."""
         vec = query_vec.reshape(1, -1)
+        if meta_feats is not None and self._meta_scaler is not None:
+            meta_arr = np.array([meta_feats], dtype=float)
+            meta_scaled = self._meta_scaler.transform(meta_arr)
+            vec = np.hstack([vec, meta_scaled])
         pred = int(self._classifier.predict(vec)[0])
         proba = self._classifier.predict_proba(vec)[0]
         confidence = float(proba[pred])

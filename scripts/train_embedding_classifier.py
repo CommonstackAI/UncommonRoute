@@ -28,8 +28,8 @@ sys.path.insert(0, str(ROOT / "UncommonRoute"))
 
 
 def load_split(path: Path, model):
-    """Load a JSONL split and compute embeddings for last user messages."""
-    from uncommon_route.signals.embedding import _extract_last_user_message
+    """Load a JSONL split — returns embeddings, metadata features, and labels."""
+    from uncommon_route.signals.embedding import _extract_last_user_message, EmbeddingSignal
 
     rows = []
     with open(path) as f:
@@ -39,15 +39,22 @@ def load_split(path: Path, model):
                 rows.append(json.loads(line))
 
     texts = []
+    meta_feats = []
     labels = []
     for row in rows:
-        text = _extract_last_user_message(row.get("messages", []))
+        messages = row.get("messages", [])
+        text = _extract_last_user_message(messages)
         if text.strip():
             texts.append(text)
+            meta_feats.append(EmbeddingSignal._extract_meta_features(messages, text))
             labels.append(row["target_tier_id"])
 
     embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-    return np.array(embeddings, dtype=np.float32), np.array(labels, dtype=np.int32)
+    return (
+        np.array(embeddings, dtype=np.float32),
+        np.array(meta_feats, dtype=np.float32),
+        np.array(labels, dtype=np.int32),
+    )
 
 
 def main():
@@ -63,25 +70,37 @@ def main():
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 
-    print("Computing embeddings for each split...")
-    X_train, y_train = load_split(splits_dir / "train.jsonl", model)
-    X_cal, y_cal = load_split(splits_dir / "calibration.jsonl", model)
-    X_holdout, y_holdout = load_split(splits_dir / "holdout.jsonl", model)
+    print("Computing embeddings + metadata features for each split...")
+    E_train, M_train, y_train = load_split(splits_dir / "train.jsonl", model)
+    E_cal, M_cal, y_cal = load_split(splits_dir / "calibration.jsonl", model)
+    E_holdout, M_holdout, y_holdout = load_split(splits_dir / "holdout.jsonl", model)
 
-    print(f"  Train:      {len(y_train)} samples")
+    print(f"  Train:      {len(y_train)} samples ({E_train.shape[1]}d emb + {M_train.shape[1]} meta)")
     print(f"  Calibration: {len(y_cal)} samples")
     print(f"  Holdout:     {len(y_holdout)} samples")
+
+    # Scale metadata features
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    M_train_s = scaler.fit_transform(M_train)
+    M_cal_s = scaler.transform(M_cal)
+    M_holdout_s = scaler.transform(M_holdout)
+
+    # Combine embedding + scaled metadata
+    X_train = np.hstack([E_train, M_train_s])
+    X_cal = np.hstack([E_cal, M_cal_s])
+    X_holdout = np.hstack([E_holdout, M_holdout_s])
 
     # Train L2-regularized logistic regression with cross-validation for C
     from sklearn.linear_model import LogisticRegressionCV
 
-    print("\nTraining logistic regression (L2, cross-validated C)...")
+    print("\nTraining logistic regression on embedding+metadata features...")
     clf = LogisticRegressionCV(
         Cs=[0.01, 0.1, 0.5, 1.0, 5.0, 10.0],
         cv=5,
         penalty="l2",
         solver="lbfgs",
-        max_iter=1000,
+        max_iter=2000,
         random_state=42,
     )
     clf.fit(X_train, y_train)
@@ -129,12 +148,16 @@ def main():
     print(f"\n  KNN baseline (K=7) holdout: {knn_holdout_acc:.1%}")
     print(f"  LogReg improvement:         +{(holdout_acc - knn_holdout_acc)*100:.1f} pts")
 
-    # Save the model
+    # Save the model + scaler
     import pickle
     out_path = splits_dir / "embedding_classifier.pkl"
     with open(out_path, "wb") as f:
         pickle.dump(clf, f)
+    scaler_path = splits_dir / "meta_scaler.pkl"
+    with open(scaler_path, "wb") as f:
+        pickle.dump(scaler, f)
     print(f"\n  Saved classifier to {out_path}")
+    print(f"  Saved metadata scaler to {scaler_path}")
 
     # Also save the embeddings for holdout (for E2E validation)
     np.save(splits_dir / "holdout_embeddings.npy", X_holdout)

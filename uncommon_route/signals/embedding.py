@@ -164,12 +164,19 @@ class EmbeddingSignal:
         return self._predict_knn(query_vec)
 
     def _predict_classifier(self, query_vec: np.ndarray, meta_feats: list[float] | None = None) -> TierVote:
-        """Predict using classifier on embedding + optional metadata features."""
+        """Predict using classifier on embedding + metadata features.
+
+        If meta_scaler is missing but classifier was trained on combined features,
+        skip classifier entirely and return low-confidence abstain to trigger KNN fallback.
+        """
         vec = query_vec.reshape(1, -1)
         if meta_feats is not None and self._meta_scaler is not None:
             meta_arr = np.array([meta_feats], dtype=float)
             meta_scaled = self._meta_scaler.transform(meta_arr)
             vec = np.hstack([vec, meta_scaled])
+        elif self._meta_scaler is None and hasattr(self._classifier, "n_features_in_") and self._classifier.n_features_in_ > vec.shape[1]:
+            # Classifier expects combined features but scaler is missing — can't match dimensions
+            return TierVote(tier_id=None, confidence=0.0)
         pred = int(self._classifier.predict(vec)[0])
         proba = self._classifier.predict_proba(vec)[0]
         confidence = float(proba[pred])

@@ -51,30 +51,31 @@ class MetadataSignal:
 
         # Strongest signal: tool usage (16% low vs 98% high)
         if not has_tools:
-            # No tools at all → likely simple
             if msg_count <= 3:
                 return TierVote(tier_id=0, confidence=0.75)
             if msg_count <= 6:
                 return TierVote(tier_id=0, confidence=0.65)
-            # Long conversation but no tools → probably summarization/QA → low-mid
             return TierVote(tier_id=0, confidence=0.55)
 
-        # Has tools — differentiate by depth
+        # Has tools — differentiate by depth.
+        # In multi-step agent workflows, tool messages accumulate from prior
+        # steps but the CURRENT step may be simple. Dampen confidence when
+        # the conversation looks like accumulated workflow history so the
+        # embedding signal (which reads the actual content) can dominate.
+        multi_step_workflow = msg_count > 6 and tool_msg_count > 4
+        conf_cap = 0.50 if multi_step_workflow else 1.0
+
         if tool_msg_count >= 8 and msg_count > 10:
-            # Heavy tool usage + deep conversation → high
-            return TierVote(tier_id=3, confidence=0.75)
+            return TierVote(tier_id=3, confidence=min(0.75, conf_cap))
 
         if tool_msg_count >= 4 and msg_count > 8:
-            # Moderate tool usage → likely high
-            return TierVote(tier_id=3, confidence=0.65)
+            return TierVote(tier_id=3, confidence=min(0.65, conf_cap))
 
         if tool_msg_count >= 4:
-            # Some tool usage → mid_high
-            return TierVote(tier_id=2, confidence=0.55)
+            return TierVote(tier_id=2, confidence=min(0.55, conf_cap))
 
         if msg_count > 6:
-            # Light tools but long conversation → mid_high
-            return TierVote(tier_id=2, confidence=0.50)
+            return TierVote(tier_id=2, confidence=min(0.50, conf_cap))
 
         # Light tools, short conversation → mid
         return TierVote(tier_id=1, confidence=0.50)

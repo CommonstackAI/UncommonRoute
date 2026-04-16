@@ -63,7 +63,7 @@ class EmbeddingSignal:
         model_name: str | None = "BAAI/bge-small-en-v1.5",
         classifier_path: Path | None = None,
         use_classifier: bool = True,
-        classifier_fallback_threshold: float = 0.95,
+        classifier_fallback_threshold: float = 0.92,
     ):
         self._embeddings: Any = None
         self._labels: list[int] | None = None

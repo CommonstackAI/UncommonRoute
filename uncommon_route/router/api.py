@@ -1,8 +1,9 @@
 """Public API — the route() entry point.
 
 v2: Uses multi-signal ensemble (metadata heuristics + embedding KNN) instead
-of v1's single text classifier. Signal B (structural) runs in shadow mode.
-PlattCalibrator applied to ensemble confidence. Model selection unchanged.
+of v1's single text classifier. Signal B (structural) is conditionally active
+on longer conversations and otherwise remains in shadow mode. PlattCalibrator
+applied to ensemble confidence. Model selection unchanged.
 """
 
 from __future__ import annotations
@@ -45,13 +46,18 @@ logger = logging.getLogger("uncommon-route")
 # ─── v2 Signal Singletons ───
 
 _v2_sig_a: MetadataSignal | None = None
-_v2_sig_b: StructuralSignal | None = None  # shadow mode
+_v2_sig_b: StructuralSignal | None = None  # conditional + shadow
 _v2_sig_c: EmbeddingSignal | None = None
 _v2_calibrator: PlattCalibrator | None = None
 _v2_initialized = False
 
 # tier_id → complexity (inverse of _derive_tier boundaries)
 _TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.68, 3: 0.90}
+
+
+def _should_activate_signal_b(row: dict[str, Any]) -> bool:
+    """Enable Signal B on longer conversations where it improves pass rate."""
+    return len(row.get("messages", [])) >= 4
 
 
 @dataclass(frozen=True)
@@ -63,7 +69,7 @@ class V2ClassifyResult:
     method: str
     signals_text: tuple[str, ...]
     vote_a: TierVote
-    vote_b: TierVote  # shadow — not used in ensemble
+    vote_b: TierVote
     vote_c: TierVote
     query_embedding: Any = None  # cached for index growth (numpy array or None)
 
@@ -74,7 +80,7 @@ def _ensure_v2_signals() -> None:
         return
     _v2_initialized = True
     _v2_sig_a = MetadataSignal()
-    _v2_sig_b = StructuralSignal()  # always loaded for shadow mode
+    _v2_sig_b = StructuralSignal()  # always loaded for conditional/shadow use
     # Auto-deploy seed index from package data if not in user data dir
     try:
         ensure_seed_index_deployed()
@@ -187,9 +193,10 @@ def _v2_classify(
         except Exception:
             pass
 
-    # Check if shadow mode promoted Signal B
+    # Signal B is active for longer conversations and can also be
+    # globally promoted by the lifecycle tracker.
     from uncommon_route import v2_lifecycle as _lc
-    use_signal_b = _lc.is_signal_b_promoted()
+    use_signal_b = _should_activate_signal_b(row) or _lc.is_signal_b_promoted()
 
     # Get learned weights from tracker (falls back to defaults if not initialized)
     tracker_weights = _lc._weight_tracker.weights if _lc._weight_tracker else None

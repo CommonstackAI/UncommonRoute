@@ -1,10 +1,10 @@
 """v2 evaluation: Signal ensemble on holdout.
 
-Default: 2-signal (A+C) with Signal B in shadow mode.
-Signal B runs but doesn't vote — its predictions are tracked for auto-promotion.
+Default: 2-signal (A+C) with conditional Signal B activation on longer
+conversations and shadow tracking elsewhere.
 
 Usage:
-    python scripts/eval_v2.py                                    # 2-signal + shadow B
+    python scripts/eval_v2.py                                    # conditional B + shadow elsewhere
     python scripts/eval_v2.py --signals 2                        # 2-signal, no shadow
     python scripts/eval_v2.py --signals 3                        # 3-signal (force B active)
     python scripts/eval_v2.py --risk-tolerance 0.3               # conservative
@@ -29,6 +29,7 @@ from uncommon_route.signals.metadata import MetadataSignal
 from uncommon_route.signals.embedding import EmbeddingSignal
 from uncommon_route.decision.ensemble import Ensemble
 from uncommon_route.decision.calibration import PlattCalibrator, load_calibrator
+from uncommon_route.router.api import _should_activate_signal_b
 
 
 def _load_calibrator_if_exists(index_dir: Path) -> PlattCalibrator | None:
@@ -66,7 +67,7 @@ def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 2, 
 
         return predict_3, None  # no shadow tracker in forced mode
 
-    # Default: 2-signal with optional shadow + auto-promotion
+    # Default: 2-signal with conditional Signal B activation and optional shadow
     ensemble_2sig = Ensemble(
         weights=[0.55, 0.45],
         risk_tolerance=risk_tolerance,
@@ -91,8 +92,9 @@ def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 2, 
         vote_a = sig_a.predict(row)
         vote_c = sig_c.predict(row)
 
-        # If shadow promoted Signal B, switch to 3-signal
-        if shadow_tracker is not None and shadow_tracker.promoted and sig_b is not None and ensemble_3sig is not None:
+        activate_b = _should_activate_signal_b(row)
+        promoted_b = shadow_tracker is not None and shadow_tracker.promoted
+        if (activate_b or promoted_b) and sig_b is not None and ensemble_3sig is not None:
             vote_b = sig_b.predict(row)
             result = ensemble_3sig.decide([vote_a, vote_b, vote_c])
             return 1 if result.tier_id is None else result.tier_id
@@ -100,8 +102,9 @@ def make_v2_predictor(risk_tolerance: float, index_dir: Path, signals: int = 2, 
         result = ensemble_2sig.decide([vote_a, vote_c])
         tier_id = 1 if result.tier_id is None else result.tier_id
 
-        # Shadow: run Signal B, record all signal data for proper counterfactual replay
-        if sig_b is not None and shadow_tracker is not None:
+        # Shadow: run Signal B on rows where it stays inactive so we can
+        # continue counterfactual tracking.
+        if sig_b is not None and shadow_tracker is not None and not activate_b:
             vote_b = sig_b.predict(row)
             gold = row.get("target_tier_id")  # available in eval, None in production
             shadow_tracker.record(
@@ -151,7 +154,7 @@ def main():
     predictor = FunctionPredictor(predict_fn)
     mode_label = f"{args.signals}sig"
     if args.signals == 2 and args.shadow:
-        mode_label += "+shadow_b"
+        mode_label += "+cond_b"
     label = f"v2_{mode_label}_rt{args.risk_tolerance}"
 
     progress = (lambda msg: print(msg, file=sys.stderr)) if args.verbose else None

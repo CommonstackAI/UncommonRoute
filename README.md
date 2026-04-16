@@ -4,7 +4,7 @@
 
 <h1>UncommonRoute</h1>
 
-**Cut your LLM costs by 77% with automatic model routing.**
+**Cut your LLM costs by 82% with automatic model routing.**
 
 Most of your LLM budget goes to simple tasks that don't need a premium model.
 UncommonRoute picks the cheapest model that still gets the job done — automatically.
@@ -99,9 +99,9 @@ We didn't patch it. We rebuilt from scratch.
 
 | | v1 | v2 |
 |---|---|---|
-| **Accuracy** | 43% | **72.7%** |
-| **Task pass rate** | 100% (cheated — always chose most expensive) | **90.3%** (real routing) |
-| **Cost savings** | 0% | **77%** |
+| **Accuracy** | 43% | **79.4%** |
+| **Task pass rate** | 100% (cheated — always chose most expensive) | **93.4%** (real routing) |
+| **Cost savings** | 0% | **82%** |
 
 We're telling you this because we'd rather you trust our numbers than be impressed by them.
 
@@ -109,14 +109,14 @@ We're telling you this because we'd rather you trust our numbers than be impress
 
 ## Benchmarks
 
-Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 762 real agent task traces. All numbers measured end-to-end through the production code path.
+Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 970 real agent task traces across SWE-Bench, BFCL, MT-RAG, QMSum, and PinchBench. All numbers measured end-to-end through the production code path.
 
 | Metric | Value |
 |---|---|
-| **Cost savings** | **77%** vs always-premium |
-| **Task pass rate** | **90.3%** |
+| **Cost savings** | **82%** vs always-premium |
+| **Task pass rate** | **93.4%** |
 | **Routing overhead** | **<10ms** |
-| **Accuracy** | **72.7%** tier match |
+| **Accuracy** | **79.4%** tier match |
 
 ```bash
 python scripts/eval_v2.py  # reproduce it yourself

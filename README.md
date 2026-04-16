@@ -100,7 +100,7 @@ We didn't patch it. We rebuilt from scratch.
 
 | | v1 | v2 |
 |---|---|---|
-| **Accuracy** | 43% | **79.4%** |
+| **Accuracy** | 43% | **78%** |
 | **Task pass rate** | 100% (cheated — always chose most expensive) | **93.4%** (real routing) |
 | **Cost savings** | 0% | **82%** |
 
@@ -117,7 +117,7 @@ Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench
 | **Cost savings** | **82%** vs always-premium |
 | **Task pass rate** | **93.4%** |
 | **Routing overhead** | **<10ms** |
-| **Accuracy** | **79.4%** tier match |
+| **Accuracy** | **78%** tier match |
 
 ```bash
 python scripts/eval_v2.py  # reproduce it yourself

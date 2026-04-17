@@ -34,17 +34,51 @@ UncommonRoute 自动选最便宜、又能完成任务的模型。
 
 ## 快速开始
 
+### 1. 安装
+
 ```bash
 pip install uncommon-route
 ```
 
+### 2. 接入上游——二选一
+
+**方式 A — Commonstack 托管（推荐，一把 key 覆盖所有 provider）**
+
+在 [commonstack.ai](https://commonstack.ai) 注册并从 dashboard 拿到你的 API key，然后：
+
 ```bash
-export UNCOMMON_ROUTE_UPSTREAM="https://api.openai.com/v1"  # 或任何 OpenAI 兼容的 API
-export UNCOMMON_ROUTE_API_KEY="your-key"
+export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
+export UNCOMMON_ROUTE_API_KEY="csk-your-key"
 uncommon-route serve
 ```
 
-把你的客户端指向代理——只需改一行：
+一把 key 打通 OpenAI、Anthropic、Google、xAI、MiniMax、Moonshot、DeepSeek 等所有主流 provider——统一账单，无需逐家申请。
+
+**方式 B — 自带 key（BYOK）**
+
+注册你已经有 key 的任意 provider（可选任意子集）：
+
+```bash
+uncommon-route provider add openai     sk-...
+uncommon-route provider add anthropic  sk-ant-...
+uncommon-route provider add google     AIza...
+# 同样支持：xai、minimax、moonshot、deepseek
+uncommon-route serve
+```
+
+Auto 路由只会在已注册的 provider 范围内选模型。
+
+> **注意：** UncommonRoute **不会**自动读取 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 环境变量。请用上面两种方式之一。
+
+### 3. 把客户端指向代理
+
+| 客户端 | 改动 |
+|---|---|
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
+| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
+| OpenClaw | 插件接入——详见 [openclaw.ai](https://openclaw.ai) |
+
+然后把模型 ID 设为 `uncommon-route/auto`：
 
 ```python
 client = OpenAI(base_url="http://localhost:8403/v1")
@@ -52,18 +86,7 @@ resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs
 # → 简单任务走便宜模型，复杂任务走顶配模型
 ```
 
-支持 **Codex**、**Claude Code**、**Cursor**、**OpenAI SDK** 和 **OpenClaw**。
-
-<details>
-<summary><strong>各客户端接入方式</strong></summary>
-
-| 客户端 | 改动 |
-|---|---|
-| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
-| OpenClaw | 插件接入——详见 [openclaw.ai](https://openclaw.ai) |
-
-</details>
+支持 **Claude Code**、**Codex**、**Cursor**、**OpenAI SDK** 和 **OpenClaw**。
 
 ---
 
@@ -153,20 +176,23 @@ uncommon-route spend set daily 20.00
 uncommon-route spend status
 ```
 
-### 自带 Key（BYOK）
+### Provider 管理
 
 ```bash
-uncommon-route provider add openai sk-your-key
-uncommon-route provider add anthropic sk-ant-your-key
+uncommon-route provider list
+uncommon-route provider add <name> <api-key>
+uncommon-route provider remove <name>
 ```
+
+支持的 provider 名：`commonstack`、`openai`、`anthropic`、`google`、`xai`、`minimax`、`moonshot`、`deepseek`。两种接入模式（托管上游 vs. BYOK）详见 [快速开始](#快速开始)。
 
 <details>
 <summary><strong>所有环境变量</strong></summary>
 
 | 变量 | 含义 |
 |---|---|
-| `UNCOMMON_ROUTE_UPSTREAM` | 上游 OpenAI 兼容 API 地址 |
-| `UNCOMMON_ROUTE_API_KEY` | 上游 API key |
+| `UNCOMMON_ROUTE_UPSTREAM` | 托管上游模式的 base URL（例如 `https://api.commonstack.ai/v1`）。BYOK 模式下忽略。 |
+| `UNCOMMON_ROUTE_API_KEY` | 与 `UNCOMMON_ROUTE_UPSTREAM` 配对的 API key。不会作为各 provider key 的兜底。 |
 | `UNCOMMON_ROUTE_PORT` | 本地代理端口（默认 8403） |
 
 </details>

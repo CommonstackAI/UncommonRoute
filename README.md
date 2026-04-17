@@ -34,17 +34,51 @@ UncommonRoute picks the cheapest model that still gets the job done — automati
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
 pip install uncommon-route
 ```
 
+### 2. Connect an upstream — pick one
+
+**Option A — Commonstack (recommended, one key covers all providers)**
+
+Sign up at [commonstack.ai](https://commonstack.ai) and copy your API key from the dashboard. Then:
+
 ```bash
-export UNCOMMON_ROUTE_UPSTREAM="https://api.openai.com/v1"  # or any OpenAI-compatible API
-export UNCOMMON_ROUTE_API_KEY="your-key"
+export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
+export UNCOMMON_ROUTE_API_KEY="csk-your-key"
 uncommon-route serve
 ```
 
-Point your client at the proxy — one line change:
+One key gives you OpenAI, Anthropic, Google, xAI, MiniMax, Moonshot, DeepSeek, and more — consolidated billing, no per-provider setup.
+
+**Option B — Bring your own keys (BYOK)**
+
+Register any subset of providers you have direct keys for:
+
+```bash
+uncommon-route provider add openai     sk-...
+uncommon-route provider add anthropic  sk-ant-...
+uncommon-route provider add google     AIza...
+# also supported: xai, minimax, moonshot, deepseek
+uncommon-route serve
+```
+
+Auto-routing will only consider models backed by a registered provider.
+
+> **Note:** UncommonRoute does **not** auto-read `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Use one of the two paths above.
+
+### 3. Point your client at the proxy
+
+| Client | Change |
+|---|---|
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
+| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
+| OpenClaw | Plugin — see [openclaw.ai](https://openclaw.ai) |
+
+Then use `uncommon-route/auto` as the model ID:
 
 ```python
 client = OpenAI(base_url="http://localhost:8403/v1")
@@ -52,18 +86,7 @@ resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs
 # → simple tasks → cheap model, complex tasks → premium model
 ```
 
-Works with **Codex**, **Claude Code**, **Cursor**, the **OpenAI SDK**, and **OpenClaw**.
-
-<details>
-<summary><strong>Client-specific setup</strong></summary>
-
-| Client | Change |
-|---|---|
-| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
-| OpenClaw | Plugin — see [openclaw.ai](https://openclaw.ai) |
-
-</details>
+Works with **Claude Code**, **Codex**, **Cursor**, the **OpenAI SDK**, and **OpenClaw**.
 
 ---
 
@@ -78,11 +101,13 @@ Every request is analyzed by three independent signals, then routed to the cheap
 "design a distributed scheduler"     → 🔴 opus         $0.0562
 ```
 
-| Signal | What it does | Speed |
+| Signal | What it does | Speed (CPU, warm) |
 |---|---|---|
 | **Metadata** | Conversation structure, tool usage, depth | <1ms |
-| **Embedding** | Semantic similarity to known task patterns | ~10ms |
+| **Embedding** | Semantic similarity to known task patterns (bge-small) | ~20ms |
 | **Structural** | Text complexity features (shadow mode) | <1ms |
+
+End-to-end `route()` overhead on a warm process is **~20–25ms** (dominated by the embedding signal). Cold start is a few hundred ms for the first request. GPU or a cached embedding path can bring this under 5ms; benchmark with `scripts/bench_overhead.py`.
 
 Signals vote. The ensemble picks the tier. The router selects the cheapest model in that tier. If uncertain, it leans conservative — better to spend a little more than to fail the task.
 
@@ -116,7 +141,7 @@ Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench
 |---|---|
 | **Cost savings** | **82%** vs always-premium |
 | **Task pass rate** | **93.4%** |
-| **Routing overhead** | **<10ms** |
+| **Routing overhead** | **~20–25ms** (warm process, CPU, bge-small embedding) |
 | **Accuracy** | **78%** tier match |
 
 ```bash
@@ -153,20 +178,23 @@ uncommon-route spend set daily 20.00
 uncommon-route spend status
 ```
 
-### BYOK (Bring Your Own Key)
+### Managing providers
 
 ```bash
-uncommon-route provider add openai sk-your-key
-uncommon-route provider add anthropic sk-ant-your-key
+uncommon-route provider list
+uncommon-route provider add <name> <api-key>
+uncommon-route provider remove <name>
 ```
+
+Supported names: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `minimax`, `moonshot`, `deepseek`. See [Quick Start](#quick-start) for the two setup paths (managed upstream vs. BYOK).
 
 <details>
 <summary><strong>All environment variables</strong></summary>
 
 | Variable | Meaning |
 |---|---|
-| `UNCOMMON_ROUTE_UPSTREAM` | Upstream OpenAI-compatible API URL |
-| `UNCOMMON_ROUTE_API_KEY` | API key for the upstream |
+| `UNCOMMON_ROUTE_UPSTREAM` | Upstream base URL for the managed path (e.g. `https://api.commonstack.ai/v1`). Ignored in BYOK mode. |
+| `UNCOMMON_ROUTE_API_KEY` | API key paired with `UNCOMMON_ROUTE_UPSTREAM`. Not a fallback for per-provider keys. |
 | `UNCOMMON_ROUTE_PORT` | Local proxy port (default 8403) |
 
 </details>

@@ -67,6 +67,9 @@ class RequestTrace:
     cache_write_input_tokens: int = 0
     cache_hit_ratio: float = 0.0
     transport: str = "openai-chat"
+    requested_transport: str = ""
+    transport_reason: str = ""
+    transport_preference_source: str = ""
     cache_mode: str = "none"
     cache_family: str = "generic"
     cache_breakpoints: int = 0
@@ -309,6 +312,9 @@ class TraceStore:
                 cache_write_input_tokens=int(payload.get("cache_write_input_tokens", 0) or 0),
                 cache_hit_ratio=float(payload.get("cache_hit_ratio", 0.0) or 0.0),
                 transport=str(payload.get("transport", "openai-chat")),
+                requested_transport=str(payload.get("requested_transport", "")),
+                transport_reason=str(payload.get("transport_reason", "")),
+                transport_preference_source=str(payload.get("transport_preference_source", "")),
                 cache_mode=str(payload.get("cache_mode", "none")),
                 cache_family=str(payload.get("cache_family", "generic")),
                 cache_breakpoints=int(payload.get("cache_breakpoints", 0) or 0),
@@ -387,6 +393,9 @@ def _trace_payload(trace: RequestTrace) -> dict[str, Any]:
         "cache_write_input_tokens": trace.cache_write_input_tokens,
         "cache_hit_ratio": trace.cache_hit_ratio,
         "transport": trace.transport,
+        "requested_transport": trace.requested_transport,
+        "transport_reason": trace.transport_reason,
+        "transport_preference_source": trace.transport_preference_source,
         "cache_mode": trace.cache_mode,
         "cache_family": trace.cache_family,
         "cache_breakpoints": trace.cache_breakpoints,

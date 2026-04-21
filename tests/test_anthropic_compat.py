@@ -18,8 +18,11 @@ from uncommon_route.anthropic_compat import (
     anthropic_error_response,
     OpenAIToAnthropicStreamConverter,
 )
+from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import create_app
+from uncommon_route.router.types import RoutingDecision, RoutingFeatures, RoutingMode, Tier
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
+from uncommon_route.traces import InMemoryTraceStorage, TraceStore
 
 
 # =========================================================================
@@ -806,6 +809,299 @@ class TestAutoRouting:
         assert data["type"] == "message"
         assert data["role"] == "assistant"
         assert any(b["type"] == "text" for b in data["content"])
+
+
+class TestTransportRouting:
+    def test_messages_use_native_anthropic_transport_for_minimax_and_preserve_tool_result_blocks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_minimax",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "minimax/minimax-m2.1",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "minimax/minimax-m2.1",
+                    "max_tokens": 64,
+                    "tools": [{
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }],
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "toolu_01",
+                                "name": "get_weather",
+                                "input": {"city": "Hong Kong"},
+                            }],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01",
+                                "content": [{"type": "text", "text": "28C and sunny"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
+            )
+
+            assert resp.status_code == 200
+            assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport-source"] == "agentic-ingress"
+            assert "minimax anthropic transport" in resp.headers["x-uncommon-route-transport-reason"]
+            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][1]["content"][0]["type"] == "tool_result"
+            assert body["messages"][1]["content"][0]["content"][0]["text"] == "28C and sunny"
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["x-api-key"] == "env-key-123"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_messages_use_minimax_anthropic_endpoint_for_direct_provider(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_minimax_byok",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "minimax/minimax-m2.1",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+
+        try:
+            providers = ProvidersConfig(providers={
+                "minimax": ProviderEntry(
+                    name="minimax",
+                    api_key="mm-key-123",
+                    base_url="https://api.minimax.io/v1",
+                    models=["minimax/minimax-m2.1"],
+                ),
+            })
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                providers_config=providers,
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/messages", json={
+                "model": "minimax/minimax-m2.1",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.minimax.io/anthropic/v1/messages"
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["x-api-key"] == "mm-key-123"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_chat_completions_keep_openai_transport_for_minimax_models(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_minimax",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "minimax/minimax-m2.1",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "minimax/minimax-m2.1",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert resp.headers["x-uncommon-route-requested-transport"] == "openai-chat"
+            assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
+            assert resp.headers["x-uncommon-route-transport-source"] == "ingress-policy"
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["model"] == "minimax/minimax-m2.1"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_virtual_messages_trace_exposes_transport_reasoning_for_minimax(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_virtual_minimax",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "minimax/minimax-m2.1",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 18, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+        monkeypatch.setattr(
+            "uncommon_route.proxy.route",
+            lambda *args, **kwargs: RoutingDecision(
+                model="minimax/minimax-m2.1",
+                tier=Tier.MEDIUM,
+                mode=RoutingMode.AUTO,
+                confidence=0.91,
+                method="pool",
+                reasoning="forced minimax route for transport test",
+                cost_estimate=0.001,
+                baseline_cost=0.005,
+                savings=0.8,
+                raw_confidence=0.91,
+                complexity=0.5,
+                routing_features=RoutingFeatures(
+                    step_type="tool-result-followup",
+                    has_tool_results=True,
+                    is_agentic=True,
+                ),
+            ),
+        )
+
+        try:
+            traces = TraceStore(storage=InMemoryTraceStorage())
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+                trace_store=traces,
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "toolu_02",
+                                "name": "get_weather",
+                                "input": {"city": "Hong Kong"},
+                            }],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_02",
+                                "content": [{"type": "text", "text": "28C and sunny"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
+            )
+
+            assert resp.status_code == 200
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert trace["requested_transport"] == "anthropic-messages"
+            assert trace["transport"] == "anthropic-messages"
+            assert trace["transport_preference_source"] == "agentic-ingress"
+            assert "minimax anthropic transport" in trace["transport_reason"]
+            assert trace["attempts_payload"][0]["transport"] == "anthropic-messages"
+            assert trace["attempts_payload"][0]["requested_transport"] == "anthropic-messages"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][1]["content"][0]["type"] == "tool_result"
+            assert body["messages"][1]["content"][0]["content"][0]["text"] == "28C and sunny"
+        finally:
+            asyncio.run(async_client.aclose())
 
 
 class TestNativeAnthropicTransportForChatCompletions:

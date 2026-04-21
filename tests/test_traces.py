@@ -48,6 +48,10 @@ class TestTraceStore:
             prompt_preview="hello world",
             prompt_hash="abc123",
             route_reasoning="selected for latency",
+            requested_transport="anthropic-messages",
+            transport="openai-chat",
+            transport_reason="provider does not advertise stable anthropic-native transport here",
+            transport_preference_source="default-openai",
             error_code="connect_error",
             error_stage="upstream_request",
             error_message="Upstream unreachable",
@@ -67,6 +71,10 @@ class TestTraceStore:
         reloaded = TraceStore(storage=FileTraceStorage(path=path))
         detail = reloaded.find("req-trace-001")
         assert detail is not None
+        assert detail["requested_transport"] == "anthropic-messages"
+        assert detail["transport"] == "openai-chat"
+        assert detail["transport_reason"] == "provider does not advertise stable anthropic-native transport here"
+        assert detail["transport_preference_source"] == "default-openai"
         assert detail["error_code"] == "connect_error"
         assert detail["feedback_action"] == "updated"
         assert detail["feedback_to_tier"] == "MEDIUM"

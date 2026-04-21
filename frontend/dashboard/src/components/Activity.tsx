@@ -65,6 +65,16 @@ export default function Activity({ stats }: Props) {
       ...getModeMeta(mode),
     }));
 
+  const transportRows = Object.entries(stats.by_transport)
+    .map(([transport, data]) => ({
+      transport,
+      count: data.count,
+      total_cost: data.total_cost,
+      pct: stats.total_requests > 0 ? (data.count / stats.total_requests) * 100 : 0,
+      ...getTransportMeta(transport),
+    }))
+    .sort((a, b) => b.count - a.count);
+
   const maxUsageValue = Math.max(...models.map((row) => getUsageValue(row, usageView)), 0.000001);
 
   return (
@@ -168,36 +178,80 @@ export default function Activity({ stats }: Props) {
 
         {/* By Mode */}
         <div className="col-span-5">
-          <div className="h-full rounded-card border border-n-border bg-n-surface p-6">
-            <div className="flex items-center justify-between mb-5">
-              <div className="label">BY MODE</div>
-              <div className="font-mono text-[11px] text-n-secondary">{modeTiles.length} active modes</div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {modeTiles.map((tile) => (
-                <div key={tile.mode} className="rounded-compact border border-n-border px-4 py-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
-                      <span className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">{tile.mode}</span>
+          <div className="flex h-full flex-col gap-5">
+            <div className="rounded-card border border-n-border bg-n-surface p-6">
+              <div className="flex items-center justify-between mb-5">
+                <div className="label">BY MODE</div>
+                <div className="font-mono text-[11px] text-n-secondary">{modeTiles.length} active modes</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {modeTiles.map((tile) => (
+                  <div key={tile.mode} className="rounded-compact border border-n-border px-4 py-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
+                        <span className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">{tile.mode}</span>
+                      </div>
+                      <span className="font-mono text-[11px] text-n-secondary">{tile.pct.toFixed(0)}%</span>
                     </div>
-                    <span className="font-mono text-[11px] text-n-secondary">{tile.pct.toFixed(0)}%</span>
+                    <div className="mt-3 font-mono text-2xl font-semibold tracking-tight text-n-display">
+                      {tile.count.toLocaleString()}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-n-secondary">{tile.description}</div>
+                    <div className="mt-3 flex gap-[1px]" style={{ height: "4px" }}>
+                      {Array.from({ length: 10 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className={`flex-1 ${i < Math.round(tile.pct / 10) ? "bg-n-display" : "bg-n-border"}`}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <div className="mt-3 font-mono text-2xl font-semibold tracking-tight text-n-display">
-                    {tile.count.toLocaleString()}
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-card border border-n-border bg-n-surface p-6">
+              <div className="flex items-center justify-between mb-5">
+                <div className="label">TRANSPORT MIX</div>
+                <div className="font-mono text-[11px] text-n-secondary">{transportRows.length} active paths</div>
+              </div>
+              <div className="space-y-3">
+                {transportRows.map((row) => (
+                  <div key={row.transport} className="rounded-compact border border-n-border px-4 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">
+                          {row.label}
+                        </div>
+                        <div className="mt-1 font-mono text-[11px] text-n-secondary">
+                          {row.description}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-mono text-[18px] font-semibold tracking-tight text-n-display">
+                          {row.count.toLocaleString()}
+                        </div>
+                        <div className="font-mono text-[11px] text-n-secondary">
+                          {row.pct.toFixed(0)}%
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex gap-[1px]" style={{ height: "4px" }}>
+                      {Array.from({ length: 10 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className={`flex-1 ${i < Math.max(Math.round(row.pct / 10), row.count > 0 ? 1 : 0) ? "bg-n-display" : "bg-n-border"}`}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-3 flex items-center justify-between font-mono text-[11px] text-n-secondary">
+                      <span>{row.transport}</span>
+                      <span>${row.total_cost.toFixed(4)}</span>
+                    </div>
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-n-secondary">{tile.description}</div>
-                  {/* Mini segmented bar */}
-                  <div className="mt-3 flex gap-[1px]" style={{ height: "4px" }}>
-                    {Array.from({ length: 10 }).map((_, i) => (
-                      <div
-                        key={i}
-                        className={`flex-1 ${i < Math.round(tile.pct / 10) ? "bg-n-display" : "bg-n-border"}`}
-                      />
-                    ))}
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -320,6 +374,27 @@ function getModeMeta(mode: string): { description: string } {
     case "auto":
     default:
       return { description: "balanced default" };
+  }
+}
+
+function getTransportMeta(transport: string): { label: string; description: string } {
+  switch (transport) {
+    case "anthropic-messages":
+      return {
+        label: "Anthropic Messages",
+        description: "native block semantics preserved upstream",
+      };
+    case "openai-responses":
+      return {
+        label: "OpenAI Responses",
+        description: "responses-style path",
+      };
+    case "openai-chat":
+    default:
+      return {
+        label: "OpenAI Chat",
+        description: "chat-completions compatible path",
+      };
   }
 }
 

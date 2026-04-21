@@ -25,6 +25,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from collections.abc import AsyncGenerator as _LifespanGen
@@ -109,7 +110,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -121,6 +122,15 @@ UPSTREAM_MAX_OUTPUT_TOKENS = 32_768
 
 _LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENV_VAR = "UNCOMMON_ROUTE_ADMIN_TOKEN"
+
+
+@dataclass(frozen=True, slots=True)
+class TransportDecision:
+    requested_transport: str
+    selected_transport: str
+    reason: str
+    preference_source: str
+    native_anthropic_transport: bool = False
 
 
 def _admin_auth_failure(request: Request) -> JSONResponse | None:
@@ -1122,6 +1132,22 @@ def _anthropic_messages_url(base_url: str) -> str:
     return f"{root}/v1/messages"
 
 
+def _anthropic_transport_base(base_url: str, family: str) -> str:
+    root = str(base_url or "").rstrip("/")
+    if not root:
+        return root
+    if str(family or "").strip().lower() != "minimax":
+        return root
+    lower = root.lower()
+    if "commonstack.ai" in lower:
+        return root
+    if "/anthropic" in lower:
+        return root
+    if lower.endswith("/v1"):
+        return f"{root[:-3]}/anthropic"
+    return f"{root}/anthropic"
+
+
 def _anthropic_response_model_name(model: str) -> str:
     value = str(model or "").strip()
     if not value:
@@ -1131,6 +1157,14 @@ def _anthropic_response_model_name(model: str) -> str:
     return re.sub(r"(\d)\.(\d)", r"\1-\2", value)
 
 
+def _requested_transport_name(*, api_format: str, endpoint_name: str) -> str:
+    if str(api_format or "").strip().lower() == "anthropic" or str(endpoint_name or "").strip().lower() == "messages":
+        return "anthropic-messages"
+    if str(endpoint_name or "").strip().lower() == "responses":
+        return "openai-responses"
+    return "openai-chat"
+
+
 def _supports_native_anthropic_transport(
     *,
     selected_model: str,
@@ -1138,17 +1172,159 @@ def _supports_native_anthropic_transport(
     upstream_provider: str,
     upstream_base: str,
 ) -> bool:
-    if provider_family_for_model(
+    family = provider_family_for_model(
         selected_model,
         provider_name=getattr(provider_entry, "name", None),
         upstream_provider=upstream_provider,
-    ) != "anthropic":
+    )
+    if family not in {"anthropic", "minimax"}:
         return False
     target_base = getattr(provider_entry, "base_url", "") if provider_entry else upstream_base
+    target_base = _anthropic_transport_base(target_base, family)
     target_lower = str(target_base or "").lower()
-    if "api.anthropic.com" in target_lower or "commonstack.ai" in target_lower:
+    if "commonstack.ai" in target_lower:
         return True
-    return upstream_provider in {"anthropic", "commonstack"}
+    if family == "anthropic":
+        if "api.anthropic.com" in target_lower:
+            return True
+        return upstream_provider in {"anthropic", "commonstack"}
+    if "/anthropic" in target_lower:
+        return True
+    if "api.minimax.io" in target_lower or "api.minimaxi.com" in target_lower:
+        return True
+    return upstream_provider in {"minimax", "commonstack"}
+
+
+def _choose_transport(
+    *,
+    api_format: str,
+    endpoint_name: str,
+    selected_model: str,
+    provider_entry: Any,
+    upstream_provider: str,
+    upstream_base: str,
+    step_type: str,
+    has_tools: bool,
+    has_tool_results: bool,
+    anthropic_beta_present: bool,
+) -> TransportDecision:
+    requested_transport = _requested_transport_name(
+        api_format=api_format,
+        endpoint_name=endpoint_name,
+    )
+    family = provider_family_for_model(
+        selected_model,
+        provider_name=getattr(provider_entry, "name", None),
+        upstream_provider=upstream_provider,
+    )
+    native_available = _supports_native_anthropic_transport(
+        selected_model=selected_model,
+        provider_entry=provider_entry,
+        upstream_provider=upstream_provider,
+        upstream_base=upstream_base,
+    )
+    if requested_transport == "openai-responses":
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="openai-chat",
+            reason="responses ingress currently normalizes to openai chat upstream",
+            preference_source="responses-compat",
+            native_anthropic_transport=False,
+        )
+    if family == "anthropic" and native_available:
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="anthropic-messages",
+            reason=(
+                "anthropic ingress preserved for anthropic-native provider"
+                if requested_transport == "anthropic-messages"
+                else "provider-native anthropic transport preferred"
+            ),
+            preference_source=(
+                "ingress+provider"
+                if requested_transport == "anthropic-messages"
+                else "provider-family"
+            ),
+            native_anthropic_transport=True,
+        )
+    if family == "minimax" and requested_transport == "anthropic-messages" and native_available:
+        if step_type == "tool-result-followup":
+            reason = "anthropic tool-result follow-up preserved for minimax anthropic transport"
+            source = "agentic-ingress"
+        elif has_tools or has_tool_results or anthropic_beta_present:
+            reason = "anthropic tool semantics preserved for minimax anthropic-compatible provider"
+            source = "tool-compat"
+        else:
+            reason = "anthropic ingress preserved for minimax anthropic-compatible provider"
+            source = "ingress-policy"
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="anthropic-messages",
+            reason=reason,
+            preference_source=source,
+            native_anthropic_transport=True,
+        )
+    if family == "minimax" and requested_transport == "anthropic-messages" and not native_available:
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="openai-chat",
+            reason="minimax anthropic transport unavailable for current upstream",
+            preference_source="capability-guard",
+            native_anthropic_transport=False,
+        )
+    if requested_transport == "anthropic-messages":
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="openai-chat",
+            reason="provider does not advertise stable anthropic-native transport here",
+            preference_source="default-openai",
+            native_anthropic_transport=False,
+        )
+    if family == "minimax":
+        return TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="openai-chat",
+            reason="openai ingress retained for minimax in v1 transport policy",
+            preference_source="ingress-policy",
+            native_anthropic_transport=False,
+        )
+    return TransportDecision(
+        requested_transport=requested_transport,
+        selected_transport="openai-chat",
+        reason="openai-compatible transport retained",
+        preference_source="default-openai",
+        native_anthropic_transport=False,
+    )
+
+
+def _can_reuse_native_anthropic_body(
+    *,
+    upstream_body: dict[str, Any],
+    source_preview_body: dict[str, Any] | None,
+) -> bool:
+    if source_preview_body is None:
+        return False
+    for key in ("messages", "tools", "tool_choice", "temperature", "top_p", "stream", "stop"):
+        if upstream_body.get(key) != source_preview_body.get(key):
+            return False
+    return True
+
+
+def _reuse_anthropic_source_body(
+    *,
+    source_body: dict[str, Any],
+    upstream_body: dict[str, Any],
+) -> dict[str, Any]:
+    transport_body = json.loads(json.dumps(source_body))
+    for key in ("model", "max_tokens", "stream", "temperature", "top_p"):
+        if key in upstream_body:
+            transport_body[key] = json.loads(json.dumps(upstream_body[key]))
+    stop_value = upstream_body.get("stop")
+    if isinstance(stop_value, list):
+        transport_body["stop_sequences"] = list(stop_value)
+    elif isinstance(stop_value, str) and stop_value.strip():
+        transport_body["stop_sequences"] = [stop_value]
+    return transport_body
 
 
 def _transport_name(native_anthropic_transport: bool) -> str:
@@ -1166,10 +1342,13 @@ def _cache_family_name(cache_plan: CacheRequestPlan) -> str:
 def _set_route_strategy_headers(
     headers: dict[str, str],
     *,
-    native_anthropic_transport: bool,
+    transport_decision: TransportDecision,
     cache_plan: CacheRequestPlan,
 ) -> None:
-    _set_header(headers, "x-uncommon-route-transport", _transport_name(native_anthropic_transport))
+    _set_header(headers, "x-uncommon-route-requested-transport", transport_decision.requested_transport)
+    _set_header(headers, "x-uncommon-route-transport", transport_decision.selected_transport)
+    _set_header(headers, "x-uncommon-route-transport-reason", transport_decision.reason)
+    _set_header(headers, "x-uncommon-route-transport-source", transport_decision.preference_source)
     _set_header(headers, "x-uncommon-route-cache-mode", _cache_mode_name(cache_plan))
     _set_header(headers, "x-uncommon-route-cache-family", _cache_family_name(cache_plan))
     headers.pop("x-uncommon-route-cache-breakpoints", None)
@@ -2229,6 +2408,8 @@ def create_app(
         *,
         api_format: str = "openai",
         endpoint_name: str = "chat_completions",
+        source_body: dict[str, Any] | None = None,
+        source_preview_body: dict[str, Any] | None = None,
     ) -> Response:
         if not upstream:
             msg = _SETUP_GUIDE.strip()
@@ -2301,6 +2482,17 @@ def create_app(
         sidechannel_estimated_cost = 0.0
         sidechannel_actual_cost: float | None = None
         main_estimated_cost = 0.0
+        requested_transport = _requested_transport_name(
+            api_format=api_format,
+            endpoint_name=endpoint_name,
+        )
+        transport_decision = TransportDecision(
+            requested_transport=requested_transport,
+            selected_transport="openai-chat" if requested_transport == "openai-responses" else requested_transport,
+            reason="transport not evaluated yet",
+            preference_source="pending",
+            native_anthropic_transport=requested_transport == "anthropic-messages",
+        )
         prompt, system_prompt, max_tokens = _extract_prompt(body)
         effective_output_tokens = max_tokens
         _pv = " ".join(prompt[:80].split())
@@ -2399,6 +2591,7 @@ def create_app(
                     baseline_cost=baseline_cost,
                     savings=savings,
                     latency_us=route_latency_us,
+                    transport=transport_decision.selected_transport,
                     session_id=session_id,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
@@ -2429,6 +2622,10 @@ def create_app(
                     step_type=step_type,
                     route_reasoning=route_reasoning,
                     latency_us=route_latency_us,
+                    transport=transport_decision.selected_transport,
+                    requested_transport=transport_decision.requested_transport,
+                    transport_reason=transport_decision.reason,
+                    transport_preference_source=transport_decision.preference_source,
                     routing_features_payload=_serialize_routing_features(routing_features),
                     error_code=exc.infeasibility.code.value,
                     error_stage="routing",
@@ -2519,6 +2716,22 @@ def create_app(
             )
             main_estimated_cost = estimated_cost
             estimated_cost += sidechannel_estimated_cost
+            transport_decision = _choose_transport(
+                api_format=api_format,
+                endpoint_name=endpoint_name,
+                selected_model=selected_model,
+                provider_entry=_providers.get_for_model(selected_model),
+                upstream_provider=_mapper.provider,
+                upstream_base=upstream,
+                step_type=step_type,
+                has_tools=bool(body.get("tools") or body.get("customTools")),
+                has_tool_results=any(
+                    isinstance(message, dict) and str(message.get("role", "")).strip().lower() == "tool"
+                    for message in body.get("messages", [])
+                    if isinstance(message, dict)
+                ),
+                anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
+            )
 
             check = await _spend_reservation.reserve(request_id, estimated_cost)
             if not check.allowed:
@@ -2542,6 +2755,7 @@ def create_app(
                     baseline_cost=baseline_cost,
                     savings=savings,
                     latency_us=(time.perf_counter_ns() - route_start) / 1000,
+                    transport=transport_decision.selected_transport,
                     session_id=session_id,
                     step_type=step_type,
                     request_id=request_id,
@@ -2590,6 +2804,10 @@ def create_app(
                     baseline_cost=baseline_cost,
                     savings=savings,
                     latency_us=(time.perf_counter_ns() - route_start) / 1000,
+                    transport=transport_decision.selected_transport,
+                    requested_transport=transport_decision.requested_transport,
+                    transport_reason=transport_decision.reason,
+                    transport_preference_source=transport_decision.preference_source,
                     fallback_reason=fallback_reason,
                     answer_depth=answer_depth_value,
                     constraint_tags=constraint_tags,
@@ -2651,6 +2869,22 @@ def create_app(
             _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
             _set_header(debug_headers, "x-uncommon-route-reasoning", reasoning)
+            transport_decision = _choose_transport(
+                api_format=api_format,
+                endpoint_name=endpoint_name,
+                selected_model=selected_model,
+                provider_entry=_providers.get_for_model(selected_model),
+                upstream_provider=_mapper.provider,
+                upstream_base=upstream,
+                step_type=step_type,
+                has_tools=bool(body.get("tools") or body.get("customTools")),
+                has_tool_results=any(
+                    isinstance(message, dict) and str(message.get("role", "")).strip().lower() == "tool"
+                    for message in body.get("messages", [])
+                    if isinstance(message, dict)
+                ),
+                anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
+            )
 
         route_latency_us = (time.perf_counter_ns() - route_start) / 1000
 
@@ -2686,17 +2920,55 @@ def create_app(
                 resolved_model = _mapper.resolve(model_name)
                 attempt_upstream_body["model"] = resolved_model
 
-            attempt_native_anthropic_transport = _supports_native_anthropic_transport(
+            attempt_has_tools = bool(
+                attempt_upstream_body.get("tools")
+                or attempt_upstream_body.get("customTools")
+            )
+            attempt_has_tool_results = any(
+                isinstance(message, dict) and str(message.get("role", "")).strip().lower() == "tool"
+                for message in attempt_upstream_body.get("messages", [])
+                if isinstance(message, dict)
+            )
+            attempt_transport_decision = _choose_transport(
+                api_format=api_format,
+                endpoint_name=endpoint_name,
                 selected_model=model_name,
                 provider_entry=attempt_provider_entry,
                 upstream_provider=_mapper.provider,
                 upstream_base=upstream,
+                step_type=step_type,
+                has_tools=attempt_has_tools,
+                has_tool_results=attempt_has_tool_results,
+                anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
             )
+            attempt_native_anthropic_transport = attempt_transport_decision.native_anthropic_transport
             if attempt_native_anthropic_transport:
-                attempt_target_chat_url = _anthropic_messages_url(
-                    attempt_provider_entry.base_url if attempt_provider_entry and attempt_provider_entry.base_url else upstream,
+                target_base = attempt_provider_entry.base_url if attempt_provider_entry and attempt_provider_entry.base_url else upstream
+                target_base = _anthropic_transport_base(
+                    target_base,
+                    provider_family_for_model(
+                        model_name,
+                        provider_name=getattr(attempt_provider_entry, "name", None),
+                        upstream_provider=_mapper.provider,
+                    ),
                 )
-                attempt_transport_body = openai_to_anthropic_request(attempt_upstream_body)
+                attempt_target_chat_url = _anthropic_messages_url(
+                    target_base,
+                )
+                if (
+                    api_format == "anthropic"
+                    and source_body is not None
+                    and _can_reuse_native_anthropic_body(
+                        upstream_body=attempt_upstream_body,
+                        source_preview_body=source_preview_body,
+                    )
+                ):
+                    attempt_transport_body = _reuse_anthropic_source_body(
+                        source_body=source_body,
+                        upstream_body=attempt_upstream_body,
+                    )
+                else:
+                    attempt_transport_body = openai_to_anthropic_request(attempt_upstream_body)
                 if disable_anthropic_cache:
                     attempt_cache_plan = strip_anthropic_cache_controls(attempt_transport_body)
                 else:
@@ -2751,6 +3023,7 @@ def create_app(
                 "target_chat_url": attempt_target_chat_url,
                 "transport_body": attempt_transport_body,
                 "headers": attempt_headers,
+                "transport_decision": attempt_transport_decision,
                 "native_anthropic_transport": attempt_native_anthropic_transport,
                 "cache_plan": attempt_cache_plan,
                 "resolved_model": resolved_model,
@@ -2762,13 +3035,19 @@ def create_app(
         target_chat_url = attempt["target_chat_url"]
         transport_body = attempt["transport_body"]
         fwd_headers = attempt["headers"]
+        transport_decision = attempt["transport_decision"]
         native_anthropic_transport = attempt["native_anthropic_transport"]
         cache_plan = attempt["cache_plan"]
         resolved_model = attempt["resolved_model"]
+        _set_route_strategy_headers(
+            debug_headers,
+            transport_decision=transport_decision,
+            cache_plan=cache_plan,
+        )
 
         def _current_route_strategy() -> tuple[str, str, str, int]:
             return (
-                _transport_name(native_anthropic_transport),
+                transport_decision.selected_transport,
                 _cache_mode_name(cache_plan),
                 _cache_family_name(cache_plan),
                 cache_plan.cache_breakpoints,
@@ -2791,7 +3070,10 @@ def create_app(
                 "resolved_model": attempt_payload["resolved_model"],
                 "provider_name": provider_name,
                 "target_url": attempt_payload["target_chat_url"],
-                "transport": _transport_name(attempt_payload["native_anthropic_transport"]),
+                "requested_transport": attempt_payload["transport_decision"].requested_transport,
+                "transport": attempt_payload["transport_decision"].selected_transport,
+                "transport_reason": attempt_payload["transport_decision"].reason,
+                "transport_preference_source": attempt_payload["transport_decision"].preference_source,
                 "cache_mode": _cache_mode_name(attempt_payload["cache_plan"]),
                 "cache_family": _cache_family_name(attempt_payload["cache_plan"]),
                 "cache_breakpoints": attempt_payload["cache_plan"].cache_breakpoints,
@@ -2832,7 +3114,10 @@ def create_app(
                 "resolved_model": model_name,
                 "provider_name": "",
                 "target_url": "",
-                "transport": "",
+                "requested_transport": transport_decision.requested_transport,
+                "transport": transport_decision.selected_transport,
+                "transport_reason": transport_decision.reason,
+                "transport_preference_source": transport_decision.preference_source,
                 "cache_mode": "",
                 "cache_family": "",
                 "cache_breakpoints": 0,
@@ -2860,7 +3145,7 @@ def create_app(
             _set_header(debug_headers, "x-uncommon-route-rehydrated", rehydrated_artifacts)
             _set_route_strategy_headers(
                 debug_headers,
-                native_anthropic_transport=native_anthropic_transport,
+                transport_decision=transport_decision,
                 cache_plan=cache_plan,
             )
             _set_header(debug_headers, "x-uncommon-route-reasoning", reasoning)
@@ -2884,14 +3169,14 @@ def create_app(
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
             _set_route_strategy_headers(
                 debug_headers,
-                native_anthropic_transport=native_anthropic_transport,
+                transport_decision=transport_decision,
                 cache_plan=cache_plan,
             )
             _set_header(debug_headers, "x-uncommon-route-reasoning", reasoning)
 
         def _apply_attempt(attempt_payload: dict[str, Any], *, fallback_from: str | None = None) -> None:
             nonlocal selected_model, provider_entry, upstream_body, target_chat_url
-            nonlocal transport_body, fwd_headers, native_anthropic_transport
+            nonlocal transport_body, fwd_headers, transport_decision, native_anthropic_transport
             nonlocal cache_plan, resolved_model, route_method, fallback_reason
             nonlocal reasoning, route_reasoning, main_estimated_cost, estimated_cost
 
@@ -2901,6 +3186,7 @@ def create_app(
             target_chat_url = attempt_payload["target_chat_url"]
             transport_body = attempt_payload["transport_body"]
             fwd_headers = attempt_payload["headers"]
+            transport_decision = attempt_payload["transport_decision"]
             native_anthropic_transport = attempt_payload["native_anthropic_transport"]
             cache_plan = attempt_payload["cache_plan"]
             resolved_model = attempt_payload["resolved_model"]
@@ -3053,7 +3339,7 @@ def create_app(
                     cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
                     cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
                     cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
-                    transport=_transport_name(native_anthropic_transport),
+                    transport=transport_decision.selected_transport,
                     cache_mode=_cache_mode_name(cache_plan),
                     cache_family=_cache_family_name(cache_plan),
                     cache_breakpoints=cache_plan.cache_breakpoints,
@@ -3127,7 +3413,10 @@ def create_app(
                 cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
                 cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
                 cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
-                transport=_transport_name(native_anthropic_transport),
+                transport=transport_decision.selected_transport,
+                requested_transport=transport_decision.requested_transport,
+                transport_reason=transport_decision.reason,
+                transport_preference_source=transport_decision.preference_source,
                 cache_mode=_cache_mode_name(cache_plan),
                 cache_family=_cache_family_name(cache_plan),
                 cache_breakpoints=cache_plan.cache_breakpoints,
@@ -3683,7 +3972,14 @@ def create_app(
         else:
             mode = _forced_messages_default_mode or _routing_store.default_mode()
             body["model"] = VIRTUAL_MODEL_IDS[mode]
-        return await _handle_chat_core(body, request, api_format="anthropic", endpoint_name="messages")
+        return await _handle_chat_core(
+            body,
+            request,
+            api_format="anthropic",
+            endpoint_name="messages",
+            source_body=raw,
+            source_preview_body=preview_body,
+        )
 
     async def handle_responses(request: Request) -> Response:
         raw = await request.json()

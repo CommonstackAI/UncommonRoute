@@ -32,6 +32,11 @@ def _normalize_tier_label(tier: str) -> str:
     return "COMPLEX" if normalized == "REASONING" else normalized
 
 
+def _normalize_served_quality(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"economy", "balanced", "premium"} else ""
+
+
 @dataclass
 class RouteRecord:
     timestamp: float
@@ -50,6 +55,10 @@ class RouteRecord:
     requested_model: str = ""
     mode: str = "auto"
     decision_tier: str = ""
+    served_quality: str = ""
+    served_quality_target: str = ""
+    served_quality_floor: str = ""
+    capability_lane: str = ""
     actual_cost: float | None = None
     savings: float = 0.0
     latency_us: float = 0.0
@@ -122,6 +131,8 @@ class StatsSummary:
     time_range_s: float
     by_tier: dict[str, TierSummary]
     by_decision_tier: dict[str, int]
+    by_served_quality: dict[str, int]
+    by_capability_lane: dict[str, int]
     by_model: dict[str, ModelSummary]
     by_transport: dict[str, ModelSummary]
     by_cache_mode: dict[str, ModelSummary]
@@ -271,6 +282,10 @@ class RouteStats:
     def record(self, rec: RouteRecord) -> None:
         rec.tier = _normalize_tier_label(rec.tier)
         rec.decision_tier = _normalize_tier_label(rec.decision_tier) if rec.decision_tier else ""
+        rec.served_quality = _normalize_served_quality(rec.served_quality)
+        rec.served_quality_target = _normalize_served_quality(rec.served_quality_target)
+        rec.served_quality_floor = _normalize_served_quality(rec.served_quality_floor)
+        rec.capability_lane = str(rec.capability_lane or "").strip().lower()
         rec.feedback_from_tier = _normalize_tier_label(rec.feedback_from_tier) if rec.feedback_from_tier else ""
         rec.feedback_to_tier = _normalize_tier_label(rec.feedback_to_tier) if rec.feedback_to_tier else ""
         self._records.append(rec)
@@ -321,6 +336,10 @@ class RouteStats:
                 "model": r.model,
                 "tier": _normalize_tier_label(r.tier),
                 "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
+                "served_quality": _normalize_served_quality(r.served_quality),
+                "served_quality_target": _normalize_served_quality(r.served_quality_target),
+                "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
+                "capability_lane": str(r.capability_lane or "").strip().lower(),
                 "method": r.method,
                 "cost": _effective_cost(r),
                 "savings": r.savings,
@@ -361,7 +380,7 @@ class RouteStats:
         if not self._records:
             return StatsSummary(
                 total_requests=0, time_range_s=0.0,
-                by_tier={}, by_decision_tier={}, by_model={},
+                by_tier={}, by_decision_tier={}, by_served_quality={}, by_capability_lane={}, by_model={},
                 by_transport={}, by_cache_mode={}, by_cache_family={},
                 by_mode={}, by_method={}, complexity_distribution={},
                 avg_confidence=0.0, avg_savings=0.0, avg_latency_us=0.0,
@@ -391,6 +410,8 @@ class RouteStats:
         cache_family_groups: dict[str, list[RouteRecord]] = {}
         mode_counts: dict[str, int] = {}
         decision_tier_counts: dict[str, int] = {}
+        served_quality_counts: dict[str, int] = {}
+        capability_lane_counts: dict[str, int] = {}
         method_counts: dict[str, int] = {}
         complexity_dist = {"simple": 0, "medium": 0, "complex": 0}
 
@@ -404,6 +425,10 @@ class RouteStats:
             mode_counts[r.mode] = mode_counts.get(r.mode, 0) + 1
             decision_tier = _normalize_tier_label(r.decision_tier or r.tier)
             decision_tier_counts[decision_tier] = decision_tier_counts.get(decision_tier, 0) + 1
+            if r.served_quality:
+                served_quality_counts[r.served_quality] = served_quality_counts.get(r.served_quality, 0) + 1
+            if r.capability_lane:
+                capability_lane_counts[r.capability_lane] = capability_lane_counts.get(r.capability_lane, 0) + 1
             method_counts[r.method] = method_counts.get(r.method, 0) + 1
             c = getattr(r, "complexity", 0.33)
             if c < 0.33:
@@ -471,6 +496,8 @@ class RouteStats:
             time_range_s=now - oldest,
             by_tier=by_tier,
             by_decision_tier=decision_tier_counts,
+            by_served_quality=served_quality_counts,
+            by_capability_lane=capability_lane_counts,
             by_model=by_model,
             by_transport=by_transport,
             by_cache_mode=by_cache_mode,
@@ -535,6 +562,10 @@ class RouteStats:
                 model=r.get("model", ""),
                 tier=_normalize_tier_label(r.get("tier", "")),
                 decision_tier=_normalize_tier_label(r.get("decision_tier", "")) if r.get("decision_tier", "") else "",
+                served_quality=_normalize_served_quality(r.get("served_quality", "")),
+                served_quality_target=_normalize_served_quality(r.get("served_quality_target", "")),
+                served_quality_floor=_normalize_served_quality(r.get("served_quality_floor", "")),
+                capability_lane=str(r.get("capability_lane", "") or "").strip().lower(),
                 confidence=r.get("confidence", 0.0),
                 raw_confidence=r.get("raw_confidence", r.get("confidence", 0.0)),
                 confidence_source=r.get("confidence_source", ""),
@@ -607,6 +638,10 @@ def _record_payload(r: RouteRecord) -> dict[str, Any]:
         "model": r.model,
         "tier": _normalize_tier_label(r.tier),
         "decision_tier": _normalize_tier_label(r.decision_tier) if r.decision_tier else "",
+        "served_quality": _normalize_served_quality(r.served_quality),
+        "served_quality_target": _normalize_served_quality(r.served_quality_target),
+        "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
+        "capability_lane": str(r.capability_lane or "").strip().lower(),
         "confidence": r.confidence,
         "raw_confidence": r.raw_confidence,
         "confidence_source": r.confidence_source,

@@ -9,10 +9,17 @@ Supports two selection modes:
 from __future__ import annotations
 from uncommon_route.model_experience import CandidateExperience
 from uncommon_route.router.config import BASELINE_MODEL, DEFAULT_MODEL_PRICING
+from uncommon_route.router.quality import (
+    apply_quality_guards,
+    continuity_alignment_score,
+    quality_alignment_score,
+    request_capability_lane,
+)
 from uncommon_route.router.structural import estimate_output_budget
 from uncommon_route.router.types import (
     AnswerDepth,
     BanditConfig,
+    CapabilityLane,
     CandidateScore,
     FallbackOption,
     ModelCapabilities,
@@ -26,6 +33,7 @@ from uncommon_route.router.types import (
     RoutingInfeasibleError,
     RoutingMode,
     SelectionWeights,
+    ServedQuality,
     Tier,
     TierConfig,
     WorkloadHints,
@@ -269,6 +277,8 @@ def select_model(
     hard_constraints = constraints or RoutingConstraints()
     hints = workload_hints or WorkloadHints()
     weights = selection_weights or SelectionWeights()
+    effective_features = routing_features or RoutingFeatures()
+    lane = request_capability_lane(effective_features)
     tc = tier_configs.get(tier, TierConfig())
     configured_candidates = [candidate for candidate in [
         tc.primary, *tc.fallback] if candidate]
@@ -323,6 +333,17 @@ def select_model(
     else:
         scoring_candidates = candidates
 
+    quality_guard = apply_quality_guards(
+        scoring_candidates,
+        mode=mode,
+        tier=tier,
+        lane=lane,
+        capabilities=capabilities,
+        continuity_floor=effective_features.continuity_quality_floor,
+    )
+    scoring_candidates = quality_guard.allowed_models
+    reasoning = f"{reasoning} | {' | '.join(quality_guard.notes)}"
+
     # R2-Router: estimate optimal output budget from prompt + tier
     budget = estimate_output_budget(prompt, tier.value)
     effective_output = min(max_output_tokens, max(
@@ -332,12 +353,16 @@ def select_model(
         scoring_candidates,
         mode=mode,
         tier=tier,
+        lane=lane,
         effective_output=effective_output,
         estimated_input_tokens=estimated_input_tokens,
         pricing=pricing,
         capabilities=capabilities,
         requirements=requirements,
         weights=weights,
+        target_quality=quality_guard.target,
+        previous_served_quality=effective_features.previous_served_quality,
+        quality_by_model=quality_guard.quality_by_model,
         user_keyed_models=user_keyed_models,
         bandit_config=bandit_config or BanditConfig(),
         model_experience=model_experience,
@@ -408,6 +433,11 @@ def select_model(
     return RoutingDecision(
         model=model,
         tier=tier,
+        capability_lane=lane,
+        served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
+        served_quality_target=quality_guard.target,
+        served_quality_floor=quality_guard.floor,
+        continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,
         confidence=confidence,
         raw_confidence=confidence,
@@ -420,7 +450,7 @@ def select_model(
         agentic_score=agentic_score,
         constraints=hard_constraints,
         workload_hints=hints,
-        routing_features=routing_features or RoutingFeatures(),
+        routing_features=effective_features,
         answer_depth=answer_depth,
         suggested_output_budget=effective_output,
         fallback_chain=chain,
@@ -438,12 +468,16 @@ def _score_candidates(
     *,
     mode: RoutingMode,
     tier: Tier,
+    lane: CapabilityLane,
     effective_output: int,
     estimated_input_tokens: int,
     pricing: dict[str, ModelPricing],
     capabilities: dict[str, ModelCapabilities],
     requirements: RequestRequirements,
     weights: SelectionWeights,
+    target_quality: ServedQuality,
+    previous_served_quality: ServedQuality | None,
+    quality_by_model: dict[str, ServedQuality],
     user_keyed_models: set[str] | None,
     bandit_config: BanditConfig,
     model_experience: object | None,
@@ -474,6 +508,9 @@ def _score_candidates(
         exp = experience[model]
         editorial = 1.0 / (index + 1)
         reasoning_bias = 1.0 if requirements.prefers_reasoning and cap.reasoning else 0.0
+        candidate_quality = quality_by_model.get(model, ServedQuality.ECONOMY)
+        quality_alignment = quality_alignment_score(candidate_quality, target_quality)
+        continuity_bias = continuity_alignment_score(candidate_quality, previous_served_quality)
         byok = 1.0 if user_keyed_models and model in user_keyed_models else 0.0
         free_bias = 1.0 if cap.free else 0.0
         local_bias = 1.0 if cap.local else 0.0
@@ -498,6 +535,8 @@ def _score_candidates(
             + weights.free_bias * free_bias
             + weights.local_bias * local_bias
             + weights.reasoning_bias * reasoning_bias
+            + weights.quality_alignment * quality_alignment
+            + weights.continuity * continuity_bias
         )
         if bandit_active:
             total += bandit_config.reward_weight * (bandit_mean - 0.5)
@@ -519,6 +558,9 @@ def _score_candidates(
             free_bias=free_bias,
             local_bias=local_bias,
             reasoning_bias=reasoning_bias,
+            quality_alignment=quality_alignment,
+            continuity_bias=continuity_bias,
+            served_quality=candidate_quality.value,
             bandit_mean=bandit_mean,
             exploration_bonus=exploration_bonus,
             samples=exp.samples,
@@ -692,6 +734,8 @@ def select_from_pool(
     hard_constraints = constraints or RoutingConstraints()
     hints = workload_hints or WorkloadHints()
     tier = _derive_tier(complexity)
+    effective_features = routing_features or RoutingFeatures()
+    lane = request_capability_lane(effective_features)
 
     if not available_models:
         _raise_no_available_models()
@@ -725,6 +769,16 @@ def select_from_pool(
     budget = estimate_output_budget(prompt, difficulty_tier_label)
     effective_output = min(max_output_tokens, max(
         1, int(budget * max(0.1, answer_depth_multiplier))))
+
+    quality_guard = apply_quality_guards(
+        candidates,
+        mode=mode,
+        tier=tier,
+        lane=lane,
+        capabilities=capabilities,
+        continuity_floor=effective_features.continuity_quality_floor,
+    )
+    candidates = quality_guard.allowed_models
 
     benchmark_quality: dict[str, float] | None = None
     try:
@@ -814,6 +868,9 @@ def select_from_pool(
         benchmark_q = quality_priors.get(model, 0.5)
         cost_norm = actual_cost_norm.get(model, 0.5)
         reasoning_bias = 1.0 if requirements.prefers_reasoning and cap.reasoning else 0.0
+        candidate_quality = quality_guard.quality_by_model.get(model, quality_guard.floor)
+        quality_alignment = quality_alignment_score(candidate_quality, quality_guard.target)
+        continuity_bias = continuity_alignment_score(candidate_quality, effective_features.previous_served_quality)
         byok = 1.0 if user_keyed_models and model in user_keyed_models else 0.0
         free_bias = 1.0 if cap.free else 0.0
         local_bias = 1.0 if cap.local else 0.0
@@ -844,6 +901,8 @@ def select_from_pool(
             + weights.free_bias * free_bias
             + weights.local_bias * local_bias
             + weights.reasoning_bias * reasoning_bias
+            + weights.quality_alignment * quality_alignment
+            + weights.continuity * continuity_bias
         )
         total = (
             q_weight * predicted_quality
@@ -867,6 +926,9 @@ def select_from_pool(
             free_bias=free_bias,
             local_bias=local_bias,
             reasoning_bias=reasoning_bias,
+            quality_alignment=quality_alignment,
+            continuity_bias=continuity_bias,
+            served_quality=candidate_quality.value,
             bandit_mean=exp.reward_mean,
             exploration_bonus=exploration_bonus,
             samples=exp.samples,
@@ -931,10 +993,16 @@ def select_from_pool(
         reasoning_parts.append(f"constraints={','.join(constraint_tags)}")
     if hint_tags:
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
+    reasoning_parts.extend(quality_guard.notes)
 
     return RoutingDecision(
         model=model,
         tier=tier,
+        capability_lane=lane,
+        served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
+        served_quality_target=quality_guard.target,
+        served_quality_floor=quality_guard.floor,
+        continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,
         confidence=confidence,
         raw_confidence=confidence if raw_confidence is None else raw_confidence,
@@ -952,7 +1020,7 @@ def select_from_pool(
         agentic_score=agentic_score,
         constraints=hard_constraints,
         workload_hints=hints,
-        routing_features=routing_features or RoutingFeatures(),
+        routing_features=effective_features,
         answer_depth=answer_depth,
         suggested_output_budget=effective_output,
         fallback_chain=chain,

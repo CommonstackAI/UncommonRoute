@@ -65,6 +65,25 @@ export default function Activity({ stats }: Props) {
       ...getModeMeta(mode),
     }));
 
+  const qualityRows = [
+    { quality: "economy", label: "Economy", count: stats.by_served_quality.economy ?? 0 },
+    { quality: "balanced", label: "Balanced", count: stats.by_served_quality.balanced ?? 0 },
+    { quality: "premium", label: "Premium", count: stats.by_served_quality.premium ?? 0 },
+  ];
+  const totalQualityCount = qualityRows.reduce((sum, row) => sum + row.count, 0) || 1;
+  const qualitySegments = qualityRows.map((row) => ({
+    ...row,
+    pct: (row.count / totalQualityCount) * 100,
+  }));
+
+  const laneRows = Object.entries(stats.by_capability_lane)
+    .map(([lane, count]) => ({
+      lane,
+      count,
+      pct: stats.total_requests > 0 ? (count / stats.total_requests) * 100 : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+
   const transportRows = Object.entries(stats.by_transport)
     .map(([transport, data]) => ({
       transport,
@@ -181,6 +200,44 @@ export default function Activity({ stats }: Props) {
           <div className="flex h-full flex-col gap-5">
             <div className="rounded-card border border-n-border bg-n-surface p-6">
               <div className="flex items-center justify-between mb-5">
+                <div className="label">SERVED QUALITY</div>
+                <div className="font-mono text-[11px] text-n-secondary">{totalQualityCount} classified</div>
+              </div>
+
+              <div className="segmented-bar" style={{ height: "8px" }}>
+                {qualitySegments.map((bucket) => {
+                  const segCount = Math.max(Math.round(bucket.pct / 5), bucket.count > 0 ? 1 : 0);
+                  return Array.from({ length: segCount }).map((_, i) => (
+                    <div key={`${bucket.quality}-${i}`} className="segment filled" />
+                  ));
+                })}
+                {(() => {
+                  const filled = qualitySegments.reduce((s, b) => s + Math.max(Math.round(b.pct / 5), b.count > 0 ? 1 : 0), 0);
+                  const empty = Math.max(20 - filled, 0);
+                  return Array.from({ length: empty }).map((_, i) => (
+                    <div key={`quality-empty-${i}`} className="segment" />
+                  ));
+                })()}
+              </div>
+
+              <div className="mt-5 grid grid-cols-3 gap-3">
+                {qualitySegments.map((bucket) => (
+                  <div key={bucket.quality} className="rounded-compact border border-n-border px-4 py-4">
+                    <div className="flex items-center justify-between">
+                      <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
+                      <span className="font-mono text-[11px] text-n-secondary">{bucket.pct.toFixed(0)}%</span>
+                    </div>
+                    <div className="mt-4 font-mono text-2xl font-semibold tracking-tight text-n-display">
+                      {bucket.count.toLocaleString()}
+                    </div>
+                    <div className="mt-1 label">{bucket.label.toUpperCase()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-card border border-n-border bg-n-surface p-6">
+              <div className="flex items-center justify-between mb-5">
                 <div className="label">BY MODE</div>
                 <div className="font-mono text-[11px] text-n-secondary">{modeTiles.length} active modes</div>
               </div>
@@ -205,6 +262,30 @@ export default function Activity({ stats }: Props) {
                           className={`flex-1 ${i < Math.round(tile.pct / 10) ? "bg-n-display" : "bg-n-border"}`}
                         />
                       ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-card border border-n-border bg-n-surface p-6">
+              <div className="flex items-center justify-between mb-5">
+                <div className="label">CAPABILITY LANES</div>
+                <div className="font-mono text-[11px] text-n-secondary">{laneRows.length} active lanes</div>
+              </div>
+              <div className="space-y-3">
+                {laneRows.map((row) => (
+                  <div key={row.lane} className="rounded-compact border border-n-border px-4 py-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">
+                        {row.lane.replace(/-/g, " ")}
+                      </div>
+                      <div className="text-right">
+                        <div className="font-mono text-[18px] font-semibold tracking-tight text-n-display">
+                          {row.count.toLocaleString()}
+                        </div>
+                        <div className="font-mono text-[11px] text-n-secondary">{row.pct.toFixed(0)}%</div>
+                      </div>
                     </div>
                   </div>
                 ))}

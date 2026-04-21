@@ -25,7 +25,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
 from collections.abc import AsyncGenerator as _LifespanGen
@@ -63,8 +63,14 @@ from uncommon_route.router.config import (
     routing_mode_from_model,
     virtual_model_entries,
 )
+from uncommon_route.router.quality import (
+    model_served_quality,
+    normalize_served_quality,
+    request_capability_lane,
+)
 from uncommon_route.router.structural import estimate_tokens, estimate_output_budget
 from uncommon_route.router.types import (
+    CapabilityLane,
     ModelPricing,
     RequestRequirements,
     RoutingFailureCode,
@@ -72,6 +78,7 @@ from uncommon_route.router.types import (
     RoutingInfeasibility,
     RoutingInfeasibleError,
     RoutingMode,
+    ServedQuality,
     Tier,
     WorkloadHints,
 )
@@ -112,7 +119,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1456,6 +1463,8 @@ def _selection_modes_payload(config) -> dict[str, dict[str, float]]:
             "free_bias": mode_config.selection.free_bias,
             "local_bias": mode_config.selection.local_bias,
             "reasoning_bias": mode_config.selection.reasoning_bias,
+            "quality_alignment": mode_config.selection.quality_alignment,
+            "continuity": mode_config.selection.continuity,
         }
         for mode, mode_config in config.modes.items()
     }
@@ -1498,6 +1507,9 @@ def _serialize_candidate_scores(candidate_scores: list[Any]) -> list[dict[str, o
             "free_bias": round(score.free_bias, 6),
             "local_bias": round(score.local_bias, 6),
             "reasoning_bias": round(score.reasoning_bias, 6),
+            "quality_alignment": round(score.quality_alignment, 6),
+            "continuity_bias": round(score.continuity_bias, 6),
+            "served_quality": score.served_quality,
             "bandit_mean": round(score.bandit_mean, 6),
             "exploration_bonus": round(score.exploration_bonus, 6),
             "samples": score.samples,
@@ -1535,6 +1547,9 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "tier_floor": features.tier_floor.value if features.tier_floor is not None else None,
         "tier_cap": features.tier_cap.value if features.tier_cap is not None else None,
         "session_present": features.session_present,
+        "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
+        "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
+        "continuity_quality_floor": features.continuity_quality_floor.value if features.continuity_quality_floor is not None else None,
         "tags": list(features.tags()),
     }
 
@@ -1845,6 +1860,49 @@ def create_app(
             state["bucket"] = _model_experience.bucket_summary(bucket_mode, bucket_tier)
         return state
 
+    def _routing_features_with_quality_context(
+        features: RoutingFeatures,
+        *,
+        api_format: str,
+        endpoint_name: str,
+        session_id: str | None,
+        has_tools: bool,
+    ) -> RoutingFeatures:
+        transport_safe_lane = _requires_transport_safe_candidates(
+            api_format=api_format,
+            endpoint_name=endpoint_name,
+            step_type=features.step_type,
+            has_tools=has_tools,
+            has_tool_results=features.has_tool_results,
+        )
+        capability_lane = features.capability_lane
+        if capability_lane is None:
+            if transport_safe_lane:
+                capability_lane = CapabilityLane.ANTHROPIC_TOOL_SAFE
+            else:
+                capability_lane = request_capability_lane(features)
+
+        previous_served_quality: ServedQuality | None = None
+        continuity_quality_floor: ServedQuality | None = None
+        if session_id:
+            latest_session_trace = _traces.latest_for_session(session_id)
+            if latest_session_trace is not None:
+                previous_served_quality = normalize_served_quality(latest_session_trace.served_quality)
+            if features.step_type == "tool-result-followup":
+                continuity_trace = _traces.latest_for_session(
+                    session_id,
+                    step_types=("tool-selection", "tool-result-followup"),
+                )
+                if continuity_trace is not None:
+                    continuity_quality_floor = normalize_served_quality(continuity_trace.served_quality)
+
+        return replace(
+            features,
+            capability_lane=capability_lane,
+            previous_served_quality=previous_served_quality,
+            continuity_quality_floor=continuity_quality_floor,
+        )
+
     def _build_selector_preview(body: dict[str, Any], request: Request) -> dict[str, Any]:
         model = str(body.get("model") or "").strip().lower()
         routing_mode = routing_mode_from_model(model)
@@ -1866,6 +1924,13 @@ def create_app(
             prompt=prompt,
             max_output_tokens=max_tokens,
             session_id=_resolve_session_id(request, body),
+        )
+        routing_features = _routing_features_with_quality_context(
+            routing_features,
+            api_format="openai",
+            endpoint_name="chat_completions",
+            session_id=_resolve_session_id(request, body),
+            has_tools=bool(body.get("tools") or body.get("customTools")),
         )
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
@@ -1913,6 +1978,10 @@ def create_app(
             "requested_mode": routing_mode.value,
             "served_model": decision.model,
             "served_tier": decision.tier.value,
+            "served_quality": decision.served_quality.value,
+            "served_quality_target": decision.served_quality_target.value,
+            "served_quality_floor": decision.served_quality_floor.value if decision.served_quality_floor is not None else "",
+            "capability_lane": decision.capability_lane.value,
             "mode": decision.mode.value,
             "method": decision.method,
             "reasoning": reasoning,
@@ -2229,6 +2298,8 @@ def create_app(
             "route_confidence_calibration": _route_confidence.status(),
             "by_mode": s.by_mode,
             "by_decision_tier": s.by_decision_tier,
+            "by_served_quality": s.by_served_quality,
+            "by_capability_lane": s.by_capability_lane,
             "by_tier": {
                 tier: {
                     "count": ts.count,
@@ -2570,6 +2641,10 @@ def create_app(
         step_type = "general"
         mode_value = routing_mode.value if routing_mode else ""
         decision_tier = ""
+        served_quality_value = ""
+        served_quality_target_value = ""
+        served_quality_floor_value = ""
+        capability_lane_value = ""
         complexity_value = 0.33
         input_tokens_before = 0
         input_tokens_after = 0
@@ -2646,6 +2721,13 @@ def create_app(
                 max_output_tokens=max_tokens,
                 session_id=session_id,
             )
+            routing_features = _routing_features_with_quality_context(
+                routing_features,
+                api_format=api_format,
+                endpoint_name=endpoint_name,
+                session_id=session_id,
+                has_tools=bool(body.get("tools") or body.get("customTools")),
+            )
             ctx_features = extract_context_features(body, step_type, prompt)
             requirements = routing_features.request_requirements()
             hints = routing_features.workload_hints()
@@ -2687,6 +2769,11 @@ def create_app(
             except RoutingInfeasibleError as exc:
                 route_latency_us = (time.perf_counter_ns() - route_start) / 1000
                 route_reasoning = exc.infeasibility.message
+                capability_lane_value = (
+                    routing_features.capability_lane.value
+                    if routing_features.capability_lane is not None
+                    else capability_lane_value
+                )
                 timestamp_value = time.time()
                 _stats.record(RouteRecord(
                     timestamp=timestamp_value,
@@ -2695,6 +2782,10 @@ def create_app(
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier,
+                    served_quality=served_quality_value,
+                    served_quality_target=served_quality_target_value,
+                    served_quality_floor=served_quality_floor_value,
+                    capability_lane=capability_lane_value,
                     confidence=confidence,
                     method=route_method,  # type: ignore[arg-type]
                     raw_confidence=raw_confidence,
@@ -2727,6 +2818,10 @@ def create_app(
                     mode=mode_value,
                     tier=tier_value,
                     decision_tier=decision_tier,
+                    served_quality=served_quality_value,
+                    served_quality_target=served_quality_target_value,
+                    served_quality_floor=served_quality_floor_value,
+                    capability_lane=capability_lane_value,
                     method=route_method,
                     api_format=api_format,
                     endpoint=endpoint_name,
@@ -2755,6 +2850,14 @@ def create_app(
             selected_model = decision.model
             tier_value = decision.tier.value
             decision_tier = tier_value
+            served_quality_value = decision.served_quality.value
+            served_quality_target_value = decision.served_quality_target.value
+            served_quality_floor_value = (
+                decision.served_quality_floor.value
+                if decision.served_quality_floor is not None
+                else ""
+            )
+            capability_lane_value = decision.capability_lane.value
             mode_value = decision.mode.value
             if _debug_log.isEnabledFor(logging.DEBUG):
                 _debug_log.debug(
@@ -2862,6 +2965,10 @@ def create_app(
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
+                    served_quality=served_quality_value,
+                    served_quality_target=served_quality_target_value,
+                    served_quality_floor=served_quality_floor_value,
+                    capability_lane=capability_lane_value,
                     confidence=confidence,
                     method=route_method,  # type: ignore[arg-type]
                     raw_confidence=raw_confidence,
@@ -2901,6 +3008,10 @@ def create_app(
                     mode=mode_value,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
+                    served_quality=served_quality_value,
+                    served_quality_target=served_quality_target_value,
+                    served_quality_floor=served_quality_floor_value,
+                    capability_lane=capability_lane_value,
                     method=route_method,
                     api_format=api_format,
                     endpoint=endpoint_name,
@@ -3254,6 +3365,10 @@ def create_app(
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
             _set_header(debug_headers, "x-uncommon-route-tier", tier_value)
             _set_header(debug_headers, "x-uncommon-route-decision-tier", decision_tier or tier_value)
+            if served_quality_value:
+                _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
+            if capability_lane_value:
+                _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
             _set_header(debug_headers, "x-uncommon-route-step", step_type)
             _set_header(debug_headers, "x-uncommon-route-input-before", input_tokens_before)
             _set_header(debug_headers, "x-uncommon-route-input-after", input_tokens_after)
@@ -3286,6 +3401,10 @@ def create_app(
             if not is_virtual:
                 return
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
+            if served_quality_value:
+                _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
+            if capability_lane_value:
+                _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
             _set_route_strategy_headers(
                 debug_headers,
                 transport_decision=transport_decision,
@@ -3298,6 +3417,7 @@ def create_app(
             nonlocal transport_body, fwd_headers, transport_decision, native_anthropic_transport
             nonlocal cache_plan, resolved_model, route_method, fallback_reason
             nonlocal reasoning, route_reasoning, main_estimated_cost, estimated_cost
+            nonlocal served_quality_value, served_quality_floor_value, served_quality_target_value, capability_lane_value
 
             selected_model = attempt_payload["selected_model"]
             provider_entry = attempt_payload["provider_entry"]
@@ -3310,6 +3430,13 @@ def create_app(
             cache_plan = attempt_payload["cache_plan"]
             resolved_model = attempt_payload["resolved_model"]
             main_estimated_cost, estimated_cost = _estimated_total_cost_for(selected_model)
+            lane = request_capability_lane(routing_features)
+            capability_lane_value = capability_lane_value or lane.value
+            served_quality_value = model_served_quality(
+                selected_model,
+                lane,
+                _routing_config.model_capabilities.get(selected_model),
+            ).value
 
             if fallback_from is not None:
                 route_method = "fallback"
@@ -3440,6 +3567,10 @@ def create_app(
                     model=selected_model,
                     tier=tier_value,
                     decision_tier=decision_tier or tier_value,
+                    served_quality=served_quality_value,
+                    served_quality_target=served_quality_target_value,
+                    served_quality_floor=served_quality_floor_value,
+                    capability_lane=capability_lane_value,
                     confidence=confidence_value,
                     method=method_value,  # type: ignore[arg-type]
                     raw_confidence=raw_confidence,
@@ -3504,6 +3635,10 @@ def create_app(
                 mode=mode_value,
                 tier=tier_value,
                 decision_tier=decision_tier or tier_value,
+                served_quality=served_quality_value,
+                served_quality_target=served_quality_target_value,
+                served_quality_floor=served_quality_floor_value,
+                capability_lane=capability_lane_value,
                 method=method_value,
                 api_format=api_format,
                 endpoint=endpoint_name,

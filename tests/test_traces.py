@@ -42,6 +42,10 @@ class TestTraceStore:
             mode="auto",
             tier="SIMPLE",
             decision_tier="SIMPLE",
+            served_quality="economy",
+            served_quality_target="balanced",
+            served_quality_floor="economy",
+            capability_lane="anthropic-tool-safe",
             method="pool",
             endpoint="chat_completions",
             is_virtual=True,
@@ -75,6 +79,9 @@ class TestTraceStore:
         assert detail["transport"] == "openai-chat"
         assert detail["transport_reason"] == "provider does not advertise stable anthropic-native transport here"
         assert detail["transport_preference_source"] == "default-openai"
+        assert detail["served_quality"] == "economy"
+        assert detail["served_quality_target"] == "balanced"
+        assert detail["capability_lane"] == "anthropic-tool-safe"
         assert detail["error_code"] == "connect_error"
         assert detail["feedback_action"] == "updated"
         assert detail["feedback_to_tier"] == "MEDIUM"

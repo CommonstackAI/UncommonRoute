@@ -21,6 +21,11 @@ def _normalize_tier_label(tier: str) -> str:
     return "COMPLEX" if normalized == "REASONING" else normalized
 
 
+def _normalize_served_quality(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"economy", "balanced", "premium"} else ""
+
+
 def prompt_hash(text: str) -> str:
     compact = str(text or "").strip()
     if not compact:
@@ -38,6 +43,10 @@ class RequestTrace:
     mode: str = ""
     tier: str = ""
     decision_tier: str = ""
+    served_quality: str = ""
+    served_quality_target: str = ""
+    served_quality_floor: str = ""
+    capability_lane: str = ""
     method: str = ""
     api_format: str = "openai"
     endpoint: str = "chat_completions"
@@ -167,6 +176,10 @@ class TraceStore:
     def record(self, trace: RequestTrace) -> None:
         trace.tier = _normalize_tier_label(trace.tier)
         trace.decision_tier = _normalize_tier_label(trace.decision_tier) if trace.decision_tier else ""
+        trace.served_quality = _normalize_served_quality(trace.served_quality)
+        trace.served_quality_target = _normalize_served_quality(trace.served_quality_target)
+        trace.served_quality_floor = _normalize_served_quality(trace.served_quality_floor)
+        trace.capability_lane = str(trace.capability_lane or "").strip().lower()
         trace.feedback_from_tier = _normalize_tier_label(trace.feedback_from_tier) if trace.feedback_from_tier else ""
         trace.feedback_to_tier = _normalize_tier_label(trace.feedback_to_tier) if trace.feedback_to_tier else ""
         self._records.append(trace)
@@ -225,12 +238,32 @@ class TraceStore:
                 return _trace_payload(record)
         return None
 
+    def latest_for_session(
+        self,
+        session_id: str,
+        *,
+        step_types: tuple[str, ...] | None = None,
+    ) -> RequestTrace | None:
+        target = str(session_id or "").strip()
+        if not target:
+            return None
+        allowed_steps = {step for step in (step_types or ()) if step}
+        for record in reversed(self._records):
+            if record.session_id != target:
+                continue
+            if allowed_steps and record.step_type not in allowed_steps:
+                continue
+            return record
+        return None
+
     def summary(self) -> dict[str, Any]:
         by_endpoint: dict[str, int] = {}
         by_mode: dict[str, int] = {}
         by_method: dict[str, int] = {}
         by_status: dict[str, int] = {}
         by_error_code: dict[str, int] = {}
+        by_served_quality: dict[str, int] = {}
+        by_capability_lane: dict[str, int] = {}
         error_count = 0
         virtual_count = 0
         passthrough_count = 0
@@ -238,6 +271,10 @@ class TraceStore:
             by_endpoint[record.endpoint] = by_endpoint.get(record.endpoint, 0) + 1
             by_mode[record.mode] = by_mode.get(record.mode, 0) + 1
             by_method[record.method] = by_method.get(record.method, 0) + 1
+            if record.served_quality:
+                by_served_quality[record.served_quality] = by_served_quality.get(record.served_quality, 0) + 1
+            if record.capability_lane:
+                by_capability_lane[record.capability_lane] = by_capability_lane.get(record.capability_lane, 0) + 1
             status_key = str(record.status_code or 0)
             by_status[status_key] = by_status.get(status_key, 0) + 1
             if record.error_code:
@@ -259,6 +296,8 @@ class TraceStore:
             "by_method": by_method,
             "by_status": by_status,
             "by_error_code": by_error_code,
+            "by_served_quality": by_served_quality,
+            "by_capability_lane": by_capability_lane,
         }
 
     def _cleanup(self) -> None:
@@ -283,6 +322,10 @@ class TraceStore:
                 mode=str(payload.get("mode", "")),
                 tier=_normalize_tier_label(str(payload.get("tier", ""))),
                 decision_tier=_normalize_tier_label(str(payload.get("decision_tier", ""))) if payload.get("decision_tier", "") else "",
+                served_quality=_normalize_served_quality(str(payload.get("served_quality", ""))),
+                served_quality_target=_normalize_served_quality(str(payload.get("served_quality_target", ""))),
+                served_quality_floor=_normalize_served_quality(str(payload.get("served_quality_floor", ""))),
+                capability_lane=str(payload.get("capability_lane", "") or "").strip().lower(),
                 method=str(payload.get("method", "")),
                 api_format=str(payload.get("api_format", "openai")),
                 endpoint=str(payload.get("endpoint", "chat_completions")),
@@ -364,6 +407,10 @@ def _trace_payload(trace: RequestTrace) -> dict[str, Any]:
         "mode": trace.mode,
         "tier": _normalize_tier_label(trace.tier),
         "decision_tier": _normalize_tier_label(trace.decision_tier) if trace.decision_tier else "",
+        "served_quality": _normalize_served_quality(trace.served_quality),
+        "served_quality_target": _normalize_served_quality(trace.served_quality_target),
+        "served_quality_floor": _normalize_served_quality(trace.served_quality_floor),
+        "capability_lane": str(trace.capability_lane or "").strip().lower(),
         "method": trace.method,
         "api_format": trace.api_format,
         "endpoint": trace.endpoint,

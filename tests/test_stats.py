@@ -182,6 +182,10 @@ class TestRouteStats:
         rs.record(RouteRecord(**{
             **_make_record(model="anthropic/claude-sonnet-4.6", actual_cost=0.02).__dict__,
             "transport": "anthropic-messages",
+            "served_quality": "balanced",
+            "served_quality_target": "balanced",
+            "served_quality_floor": "economy",
+            "capability_lane": "anthropic-tool-safe",
             "cache_mode": "cache_control",
             "cache_family": "anthropic",
             "cache_breakpoints": 2,
@@ -191,6 +195,8 @@ class TestRouteStats:
         s = rs.summary()
 
         assert s.by_transport["anthropic-messages"].count == 1
+        assert s.by_served_quality["balanced"] == 1
+        assert s.by_capability_lane["anthropic-tool-safe"] == 1
         assert s.by_cache_mode["cache_control"].count == 1
         assert s.by_cache_family["anthropic"].count == 1
         assert s.by_cache_mode["none"].count == 1

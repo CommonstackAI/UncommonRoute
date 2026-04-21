@@ -22,11 +22,13 @@ from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import create_app
 from uncommon_route.router.types import (
+    CapabilityLane,
     ModelCapabilities,
     ModelPricing,
     RoutingDecision,
     RoutingFeatures,
     RoutingMode,
+    ServedQuality,
     Tier,
 )
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
@@ -853,6 +855,11 @@ class TestTransportRouting:
             return RoutingDecision(
                 model="minimax/minimax-m2.1",
                 tier=Tier.MEDIUM,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
                 mode=RoutingMode.AUTO,
                 confidence=0.92,
                 method="pool",
@@ -1213,6 +1220,11 @@ class TestTransportRouting:
             lambda *args, **kwargs: RoutingDecision(
                 model="minimax/minimax-m2.1",
                 tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
                 mode=RoutingMode.AUTO,
                 confidence=0.91,
                 method="pool",

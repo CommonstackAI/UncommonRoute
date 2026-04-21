@@ -56,6 +56,8 @@ export interface Stats {
   total_input_tokens_after: number;
   by_mode: Record<string, number>;
   by_tier: Record<string, TierStats>;
+  by_served_quality: Record<string, number>;
+  by_capability_lane: Record<string, number>;
   by_model: Record<string, ModelStats>;
   by_transport: Record<string, ModelStats>;
   by_cache_mode: Record<string, ModelStats>;
@@ -408,6 +410,10 @@ export interface TraceRecord {
   mode: string;
   tier: string;
   decision_tier: string;
+  served_quality: string;
+  served_quality_target: string;
+  served_quality_floor: string;
+  capability_lane: string;
   method: string;
   api_format: string;
   endpoint: string;
@@ -464,6 +470,8 @@ export interface TraceListResponse {
     by_method: Record<string, number>;
     by_status: Record<string, number>;
     by_error_code: Record<string, number>;
+    by_served_quality: Record<string, number>;
+    by_capability_lane: Record<string, number>;
   };
   items: TraceRecord[];
 }

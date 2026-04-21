@@ -169,6 +169,8 @@ export default function Explainer() {
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-n-secondary">
                       <Badge>{normTier(selected.decision_tier || selected.tier)}</Badge>
+                      {selected.served_quality ? <Badge>{prettyQuality(selected.served_quality)}</Badge> : null}
+                      {selected.capability_lane ? <Badge>{prettyLane(selected.capability_lane)}</Badge> : null}
                       <Badge>{(selected.method || "pool").toUpperCase()}</Badge>
                       <Badge>{(selected.endpoint || "chat_completions").replace(/_/g, " ")}</Badge>
                       <Badge>{selected.streaming ? "STREAM" : "NON-STREAM"}</Badge>
@@ -194,6 +196,21 @@ export default function Explainer() {
                   {selected.fallback_reason ? (
                     <div className="mt-3 font-mono text-[12px] text-n-warning">
                       Fallback: {selected.fallback_reason}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="mt-6 border-t border-n-border pt-5">
+                  <div className="label mb-3">SERVICE CONTRACT</div>
+                  <div className="grid grid-cols-4 gap-3">
+                    <MiniMetric label="REQUEST" value={normTier(selected.decision_tier || selected.tier)} />
+                    <MiniMetric label="SERVED" value={prettyQuality(selected.served_quality)} />
+                    <MiniMetric label="TARGET" value={prettyQuality(selected.served_quality_target)} />
+                    <MiniMetric label="LANE" value={prettyLane(selected.capability_lane)} />
+                  </div>
+                  {selected.served_quality_floor ? (
+                    <div className="mt-3 font-mono text-[11px] text-n-secondary">
+                      Floor: {prettyQuality(selected.served_quality_floor)}
                     </div>
                   ) : null}
                 </div>
@@ -427,6 +444,16 @@ function prettyTransport(transport?: string) {
     default:
       return transport || "—";
   }
+}
+
+function prettyQuality(value?: string) {
+  if (!value) return "—";
+  return value.replace(/_/g, " ").toUpperCase();
+}
+
+function prettyLane(value?: string) {
+  if (!value) return "—";
+  return value.replace(/-/g, " ").replace(/_/g, " ").toUpperCase();
 }
 
 function prettifySource(source?: string) {

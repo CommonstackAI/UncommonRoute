@@ -40,35 +40,24 @@ UncommonRoute picks the cheapest model that still gets the job done — automati
 pip install uncommon-route
 ```
 
-### 2. Connect an upstream — pick one
-
-**Option A — Commonstack (recommended, one key covers all providers)**
-
-Sign up at [commonstack.ai](https://commonstack.ai) and copy your API key from the dashboard. Then:
+### 2. Run the guided setup
 
 ```bash
-export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
-export UNCOMMON_ROUTE_API_KEY="csk-your-key"
-uncommon-route serve
+uncommon-route init
 ```
 
-One key gives you OpenAI, Anthropic, Google, xAI, MiniMax, Moonshot, DeepSeek, and more — consolidated billing, no per-provider setup.
+The wizard walks you through:
 
-**Option B — Bring your own keys (BYOK)**
+- choosing a connection path: Commonstack, local/custom upstream, or BYOK
+- saving upstream credentials locally
+- configuring Claude Code, Codex, or OpenAI SDK / Cursor
+- optionally starting the proxy in background
 
-Register any subset of providers you have direct keys for:
+If you prefer to sanity-check before starting the proxy:
 
 ```bash
-uncommon-route provider add openai     sk-...
-uncommon-route provider add anthropic  sk-ant-...
-uncommon-route provider add google     AIza...
-# also supported: xai, minimax, moonshot, deepseek
-uncommon-route serve
+uncommon-route doctor
 ```
-
-Auto-routing will only consider models backed by a registered provider.
-
-> **Note:** UncommonRoute does **not** auto-read `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Use one of the two paths above.
 
 ### 3. Point your client at the proxy
 
@@ -87,6 +76,35 @@ resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs
 ```
 
 Works with **Claude Code**, **Codex**, **Cursor**, the **OpenAI SDK**, and **OpenClaw**.
+
+<details>
+<summary><strong>Manual setup (advanced)</strong></summary>
+
+**Commonstack managed upstream**
+
+```bash
+export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
+export UNCOMMON_ROUTE_API_KEY="csk-your-key"
+uncommon-route serve
+```
+
+One key gives you OpenAI, Anthropic, Google, xAI, MiniMax, Moonshot, DeepSeek, and more — consolidated billing, no per-provider setup.
+
+**Bring your own keys (BYOK)**
+
+```bash
+uncommon-route provider add openai     sk-...
+uncommon-route provider add anthropic  sk-ant-...
+uncommon-route provider add google     AIza...
+# also supported: xai, minimax, moonshot, deepseek
+uncommon-route serve
+```
+
+Auto-routing will only consider models backed by a registered provider.
+
+> **Note:** UncommonRoute does **not** auto-read `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Use `uncommon-route init`, a saved connection, or one of the manual paths above.
+
+</details>
 
 ---
 
@@ -161,6 +179,19 @@ Real-time monitoring, interactive playground, cost tracking, and model routing c
 
 ---
 
+## Diagnostics
+
+When a user hits a routing or upstream issue, you can export a local support bundle without guessing which logs to collect:
+
+```bash
+uncommon-route support bundle
+uncommon-route support request <request_id>
+```
+
+The bundle includes recent request traces, recent errors, stats summaries, provider/config snapshots, and redacted local state. It stays on your machine until you choose to share it.
+
+---
+
 ## Configuration
 
 ### Routing modes
@@ -208,6 +239,8 @@ Runs entirely on your machine. No data leaves unless you opt in.
 ```bash
 uncommon-route telemetry status
 ```
+
+Diagnostics exports are also local-first: `uncommon-route support bundle` writes a redacted zip under `~/.uncommon-route/support/` by default.
 
 ---
 

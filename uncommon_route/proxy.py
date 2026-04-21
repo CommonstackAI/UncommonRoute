@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -76,6 +77,7 @@ from uncommon_route.semantic import SideChannelTaskConfig, score_semantic_qualit
 from uncommon_route.session import derive_session_id
 from uncommon_route.spend_control import SpendControl
 from uncommon_route.stats import RouteRecord, RouteStats
+from uncommon_route.traces import RequestTrace, TraceStore, prompt_hash as trace_prompt_hash
 from uncommon_route.feedback import FeedbackCollector
 from uncommon_route.model_experience import ModelExperienceStore
 from uncommon_route.paths import data_dir
@@ -107,9 +109,109 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
+
+# Cross-provider safe ceiling for outgoing max_tokens. Upstream gateways cap
+# output below the model's native limit (e.g. GLM-4.6 via some gateways rejects
+# >32768 even though the model supports 131k). Clients like Claude Code default
+# to 64k assuming Anthropic; we re-route to cheaper models that reject it.
+UPSTREAM_MAX_OUTPUT_TOKENS = 32_768
+
+_LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_ADMIN_ENV_VAR = "UNCOMMON_ROUTE_ADMIN_TOKEN"
+
+
+def _admin_auth_failure(request: Request) -> JSONResponse | None:
+    """Return a 401/403 response when admin endpoints should be blocked.
+
+    Admin endpoints (connections, providers, spend write, routing-config write, selector write)
+    can mutate API keys and routing behavior. Two policies:
+
+      * ``UNCOMMON_ROUTE_ADMIN_TOKEN`` is set: require ``Authorization: Bearer <token>``.
+      * Not set: only accept requests from a local client.
+    """
+    token = os.environ.get(_ADMIN_ENV_VAR, "").strip()
+    if token:
+        hdr = request.headers.get("authorization", "")
+        if hdr.startswith("Bearer ") and hdr[7:].strip() == token:
+            return None
+        return JSONResponse({"error": f"admin token required (set {_ADMIN_ENV_VAR})"}, status_code=401)
+    client_host = getattr(request.client, "host", "") if request.client else ""
+    if client_host in _LOCAL_CLIENT_HOSTS:
+        return None
+    return JSONResponse(
+        {
+            "error": (
+                "admin endpoints require a local client; "
+                f"set {_ADMIN_ENV_VAR} to allow remote access"
+            )
+        },
+        status_code=403,
+    )
+
+
+class _SpendReservation:
+    """Serialize spend check+commit so concurrent requests cannot overrun limits.
+
+    ``SpendControl.check`` reads the historical ledger; between check and the
+    post-upstream ``record`` call there is an ``await`` where the event loop can
+    run other coroutines, so two concurrent requests may both pass ``check`` on
+    the same remaining budget and then both record. The reservation ring holds
+    estimated costs of in-flight requests and adds them to the ``check`` denominator.
+    """
+
+    _MAX_AGE_S = 600.0  # drop stale reservations whose settle/release never fired
+
+    def __init__(self, spend: SpendControl) -> None:
+        self._spend = spend
+        self._lock = asyncio.Lock()
+        self._pending: dict[str, tuple[float, float]] = {}
+
+    def _gc(self, now: float) -> float:
+        live: dict[str, tuple[float, float]] = {}
+        total = 0.0
+        for rid, (amount, ts) in self._pending.items():
+            if now - ts <= self._MAX_AGE_S:
+                live[rid] = (amount, ts)
+                total += amount
+        self._pending = live
+        return total
+
+    async def reserve(self, reservation_id: str, estimated_cost: float):
+        async with self._lock:
+            pending_total = self._gc(time.time())
+            result = self._spend.check(estimated_cost, additional_committed=pending_total)
+            if result.allowed:
+                self._pending[reservation_id] = (estimated_cost, time.time())
+            return result
+
+    async def update_reserve(self, reservation_id: str, estimated_cost: float):
+        """Re-reserve a request under a new estimated cost (e.g. fallback model)."""
+        async with self._lock:
+            self._pending.pop(reservation_id, None)
+            pending_total = self._gc(time.time())
+            result = self._spend.check(estimated_cost, additional_committed=pending_total)
+            if result.allowed:
+                self._pending[reservation_id] = (estimated_cost, time.time())
+            return result
+
+    async def settle(
+        self,
+        reservation_id: str,
+        actual_cost: float,
+        *,
+        model: str | None = None,
+        action: str | None = None,
+    ) -> None:
+        async with self._lock:
+            self._pending.pop(reservation_id, None)
+            self._spend.record(actual_cost, model=model, action=action)
+
+    async def release(self, reservation_id: str) -> None:
+        async with self._lock:
+            self._pending.pop(reservation_id, None)
 
 _SETUP_GUIDE = """\
 No upstream API configured. UncommonRoute is a routing layer — it needs an upstream LLM API to forward requests to.
@@ -792,8 +894,8 @@ def _extract_routing_features(
         is_agentic=has_tool_results or (needs_tool_calling and step_type != "general"),
         is_coding=False,
         requested_max_output_tokens=max(1, int(max_output_tokens)),
-        tier_floor=None,
-        tier_cap=None,
+        tier_floor=Tier.MEDIUM if step_type == "tool-selection" else None,
+        tier_cap=Tier.MEDIUM if step_type == "tool-selection" else None,
         session_present=bool(session_id),
     )
 
@@ -871,12 +973,56 @@ def _is_model_error(content: bytes) -> bool:
         return False
 
 
-def _spend_error(result: Any, *, api_format: str = "openai") -> JSONResponse:
+def _truncate_diagnostic_text(text: str, limit: int = 240) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _extract_error_details(status_code: int, content: bytes) -> tuple[str, str]:
+    fallback_code = f"http_{status_code}"
+    fallback_message = f"HTTP {status_code}"
+    if not content:
+        return fallback_code, fallback_message
+    try:
+        payload = json.loads(content.decode("utf-8", errors="replace"))
+    except Exception:
+        text = content.decode("utf-8", errors="replace")
+        return fallback_code, _truncate_diagnostic_text(text)
+
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            code = str(error_payload.get("code") or error_payload.get("type") or "").strip()
+            message = str(
+                error_payload.get("message")
+                or error_payload.get("detail")
+                or error_payload.get("error")
+                or ""
+            ).strip()
+            return code or fallback_code, _truncate_diagnostic_text(message or fallback_message)
+
+        code = str(payload.get("code") or payload.get("type") or "").strip()
+        message = str(payload.get("message") or payload.get("detail") or "").strip()
+        if code or message:
+            return code or fallback_code, _truncate_diagnostic_text(message or fallback_message)
+
+    return fallback_code, _truncate_diagnostic_text(str(payload) or fallback_message)
+
+
+def _spend_error(
+    result: Any,
+    *,
+    api_format: str = "openai",
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     """Build a 429 error response for spend control violations."""
     if api_format == "anthropic":
         return JSONResponse(
             anthropic_error_response(429, result.reason or "Spending limit exceeded"),
             status_code=429,
+            headers=headers,
         )
     body: dict[str, Any] = {
         "error": {
@@ -887,7 +1033,7 @@ def _spend_error(result: Any, *, api_format: str = "openai") -> JSONResponse:
     }
     if result.reset_in_s is not None:
         body["error"]["reset_in_seconds"] = result.reset_in_s
-    return JSONResponse(body, status_code=429)
+    return JSONResponse(body, status_code=429, headers=headers)
 
 
 def _routing_infeasible_payload(
@@ -920,10 +1066,12 @@ def _routing_infeasible_response(
     error: RoutingInfeasibleError,
     *,
     api_format: str = "openai",
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         _routing_infeasible_payload(error, api_format=api_format),
         status_code=400,
+        headers=headers,
     )
 
 
@@ -1050,6 +1198,10 @@ def _selection_modes_payload(config) -> dict[str, dict[str, float]]:
     }
 
 
+def _selection_weights_payload(config, mode_value: str) -> dict[str, float]:
+    return dict(_selection_modes_payload(config).get(str(mode_value or "").strip().lower(), {}))
+
+
 def _bandit_modes_payload(config) -> dict[str, dict[str, object]]:
     return {
         mode.value: {
@@ -1169,6 +1321,7 @@ def create_app(
     spend_control: SpendControl | None = None,
     providers_config: ProvidersConfig | None = None,
     route_stats: RouteStats | None = None,
+    trace_store: TraceStore | None = None,
     feedback: FeedbackCollector | None = None,
     model_mapper: ModelMapper | None = None,
     artifact_store: ArtifactStore | None = None,
@@ -1189,8 +1342,10 @@ def create_app(
     upstream = _effective_connection.upstream
     _primary_api_key = _effective_connection.api_key
     _spend = spend_control or SpendControl()
+    _spend_reservation = _SpendReservation(_spend)
     _providers = providers_config or load_providers()
     _stats = route_stats or RouteStats()
+    _traces = trace_store or TraceStore()
     _route_confidence = route_confidence_calibrator or get_active_route_confidence_calibrator()
     if any(record.feedback_signal for record in _stats.history()):
         _route_confidence.fit_from_route_records(_stats.history())
@@ -1512,6 +1667,7 @@ def create_app(
 
     async def handle_health(request: Request) -> JSONResponse:
         spend_status = _spend.status()
+        trace_summary = _traces.summary()
         return JSONResponse({
             "status": "ok",
             "router": "uncommon-route",
@@ -1537,6 +1693,12 @@ def create_app(
             },
             "stats": {
                 "total_requests": _stats.count,
+            },
+            "traces": {
+                "total_requests": _traces.count,
+                "error_count": trace_summary["error_count"],
+                "virtual_requests": trace_summary["virtual_requests"],
+                "passthrough_requests": trace_summary["passthrough_requests"],
             },
             "composition": {
                 "artifacts": _artifacts.count(),
@@ -1600,6 +1762,9 @@ def create_app(
         }
 
     async def handle_connections(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         if request.method == "GET":
             return JSONResponse(_current_connection_payload())
 
@@ -1626,6 +1791,9 @@ def create_app(
         return JSONResponse(payload, status_code=200 if ok else 502)
 
     async def handle_providers(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         if request.method == "GET":
             return JSONResponse(_providers_payload())
 
@@ -1662,6 +1830,9 @@ def create_app(
         return JSONResponse(payload)
 
     async def handle_provider_detail(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         name = str(request.path_params["name"]).strip().lower()
         if request.method == "DELETE":
             removed = remove_provider(name)
@@ -1707,6 +1878,9 @@ def create_app(
                 "remaining": {k: v for k, v in s.remaining.items() if v is not None},
                 "calls": s.calls,
             })
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         body = await request.json()
         action = body.get("action", "set")
         window = body.get("window")
@@ -1727,12 +1901,15 @@ def create_app(
         if request.method == "POST":
             body = await request.json()
             if body.get("action") == "reset":
+                traces_cleared = _traces.count
                 _stats.reset()
+                _traces.reset()
                 _route_confidence.reset()
                 cleared_feedback = _feedback.clear_pending()
                 return JSONResponse({
                     "ok": True,
                     "reset": True,
+                    "traces_cleared": traces_cleared,
                     "feedback_cleared": cleared_feedback,
                     "route_confidence_calibration_reset": True,
                 })
@@ -1823,6 +2000,9 @@ def create_app(
                     )
             return JSONResponse(_selector_state())
 
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         body = await request.json()
         normalized_body, error = _normalize_selector_body(
             body,
@@ -1843,6 +2023,9 @@ def create_app(
         if request.method == "GET":
             return JSONResponse(_routing_store.export())
 
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
         body = await request.json()
         action = str(body.get("action", "")).strip().lower()
         try:
@@ -1922,6 +2105,9 @@ def create_app(
         body = await request.json()
         action = body.get("action")
         if action == "rollback":
+            denied = _admin_auth_failure(request)
+            if denied is not None:
+                return denied
             rolled = _feedback.rollback()
             return JSONResponse({
                 "ok": True,
@@ -1938,6 +2124,15 @@ def create_app(
         result = _feedback.submit(request_id, signal)
         if result.action != "expired":
             _stats.record_feedback(
+                request_id,
+                signal=signal,
+                ok=result.ok,
+                action=result.action,
+                from_tier=result.from_tier,
+                to_tier=result.to_tier,
+                reason=result.reason,
+            )
+            _traces.record_feedback(
                 request_id,
                 signal=signal,
                 ok=result.ok,
@@ -1981,6 +2176,28 @@ def create_app(
                 break
         return JSONResponse(visible_records)
 
+    async def handle_traces(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+        limit = max(1, min(int(request.query_params.get("limit", "50")), 200))
+        errors_only = request.query_params.get("errors_only", "").strip().lower() in {"1", "true", "yes"}
+        return JSONResponse({
+            "total_requests": _traces.count,
+            "summary": _traces.summary(),
+            "items": _traces.recent(limit=limit, errors_only=errors_only),
+        })
+
+    async def handle_trace_detail(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+        request_id = str(request.path_params["request_id"]).strip()
+        trace = _traces.find(request_id)
+        if trace is None:
+            return JSONResponse({"error": "Trace not found", "request_id": request_id}, status_code=404)
+        return JSONResponse(trace)
+
     async def handle_v2_metrics(request: Request) -> JSONResponse:
         """GET /v1/v2-metrics — v2 routing metrics snapshot."""
         from uncommon_route.v2_lifecycle import get_metrics, is_signal_b_promoted
@@ -2011,6 +2228,7 @@ def create_app(
         request: Request,
         *,
         api_format: str = "openai",
+        endpoint_name: str = "chat_completions",
     ) -> Response:
         if not upstream:
             msg = _SETUP_GUIDE.strip()
@@ -2040,14 +2258,36 @@ def create_app(
         savings = 0.0
         estimated_cost = 0.0
         baseline_cost = 0.0
+        selected_model = model
+        tier_value = ""
+        reasoning = "passthrough"
+        route_reasoning = ""
+        raw_confidence = 0.0
+        confidence_source = ""
+        calibration_version = ""
+        calibration_sample_count = 0
+        calibration_temperature = 1.0
+        calibration_applied_tags: list[str] = []
+        feature_tags: list[str] = []
+        constraint_tags: list[str] = []
+        hint_tags: list[str] = []
+        answer_depth_value = "standard"
+        routing_features_payload: dict[str, object] = {}
+        fallback_chain_payload: list[dict[str, object]] = []
+        candidate_scores_payload: list[dict[str, object]] = []
+        selection_weights_payload: dict[str, float] = {}
+        attempts_payload: list[dict[str, Any]] = []
         session_id: str | None = None
-        request_id = ""
+        request_id = uuid.uuid4().hex[:12]
+        debug_headers: dict[str, str] = {}
         prompt_preview = ""
+        prompt_hash_value = ""
         fallback_models: list[str] = []
         fallback_reason = ""
         step_type = "general"
         mode_value = routing_mode.value if routing_mode else ""
         decision_tier = ""
+        complexity_value = 0.33
         input_tokens_before = 0
         input_tokens_after = 0
         artifacts_created = 0
@@ -2065,8 +2305,10 @@ def create_app(
         effective_output_tokens = max_tokens
         _pv = " ".join(prompt[:80].split())
         prompt_preview = (_pv + "...") if len(prompt) > 80 else _pv
+        prompt_hash_value = trace_prompt_hash(prompt)
         session_id = _resolve_session_id(request, body)
         step_type, tool_names = _classify_step(body)
+        _set_header(debug_headers, "x-uncommon-route-request-id", request_id)
 
         retrial_previous = None
         if is_virtual and prompt:
@@ -2091,12 +2333,16 @@ def create_app(
                 )
 
         if is_virtual:
+            _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
             if prompt.startswith("/debug"):
                 debug_prompt = prompt[len("/debug"):].strip() or "hello"
                 debug_body = _build_debug_response(debug_prompt, system_prompt, _routing_config)
                 if api_format == "anthropic":
-                    return JSONResponse(openai_to_anthropic_response(debug_body, "uncommon-route/debug"))
-                return JSONResponse(debug_body)
+                    return JSONResponse(
+                        openai_to_anthropic_response(debug_body, "uncommon-route/debug"),
+                        headers=debug_headers,
+                    )
+                return JSONResponse(debug_body, headers=debug_headers)
 
             routing_features = _extract_routing_features(
                 body,
@@ -2131,7 +2377,68 @@ def create_app(
                     messages=body.get("messages"),
                 )
             except RoutingInfeasibleError as exc:
-                return _routing_infeasible_response(exc, api_format=api_format)
+                route_latency_us = (time.perf_counter_ns() - route_start) / 1000
+                route_reasoning = exc.infeasibility.message
+                timestamp_value = time.time()
+                _stats.record(RouteRecord(
+                    timestamp=timestamp_value,
+                    requested_model=requested_model,
+                    mode=mode_value,
+                    model=selected_model,
+                    tier=tier_value,
+                    decision_tier=decision_tier,
+                    confidence=confidence,
+                    method=route_method,  # type: ignore[arg-type]
+                    raw_confidence=raw_confidence,
+                    confidence_source=confidence_source,
+                    calibration_version=calibration_version,
+                    calibration_sample_count=calibration_sample_count,
+                    calibration_temperature=calibration_temperature,
+                    calibration_applied_tags=calibration_applied_tags,
+                    estimated_cost=estimated_cost,
+                    baseline_cost=baseline_cost,
+                    savings=savings,
+                    latency_us=route_latency_us,
+                    session_id=session_id,
+                    request_id=request_id,
+                    prompt_preview=prompt_preview,
+                    route_reasoning=route_reasoning,
+                    routing_features_payload=_serialize_routing_features(routing_features),
+                    status_code=400,
+                    error_code=exc.infeasibility.code.value,
+                    error_stage="routing",
+                    error_message=exc.infeasibility.message,
+                ))
+                _traces.record(RequestTrace(
+                    timestamp=timestamp_value,
+                    request_id=request_id,
+                    requested_model=requested_model,
+                    model=selected_model,
+                    status_code=400,
+                    mode=mode_value,
+                    tier=tier_value,
+                    decision_tier=decision_tier,
+                    method=route_method,
+                    api_format=api_format,
+                    endpoint=endpoint_name,
+                    is_virtual=True,
+                    session_id=session_id,
+                    streaming=is_streaming,
+                    prompt_preview=prompt_preview,
+                    prompt_hash=prompt_hash_value,
+                    step_type=step_type,
+                    route_reasoning=route_reasoning,
+                    latency_us=route_latency_us,
+                    routing_features_payload=_serialize_routing_features(routing_features),
+                    error_code=exc.infeasibility.code.value,
+                    error_stage="routing",
+                    error_message=exc.infeasibility.message,
+                ))
+                return _routing_infeasible_response(
+                    exc,
+                    api_format=api_format,
+                    headers=debug_headers,
+                )
             selected_model = decision.model
             tier_value = decision.tier.value
             decision_tier = tier_value
@@ -2144,6 +2451,7 @@ def create_app(
                     estimate_tokens(prompt), prompt[:100], decision.reasoning,
                 )
             reasoning = decision.reasoning
+            route_reasoning = decision.reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence
@@ -2160,6 +2468,11 @@ def create_app(
             constraint_tags = list(decision.constraints.tags())
             hint_tags = list(decision.workload_hints.tags())
             answer_depth_value = decision.answer_depth.value
+            selection_weights_payload = _selection_weights_payload(_routing_config, mode_value)
+            complexity_value = decision.complexity
+            routing_features_payload = _serialize_routing_features(decision.routing_features)
+            fallback_chain_payload = _serialize_fallback_chain(decision.fallback_chain)
+            candidate_scores_payload = _serialize_candidate_scores(decision.candidate_scores[:5])
 
             if _retrial_detector.history_size > 0:
                 _retrial_detector._history[-1].model = selected_model
@@ -2207,11 +2520,92 @@ def create_app(
             main_estimated_cost = estimated_cost
             estimated_cost += sidechannel_estimated_cost
 
-            check = _spend.check(estimated_cost)
+            check = await _spend_reservation.reserve(request_id, estimated_cost)
             if not check.allowed:
-                return _spend_error(check, api_format=api_format)
+                timestamp_value = time.time()
+                _stats.record(RouteRecord(
+                    timestamp=timestamp_value,
+                    requested_model=requested_model,
+                    mode=mode_value,
+                    model=selected_model,
+                    tier=tier_value,
+                    decision_tier=decision_tier or tier_value,
+                    confidence=confidence,
+                    method=route_method,  # type: ignore[arg-type]
+                    raw_confidence=raw_confidence,
+                    confidence_source=confidence_source,
+                    calibration_version=calibration_version,
+                    calibration_sample_count=calibration_sample_count,
+                    calibration_temperature=calibration_temperature,
+                    calibration_applied_tags=calibration_applied_tags,
+                    estimated_cost=estimated_cost,
+                    baseline_cost=baseline_cost,
+                    savings=savings,
+                    latency_us=(time.perf_counter_ns() - route_start) / 1000,
+                    session_id=session_id,
+                    step_type=step_type,
+                    request_id=request_id,
+                    prompt_preview=prompt_preview,
+                    route_reasoning=route_reasoning,
+                    constraint_tags=constraint_tags,
+                    hint_tags=hint_tags,
+                    feature_tags=feature_tags,
+                    answer_depth=answer_depth_value,
+                    routing_features_payload=routing_features_payload,
+                    fallback_chain_payload=fallback_chain_payload,
+                    candidate_scores_payload=candidate_scores_payload,
+                    status_code=429,
+                    error_code="spend_limit_exceeded",
+                    error_stage="guardrail",
+                    error_message=check.reason or "Spending limit exceeded",
+                ))
+                _traces.record(RequestTrace(
+                    timestamp=timestamp_value,
+                    request_id=request_id,
+                    requested_model=requested_model,
+                    model=selected_model,
+                    status_code=429,
+                    mode=mode_value,
+                    tier=tier_value,
+                    decision_tier=decision_tier or tier_value,
+                    method=route_method,
+                    api_format=api_format,
+                    endpoint=endpoint_name,
+                    is_virtual=True,
+                    session_id=session_id,
+                    streaming=is_streaming,
+                    prompt_preview=prompt_preview,
+                    prompt_hash=prompt_hash_value,
+                    step_type=step_type,
+                    route_reasoning=route_reasoning,
+                    confidence=confidence,
+                    raw_confidence=raw_confidence,
+                    confidence_source=confidence_source,
+                    calibration_version=calibration_version,
+                    calibration_sample_count=calibration_sample_count,
+                    calibration_temperature=calibration_temperature,
+                    calibration_applied_tags=calibration_applied_tags,
+                    complexity=complexity_value,
+                    estimated_cost=estimated_cost,
+                    baseline_cost=baseline_cost,
+                    savings=savings,
+                    latency_us=(time.perf_counter_ns() - route_start) / 1000,
+                    fallback_reason=fallback_reason,
+                    answer_depth=answer_depth_value,
+                    constraint_tags=constraint_tags,
+                    hint_tags=hint_tags,
+                    feature_tags=feature_tags,
+                    routing_features_payload=routing_features_payload,
+                    fallback_chain_payload=fallback_chain_payload,
+                    candidate_scores_payload=candidate_scores_payload,
+                    selection_weights_payload=selection_weights_payload,
+                    attempts_payload=attempts_payload,
+                    error_code="spend_limit_exceeded",
+                    error_stage="guardrail",
+                    error_message=check.reason or "Spending limit exceeded",
+                ))
+                return _spend_error(check, api_format=api_format, headers=debug_headers)
 
-            request_id = uuid.uuid4().hex[:12]
             # ─── v2: link request_id to cached signal predictions ───
             try:
                 from uncommon_route.v2_lifecycle import associate_request_id
@@ -2235,6 +2629,7 @@ def create_app(
             tier_value = ""
             mode_value = "passthrough"
             reasoning = "passthrough"
+            route_reasoning = reasoning
             route_method = "passthrough"
             full_text = f"{system_prompt or ''} {prompt}".strip()
             input_tokens_before = estimate_tokens(full_text) if full_text else 0
@@ -2253,6 +2648,9 @@ def create_app(
             constraint_tags = []
             hint_tags = []
             answer_depth_value = "standard"
+            _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
+            _set_header(debug_headers, "x-uncommon-route-model", selected_model)
+            _set_header(debug_headers, "x-uncommon-route-reasoning", reasoning)
 
         route_latency_us = (time.perf_counter_ns() - route_start) / 1000
 
@@ -2267,6 +2665,9 @@ def create_app(
         def _prepare_attempt(model_name: str) -> dict[str, Any]:
             attempt_provider_entry = _providers.get_for_model(model_name)
             attempt_upstream_body = json.loads(json.dumps(body))
+            _requested_max = attempt_upstream_body.get("max_tokens")
+            if isinstance(_requested_max, int) and _requested_max > UPSTREAM_MAX_OUTPUT_TOKENS:
+                attempt_upstream_body["max_tokens"] = UPSTREAM_MAX_OUTPUT_TOKENS
             attempt_headers: dict[str, str] = {}
             for key in ("authorization", "content-type", "accept", "user-agent"):
                 val = request.headers.get(key)
@@ -2373,7 +2774,76 @@ def create_app(
                 cache_plan.cache_breakpoints,
             )
 
-        debug_headers: dict[str, str] = {}
+        current_attempt_trace: dict[str, Any] | None = None
+
+        def _begin_attempt_trace(
+            attempt_payload: dict[str, Any],
+            *,
+            fallback_from: str | None = None,
+        ) -> None:
+            nonlocal current_attempt_trace
+            provider_name = ""
+            if attempt_payload.get("provider_entry") is not None:
+                provider_name = str(getattr(attempt_payload["provider_entry"], "name", "") or "")
+            current_attempt_trace = {
+                "attempt_index": len(attempts_payload) + 1,
+                "selected_model": attempt_payload["selected_model"],
+                "resolved_model": attempt_payload["resolved_model"],
+                "provider_name": provider_name,
+                "target_url": attempt_payload["target_chat_url"],
+                "transport": _transport_name(attempt_payload["native_anthropic_transport"]),
+                "cache_mode": _cache_mode_name(attempt_payload["cache_plan"]),
+                "cache_family": _cache_family_name(attempt_payload["cache_plan"]),
+                "cache_breakpoints": attempt_payload["cache_plan"].cache_breakpoints,
+                "fallback_from": fallback_from or "",
+                "status_code": 0,
+                "success": False,
+                "error_code": "",
+                "error_message": "",
+            }
+            attempts_payload.append(current_attempt_trace)
+
+        def _complete_attempt_trace(
+            *,
+            status_code: int | None = None,
+            success: bool = False,
+            error_code: str = "",
+            error_message: str = "",
+        ) -> None:
+            if current_attempt_trace is None:
+                return
+            if status_code is not None:
+                current_attempt_trace["status_code"] = status_code
+            current_attempt_trace["success"] = success
+            if error_code:
+                current_attempt_trace["error_code"] = error_code
+            if error_message:
+                current_attempt_trace["error_message"] = error_message
+
+        def _append_blocked_attempt(
+            model_name: str,
+            *,
+            error_code: str,
+            error_message: str,
+        ) -> None:
+            attempts_payload.append({
+                "attempt_index": len(attempts_payload) + 1,
+                "selected_model": model_name,
+                "resolved_model": model_name,
+                "provider_name": "",
+                "target_url": "",
+                "transport": "",
+                "cache_mode": "",
+                "cache_family": "",
+                "cache_breakpoints": 0,
+                "fallback_from": "",
+                "status_code": 0,
+                "success": False,
+                "error_code": error_code,
+                "error_message": error_message,
+                "blocked": True,
+            })
+
         if is_virtual:
             _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
             _set_header(debug_headers, "x-uncommon-route-request-id", request_id)
@@ -2423,7 +2893,7 @@ def create_app(
             nonlocal selected_model, provider_entry, upstream_body, target_chat_url
             nonlocal transport_body, fwd_headers, native_anthropic_transport
             nonlocal cache_plan, resolved_model, route_method, fallback_reason
-            nonlocal reasoning, main_estimated_cost, estimated_cost
+            nonlocal reasoning, route_reasoning, main_estimated_cost, estimated_cost
 
             selected_model = attempt_payload["selected_model"]
             provider_entry = attempt_payload["provider_entry"]
@@ -2440,6 +2910,7 @@ def create_app(
                 route_method = "fallback"
                 fallback_reason = f"{fallback_from} unavailable -> {resolved_model}"
                 reasoning = f"fallback: {fallback_reason}"
+                route_reasoning = reasoning
                 _mapper.record_alias(fallback_from, resolved_model)
                 if request_id:
                     _feedback.rebind_request(
@@ -2452,14 +2923,19 @@ def create_app(
 
             _sync_virtual_debug_headers()
 
-        def _spend_error_for_model(model_name: str) -> JSONResponse | None:
+        async def _spend_error_for_model(model_name: str) -> JSONResponse | None:
             if not is_virtual:
                 return None
             _next_main_cost, total_cost = _estimated_total_cost_for(model_name)
-            check = _spend.check(total_cost)
+            check = await _spend_reservation.update_reserve(request_id, total_cost)
             if check.allowed:
                 return None
-            return _spend_error(check, api_format=api_format)
+            _append_blocked_attempt(
+                model_name,
+                error_code="spend_limit_exceeded",
+                error_message=check.reason or "Spending limit exceeded",
+            )
+            return _spend_error(check, api_format=api_format, headers=debug_headers)
 
         def _should_try_fallback(status_code: int, content: bytes) -> bool:
             if not is_virtual or not fallback_models:
@@ -2536,9 +3012,172 @@ def create_app(
                 },
             )
 
+        def _record_route_trace(
+            *,
+            status_code: int,
+            actual_cost: float | None = None,
+            usage_metrics: UsageMetrics | None = None,
+            streaming: bool,
+            error_code: str = "",
+            error_stage: str = "",
+            error_message: str = "",
+        ) -> None:
+            method_value = route_method if is_virtual else "passthrough"
+            confidence_value = confidence if is_virtual else 1.0
+            savings_value = savings if is_virtual else 0.0
+            timestamp_value = time.time()
+
+            if is_virtual or status_code == 200:
+                _stats.record(RouteRecord(
+                    timestamp=timestamp_value,
+                    requested_model=requested_model,
+                    mode=mode_value,
+                    model=selected_model,
+                    tier=tier_value,
+                    decision_tier=decision_tier or tier_value,
+                    confidence=confidence_value,
+                    method=method_value,  # type: ignore[arg-type]
+                    raw_confidence=raw_confidence,
+                    confidence_source=confidence_source,
+                    calibration_version=calibration_version,
+                    calibration_sample_count=calibration_sample_count,
+                    calibration_temperature=calibration_temperature,
+                    calibration_applied_tags=calibration_applied_tags,
+                    estimated_cost=estimated_cost,
+                    baseline_cost=baseline_cost,
+                    actual_cost=actual_cost,
+                    savings=savings_value,
+                    latency_us=route_latency_us,
+                    usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
+                    usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
+                    cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
+                    cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
+                    cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
+                    transport=_transport_name(native_anthropic_transport),
+                    cache_mode=_cache_mode_name(cache_plan),
+                    cache_family=_cache_family_name(cache_plan),
+                    cache_breakpoints=cache_plan.cache_breakpoints,
+                    input_tokens_before=input_tokens_before,
+                    input_tokens_after=input_tokens_after,
+                    artifacts_created=artifacts_created,
+                    compacted_messages=compacted_messages,
+                    semantic_summaries=semantic_summaries,
+                    semantic_calls=semantic_calls,
+                    semantic_failures=semantic_failures,
+                    semantic_quality_fallbacks=semantic_quality_fallbacks,
+                    checkpoint_created=checkpoint_created,
+                    rehydrated_artifacts=rehydrated_artifacts,
+                    sidechannel_estimated_cost=sidechannel_estimated_cost,
+                    sidechannel_actual_cost=sidechannel_actual_cost,
+                    session_id=session_id,
+                    step_type=step_type,
+                    fallback_reason=fallback_reason,
+                    streaming=streaming,
+                    request_id=request_id,
+                    prompt_preview=prompt_preview,
+                    complexity=complexity_value,
+                    route_reasoning=route_reasoning or reasoning,
+                    constraint_tags=constraint_tags,
+                    hint_tags=hint_tags,
+                    feature_tags=feature_tags,
+                    answer_depth=answer_depth_value,
+                    routing_features_payload=routing_features_payload,
+                    fallback_chain_payload=fallback_chain_payload,
+                    candidate_scores_payload=candidate_scores_payload,
+                    status_code=status_code,
+                    error_code=error_code,
+                    error_stage=error_stage,
+                    error_message=error_message,
+                ))
+
+            _traces.record(RequestTrace(
+                timestamp=timestamp_value,
+                request_id=request_id,
+                requested_model=requested_model,
+                model=selected_model,
+                status_code=status_code,
+                mode=mode_value,
+                tier=tier_value,
+                decision_tier=decision_tier or tier_value,
+                method=method_value,
+                api_format=api_format,
+                endpoint=endpoint_name,
+                is_virtual=is_virtual,
+                session_id=session_id,
+                streaming=streaming,
+                prompt_preview=prompt_preview,
+                prompt_hash=prompt_hash_value,
+                step_type=step_type,
+                route_reasoning=route_reasoning or reasoning,
+                confidence=confidence_value,
+                raw_confidence=raw_confidence,
+                confidence_source=confidence_source,
+                calibration_version=calibration_version,
+                calibration_sample_count=calibration_sample_count,
+                calibration_temperature=calibration_temperature,
+                calibration_applied_tags=calibration_applied_tags,
+                complexity=complexity_value,
+                estimated_cost=estimated_cost,
+                baseline_cost=baseline_cost,
+                actual_cost=actual_cost,
+                savings=savings_value,
+                latency_us=route_latency_us,
+                usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
+                usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
+                cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
+                cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
+                cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
+                transport=_transport_name(native_anthropic_transport),
+                cache_mode=_cache_mode_name(cache_plan),
+                cache_family=_cache_family_name(cache_plan),
+                cache_breakpoints=cache_plan.cache_breakpoints,
+                input_tokens_before=input_tokens_before,
+                input_tokens_after=input_tokens_after,
+                artifacts_created=artifacts_created,
+                compacted_messages=compacted_messages,
+                semantic_summaries=semantic_summaries,
+                semantic_calls=semantic_calls,
+                semantic_failures=semantic_failures,
+                semantic_quality_fallbacks=semantic_quality_fallbacks,
+                checkpoint_created=checkpoint_created,
+                rehydrated_artifacts=rehydrated_artifacts,
+                sidechannel_estimated_cost=sidechannel_estimated_cost,
+                sidechannel_actual_cost=sidechannel_actual_cost,
+                fallback_reason=fallback_reason,
+                answer_depth=answer_depth_value,
+                constraint_tags=constraint_tags,
+                hint_tags=hint_tags,
+                feature_tags=feature_tags,
+                routing_features_payload=routing_features_payload,
+                fallback_chain_payload=fallback_chain_payload,
+                candidate_scores_payload=candidate_scores_payload,
+                selection_weights_payload=selection_weights_payload,
+                attempts_payload=attempts_payload,
+                error_code=error_code,
+                error_stage=error_stage,
+                error_message=error_message,
+            ))
+
+        def _record_response_error(response: Response, *, streaming: bool) -> None:
+            body = getattr(response, "body", b"") or b""
+            if not isinstance(body, (bytes, bytearray)):
+                body = bytes(body)
+            derived_error_code, derived_error_message = _extract_error_details(response.status_code, body)
+            if derived_error_code == "spend_limit_exceeded":
+                error_stage_value = "guardrail"
+            else:
+                error_stage_value = "upstream_response"
+            _record_route_trace(
+                status_code=response.status_code,
+                streaming=streaming,
+                error_code=derived_error_code,
+                error_stage=error_stage_value,
+                error_message=derived_error_message,
+            )
+
         try:
             if is_streaming:
-                def _record_stream_success(stream_usage: UsageMetrics | None) -> None:
+                async def _record_stream_success(stream_usage: UsageMetrics | None) -> None:
                     stream_actual_cost: float | None = None
                     stream_ttft_ms: float | None = None
                     stream_tps: float | None = None
@@ -2576,99 +3215,28 @@ def create_app(
                             (stream_actual_cost if stream_actual_cost is not None else main_estimated_cost)
                             + (sidechannel_actual_cost if sidechannel_actual_cost is not None else sidechannel_estimated_cost)
                         )
-                        _spend.record(
+                        await _spend_reservation.settle(
+                            request_id,
                             combined_cost,
                             model=selected_model,
                             action="chat",
                         )
-                        _stats.record(RouteRecord(
-                            timestamp=time.time(),
-                            requested_model=requested_model,
-                            mode=mode_value,
-                            model=selected_model,
-                            tier=tier_value,
-                            decision_tier=decision_tier or tier_value,
-                            confidence=confidence, method=route_method,  # type: ignore[arg-type]
-                            raw_confidence=raw_confidence,
-                            confidence_source=confidence_source,
-                            calibration_version=calibration_version,
-                            calibration_sample_count=calibration_sample_count,
-                            calibration_temperature=calibration_temperature,
-                            calibration_applied_tags=calibration_applied_tags,
-                            estimated_cost=estimated_cost, baseline_cost=baseline_cost, actual_cost=stream_actual_cost,
-                            savings=savings, latency_us=route_latency_us,
-                            usage_input_tokens=stream_usage.input_tokens_total if stream_usage else 0,
-                            usage_output_tokens=stream_usage.output_tokens if stream_usage else 0,
-                            cache_read_input_tokens=stream_usage.cache_read_input_tokens if stream_usage else 0,
-                            cache_write_input_tokens=stream_usage.cache_write_input_tokens if stream_usage else 0,
-                            cache_hit_ratio=stream_usage.cache_hit_ratio if stream_usage else 0.0,
-                            transport=_transport_name(native_anthropic_transport),
-                            cache_mode=_cache_mode_name(cache_plan),
-                            cache_family=_cache_family_name(cache_plan),
-                            cache_breakpoints=cache_plan.cache_breakpoints,
-                            input_tokens_before=input_tokens_before,
-                            input_tokens_after=input_tokens_after,
-                            artifacts_created=artifacts_created,
-                            compacted_messages=compacted_messages,
-                            semantic_summaries=semantic_summaries,
-                            semantic_calls=semantic_calls,
-                            semantic_failures=semantic_failures,
-                            semantic_quality_fallbacks=semantic_quality_fallbacks,
-                            checkpoint_created=checkpoint_created,
-                            rehydrated_artifacts=rehydrated_artifacts,
-                            sidechannel_estimated_cost=sidechannel_estimated_cost,
-                            sidechannel_actual_cost=sidechannel_actual_cost,
-                            session_id=session_id,
-                            step_type=step_type, fallback_reason=fallback_reason,
-                            streaming=True,
-                            request_id=request_id, prompt_preview=prompt_preview,
-                            complexity=decision.complexity if is_virtual else 0.33,
-                            constraint_tags=constraint_tags,
-                            hint_tags=hint_tags,
-                            feature_tags=feature_tags,
-                            answer_depth=answer_depth_value,
-                        ))
-                    else:
-                        _stats.record(RouteRecord(
-                            timestamp=time.time(),
-                            requested_model=requested_model,
-                            mode=mode_value,
-                            model=selected_model,
-                            tier=tier_value,
-                            decision_tier=decision_tier or tier_value,
-                            confidence=1.0,
-                            raw_confidence=raw_confidence,
-                            confidence_source=confidence_source,
-                            calibration_version=calibration_version,
-                            calibration_sample_count=calibration_sample_count,
-                            calibration_temperature=calibration_temperature,
-                            calibration_applied_tags=calibration_applied_tags,
-                            method="passthrough",  # type: ignore[arg-type]
-                            estimated_cost=estimated_cost,
-                            baseline_cost=baseline_cost,
+                        _record_route_trace(
+                            status_code=200,
                             actual_cost=stream_actual_cost,
-                            savings=0.0,
-                            latency_us=route_latency_us,
-                            usage_input_tokens=stream_usage.input_tokens_total if stream_usage else 0,
-                            usage_output_tokens=stream_usage.output_tokens if stream_usage else 0,
-                            cache_read_input_tokens=stream_usage.cache_read_input_tokens if stream_usage else 0,
-                            cache_write_input_tokens=stream_usage.cache_write_input_tokens if stream_usage else 0,
-                            cache_hit_ratio=stream_usage.cache_hit_ratio if stream_usage else 0.0,
-                            transport=_transport_name(native_anthropic_transport),
-                            cache_mode=_cache_mode_name(cache_plan),
-                            cache_family=_cache_family_name(cache_plan),
-                            cache_breakpoints=cache_plan.cache_breakpoints,
-                            input_tokens_before=input_tokens_before,
-                            input_tokens_after=input_tokens_after,
-                            session_id=session_id,
+                            usage_metrics=stream_usage,
                             streaming=True,
-                            step_type=step_type,
-                            request_id=request_id,
-                            prompt_preview=prompt_preview,
-                            feature_tags=feature_tags,
-                        ))
+                        )
+                    else:
+                        _record_route_trace(
+                            status_code=200,
+                            actual_cost=stream_actual_cost,
+                            usage_metrics=stream_usage,
+                            streaming=True,
+                        )
 
-                def _record_stream_failure() -> None:
+                async def _record_stream_failure() -> None:
+                    await _spend_reservation.release(request_id)
                     if is_virtual:
                         _model_experience.observe(
                             selected_model,
@@ -2677,77 +3245,21 @@ def create_app(
                             success=False,
                         )
                         _circuit_breaker.record_failure(selected_model)
-                        _stats.record(RouteRecord(
-                            timestamp=time.time(),
-                            requested_model=requested_model,
-                            mode=mode_value,
-                            model=selected_model,
-                            tier=tier_value,
-                            decision_tier=decision_tier or tier_value,
-                            confidence=confidence, method=route_method,  # type: ignore[arg-type]
-                            raw_confidence=raw_confidence,
-                            confidence_source=confidence_source,
-                            calibration_version=calibration_version,
-                            calibration_sample_count=calibration_sample_count,
-                            calibration_temperature=calibration_temperature,
-                            calibration_applied_tags=calibration_applied_tags,
-                            estimated_cost=estimated_cost, baseline_cost=baseline_cost, savings=savings,
-                            latency_us=route_latency_us,
-                            transport=_transport_name(native_anthropic_transport),
-                            cache_mode=_cache_mode_name(cache_plan),
-                            cache_family=_cache_family_name(cache_plan),
-                            cache_breakpoints=cache_plan.cache_breakpoints,
-                            input_tokens_before=input_tokens_before,
-                            input_tokens_after=input_tokens_after,
-                            artifacts_created=artifacts_created,
-                            compacted_messages=compacted_messages,
-                            semantic_summaries=semantic_summaries,
-                            semantic_calls=semantic_calls,
-                            semantic_failures=semantic_failures,
-                            semantic_quality_fallbacks=semantic_quality_fallbacks,
-                            checkpoint_created=checkpoint_created,
-                            rehydrated_artifacts=rehydrated_artifacts,
-                            sidechannel_estimated_cost=sidechannel_estimated_cost,
-                            sidechannel_actual_cost=sidechannel_actual_cost,
-                            session_id=session_id,
-                            step_type=step_type, fallback_reason=fallback_reason,
+                        _record_route_trace(
+                            status_code=502,
                             streaming=True,
-                            request_id=request_id, prompt_preview=prompt_preview,
-                            complexity=decision.complexity if is_virtual else 0.33,
-                            constraint_tags=constraint_tags,
-                            hint_tags=hint_tags,
-                            feature_tags=feature_tags,
-                            answer_depth=answer_depth_value,
-                        ))
+                            error_code="stream_failure",
+                            error_stage="stream",
+                            error_message="Streaming response interrupted",
+                        )
                     else:
-                        _stats.record(RouteRecord(
-                            timestamp=time.time(),
-                            requested_model=requested_model,
-                            mode=mode_value,
-                            model=selected_model,
-                            tier=tier_value,
-                            decision_tier=decision_tier or tier_value,
-                            confidence=1.0,
-                            raw_confidence=raw_confidence,
-                            confidence_source=confidence_source,
-                            calibration_version=calibration_version,
-                            calibration_sample_count=calibration_sample_count,
-                            calibration_temperature=calibration_temperature,
-                            calibration_applied_tags=calibration_applied_tags,
-                            method="passthrough",  # type: ignore[arg-type]
-                            estimated_cost=estimated_cost,
-                            baseline_cost=baseline_cost,
-                            savings=0.0,
-                            latency_us=route_latency_us,
-                            input_tokens_before=input_tokens_before,
-                            input_tokens_after=input_tokens_after,
-                            session_id=session_id,
+                        _record_route_trace(
+                            status_code=502,
                             streaming=True,
-                            step_type=step_type,
-                            request_id=request_id,
-                            prompt_preview=prompt_preview,
-                            feature_tags=feature_tags,
-                        ))
+                            error_code="stream_failure",
+                            error_stage="stream",
+                            error_message="Streaming response interrupted",
+                        )
 
                 async def _open_stream_attempt(attempt_payload: dict[str, Any]) -> httpx.Response:
                     client = _get_client()
@@ -2765,12 +3277,17 @@ def create_app(
 
                     for index, attempt_payload in enumerate(attempt_queue):
                         if index > 0:
-                            spend_error = _spend_error_for_model(attempt_payload["selected_model"])
+                            spend_error = await _spend_error_for_model(attempt_payload["selected_model"])
                             if spend_error is not None:
                                 return None, spend_error
 
+                        _begin_attempt_trace(
+                            attempt_payload,
+                            fallback_from=fallback_source_model if index > 0 else None,
+                        )
                         resp = await _open_stream_attempt(attempt_payload)
                         if resp.status_code < 400:
+                            _complete_attempt_trace(status_code=resp.status_code, success=True)
                             if index > 0 and fallback_source_model is not None:
                                 _apply_attempt(attempt_payload, fallback_from=fallback_source_model)
                             return resp, None
@@ -2778,6 +3295,12 @@ def create_app(
                         content = await resp.aread()
                         content_type = resp.headers.get("content-type", "application/json")
                         await resp.aclose()
+                        attempt_error_code, attempt_error_message = _extract_error_details(resp.status_code, content)
+                        _complete_attempt_trace(
+                            status_code=resp.status_code,
+                            error_code=attempt_error_code,
+                            error_message=attempt_error_message,
+                        )
                         if _should_try_fallback(resp.status_code, content):
                             if fallback_source_model is None:
                                 fallback_source_model = str(
@@ -2801,6 +3324,8 @@ def create_app(
 
                 stream_resp, early_response = await _select_stream_response()
                 if early_response is not None:
+                    await _spend_reservation.release(request_id)
+                    _record_response_error(early_response, streaming=True)
                     return early_response
 
                 assert stream_resp is not None
@@ -2820,11 +3345,11 @@ def create_app(
                             if converter is not None:
                                 for ev in converter.finish():
                                     yield ev
-                            _record_stream_success(
+                            await _record_stream_success(
                                 parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                             )
                         except Exception:
-                            _record_stream_failure()
+                            await _record_stream_failure()
                             raise
                         finally:
                             await stream_resp.aclose()
@@ -2856,11 +3381,11 @@ def create_app(
                                     yield ev
                             for ev in converter.finish():
                                 yield ev
-                            _record_stream_success(
+                            await _record_stream_success(
                                 parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                             )
                         except Exception:
-                            _record_stream_failure()
+                            await _record_stream_failure()
                             raise
                         finally:
                             await stream_resp.aclose()
@@ -2881,11 +3406,11 @@ def create_app(
                         async for chunk in stream_resp.aiter_bytes():
                             stream_chunks.append(chunk)
                             yield chunk
-                        _record_stream_success(
+                        await _record_stream_success(
                             parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                         )
                     except Exception:
-                        _record_stream_failure()
+                        await _record_stream_failure()
                         raise
                     finally:
                         await stream_resp.aclose()
@@ -2901,21 +3426,46 @@ def create_app(
                 )
 
             client = _get_client()
+            _begin_attempt_trace(attempt)
             resp = await client.post(target_chat_url, json=transport_body, headers=fwd_headers)
+            initial_error_code = ""
+            initial_error_message = ""
+            if resp.status_code < 400:
+                _complete_attempt_trace(status_code=resp.status_code, success=True)
+            else:
+                initial_error_code, initial_error_message = _extract_error_details(resp.status_code, resp.content)
+                _complete_attempt_trace(
+                    status_code=resp.status_code,
+                    error_code=initial_error_code,
+                    error_message=initial_error_message,
+                )
 
             # Fallback: if upstream rejects the model, try alternatives
             if _should_try_fallback(resp.status_code, resp.content):
                 fallback_source_model = str(transport_body.get("model") or resolved_model)
                 for fb_model in fallback_models:
-                    spend_error = _spend_error_for_model(fb_model)
+                    spend_error = await _spend_error_for_model(fb_model)
                     if spend_error is not None:
+                        _record_response_error(spend_error, streaming=False)
                         return spend_error
                     fb_attempt = _prepare_attempt(fb_model)
+                    _begin_attempt_trace(fb_attempt, fallback_from=fallback_source_model)
                     retry = await client.post(
                         fb_attempt["target_chat_url"],
                         json=fb_attempt["transport_body"],
                         headers=fb_attempt["headers"],
                     )
+                    retry_error_code = ""
+                    retry_error_message = ""
+                    if retry.status_code < 400:
+                        _complete_attempt_trace(status_code=retry.status_code, success=True)
+                    else:
+                        retry_error_code, retry_error_message = _extract_error_details(retry.status_code, retry.content)
+                        _complete_attempt_trace(
+                            status_code=retry.status_code,
+                            error_code=retry_error_code,
+                            error_message=retry_error_message,
+                        )
                     if retry.status_code < 400:
                         resp = retry
                         _apply_attempt(fb_attempt, fallback_from=fallback_source_model)
@@ -2998,108 +3548,54 @@ def create_app(
                     (actual_cost if actual_cost is not None else main_estimated_cost)
                     + (sidechannel_actual_cost if sidechannel_actual_cost is not None else sidechannel_estimated_cost)
                 )
-                _spend.record(
+                await _spend_reservation.settle(
+                    request_id,
                     combined_cost,
                     model=selected_model,
                     action="chat",
                 )
-                _stats.record(RouteRecord(
-                    timestamp=time.time(),
-                    requested_model=requested_model,
-                    mode=mode_value,
-                    model=selected_model,
-                    tier=tier_value,
-                    decision_tier=decision_tier or tier_value,
-                    confidence=confidence, method=route_method,  # type: ignore[arg-type]
-                    raw_confidence=raw_confidence,
-                    confidence_source=confidence_source,
-                    calibration_version=calibration_version,
-                    calibration_sample_count=calibration_sample_count,
-                    calibration_temperature=calibration_temperature,
-                    calibration_applied_tags=calibration_applied_tags,
-                    estimated_cost=estimated_cost, baseline_cost=baseline_cost, actual_cost=actual_cost,
-                    savings=savings, latency_us=route_latency_us,
-                    usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
-                    usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
-                    cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
-                    cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
-                    cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
-                    transport=_transport_name(native_anthropic_transport),
-                    cache_mode=_cache_mode_name(cache_plan),
-                    cache_family=_cache_family_name(cache_plan),
-                    cache_breakpoints=cache_plan.cache_breakpoints,
-                    input_tokens_before=input_tokens_before,
-                    input_tokens_after=input_tokens_after,
-                    artifacts_created=artifacts_created,
-                    compacted_messages=compacted_messages,
-                    semantic_summaries=semantic_summaries,
-                    semantic_calls=semantic_calls,
-                    semantic_failures=semantic_failures,
-                    semantic_quality_fallbacks=semantic_quality_fallbacks,
-                    checkpoint_created=checkpoint_created,
-                    rehydrated_artifacts=rehydrated_artifacts,
-                    sidechannel_estimated_cost=sidechannel_estimated_cost,
-                    sidechannel_actual_cost=sidechannel_actual_cost,
-                    session_id=session_id, streaming=False,
-                    step_type=step_type, fallback_reason=fallback_reason,
-                    request_id=request_id, prompt_preview=prompt_preview,
-                    complexity=decision.complexity if is_virtual else 0.33,
-                    constraint_tags=constraint_tags,
-                    hint_tags=hint_tags,
-                    feature_tags=feature_tags,
-                    answer_depth=answer_depth_value,
-                ))
+                upstream_error_code = ""
+                upstream_error_stage = ""
+                upstream_error_message = ""
+                if resp.status_code >= 400:
+                    upstream_error_code, upstream_error_message = _extract_error_details(resp.status_code, resp.content)
+                    upstream_error_stage = "upstream_response"
+                _record_route_trace(
+                    status_code=resp.status_code,
+                    actual_cost=actual_cost,
+                    usage_metrics=usage_metrics,
+                    streaming=False,
+                    error_code=upstream_error_code,
+                    error_stage=upstream_error_stage,
+                    error_message=upstream_error_message,
+                )
                 # ─── v2 telemetry Stage 2: complete record with outcome ───
                 try:
                     from uncommon_route.v2_lifecycle import complete_telemetry
                     complete_telemetry(
                         request_id=request_id,
-                        outcome="success",
+                        outcome="success" if resp.status_code == 200 else "failure",
                         final_tier=int(decision.tier.value == "COMPLEX") * 3 if is_virtual else -1,
                         final_model=selected_model,
                     )
                 except Exception:
                     pass
             else:
-                _stats.record(RouteRecord(
-                    timestamp=time.time(),
-                    requested_model=requested_model,
-                    mode=mode_value,
-                    model=selected_model,
-                    tier=tier_value,
-                    decision_tier=decision_tier or tier_value,
-                    confidence=1.0,
-                    raw_confidence=raw_confidence,
-                    confidence_source=confidence_source,
-                    calibration_version=calibration_version,
-                    calibration_sample_count=calibration_sample_count,
-                    calibration_temperature=calibration_temperature,
-                    calibration_applied_tags=calibration_applied_tags,
-                    method="passthrough",  # type: ignore[arg-type]
-                    estimated_cost=estimated_cost,
-                    baseline_cost=baseline_cost,
+                passthrough_error_code = ""
+                passthrough_error_stage = ""
+                passthrough_error_message = ""
+                if resp.status_code >= 400:
+                    passthrough_error_code, passthrough_error_message = _extract_error_details(resp.status_code, resp.content)
+                    passthrough_error_stage = "upstream_response"
+                _record_route_trace(
+                    status_code=resp.status_code,
                     actual_cost=actual_cost,
-                    savings=0.0,
-                    latency_us=route_latency_us,
-                    usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
-                    usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
-                    cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
-                    cache_write_input_tokens=usage_metrics.cache_write_input_tokens if usage_metrics else 0,
-                    cache_hit_ratio=usage_metrics.cache_hit_ratio if usage_metrics else 0.0,
-                    transport=_transport_name(native_anthropic_transport),
-                    cache_mode=_cache_mode_name(cache_plan),
-                    cache_family=_cache_family_name(cache_plan),
-                    cache_breakpoints=cache_plan.cache_breakpoints,
-                    input_tokens_before=input_tokens_before,
-                    input_tokens_after=input_tokens_after,
-                    session_id=session_id,
+                    usage_metrics=usage_metrics,
                     streaming=False,
-                    step_type=step_type,
-                    request_id=request_id,
-                    prompt_preview=prompt_preview,
-                    complexity=decision.complexity if is_virtual else 0.33,
-                    feature_tags=feature_tags,
-                ))
+                    error_code=passthrough_error_code,
+                    error_stage=passthrough_error_stage,
+                    error_message=passthrough_error_message,
+                )
 
             return _build_proxy_response(
                 status_code=resp.status_code,
@@ -3108,7 +3604,13 @@ def create_app(
                 native_transport=native_anthropic_transport,
             )
         except httpx.ConnectError:
+            _complete_attempt_trace(
+                status_code=502,
+                error_code="connect_error",
+                error_message=f"Upstream unreachable: {upstream_chat}",
+            )
             if is_virtual:
+                await _spend_reservation.release(request_id)
                 _model_experience.observe(
                     selected_model,
                     mode_value,
@@ -3116,47 +3618,13 @@ def create_app(
                     success=False,
                 )
                 _circuit_breaker.record_failure(selected_model)
-                _stats.record(RouteRecord(
-                    timestamp=time.time(),
-                    requested_model=requested_model,
-                    mode=mode_value,
-                    model=selected_model,
-                    tier=tier_value,
-                    decision_tier=decision_tier or tier_value,
-                    confidence=confidence, method=route_method,  # type: ignore[arg-type]
-                    raw_confidence=raw_confidence,
-                    confidence_source=confidence_source,
-                    calibration_version=calibration_version,
-                    calibration_sample_count=calibration_sample_count,
-                    calibration_temperature=calibration_temperature,
-                    calibration_applied_tags=calibration_applied_tags,
-                    estimated_cost=estimated_cost, baseline_cost=baseline_cost, savings=savings,
-                    latency_us=route_latency_us,
-                    transport=_transport_name(native_anthropic_transport),
-                    cache_mode=_cache_mode_name(cache_plan),
-                    cache_family=_cache_family_name(cache_plan),
-                    cache_breakpoints=cache_plan.cache_breakpoints,
-                    input_tokens_before=input_tokens_before,
-                    input_tokens_after=input_tokens_after,
-                    artifacts_created=artifacts_created,
-                    compacted_messages=compacted_messages,
-                    semantic_summaries=semantic_summaries,
-                    semantic_calls=semantic_calls,
-                    semantic_failures=semantic_failures,
-                    semantic_quality_fallbacks=semantic_quality_fallbacks,
-                    checkpoint_created=checkpoint_created,
-                    rehydrated_artifacts=rehydrated_artifacts,
-                    sidechannel_estimated_cost=sidechannel_estimated_cost,
-                    sidechannel_actual_cost=sidechannel_actual_cost,
-                    session_id=session_id,
-                    step_type=step_type, fallback_reason=fallback_reason,
-                    streaming=is_streaming,
-                    request_id=request_id, prompt_preview=prompt_preview,
-                    constraint_tags=constraint_tags,
-                    hint_tags=hint_tags,
-                    feature_tags=feature_tags,
-                    answer_depth=answer_depth_value,
-                ))
+            _record_route_trace(
+                status_code=502,
+                streaming=is_streaming,
+                error_code="connect_error",
+                error_stage="upstream_request",
+                error_message=f"Upstream unreachable: {upstream_chat}",
+            )
             msg = f"Upstream unreachable: {upstream_chat}"
             if api_format == "anthropic":
                 return JSONResponse(anthropic_error_response(502, msg), status_code=502, headers=debug_headers)
@@ -3166,7 +3634,13 @@ def create_app(
                 headers=debug_headers,
             )
         except httpx.TimeoutException:
+            _complete_attempt_trace(
+                status_code=504,
+                error_code="timeout",
+                error_message="Upstream request timed out",
+            )
             if is_virtual:
+                await _spend_reservation.release(request_id)
                 _model_experience.observe(
                     selected_model,
                     mode_value,
@@ -3174,47 +3648,13 @@ def create_app(
                     success=False,
                 )
                 _circuit_breaker.record_failure(selected_model)
-                _stats.record(RouteRecord(
-                    timestamp=time.time(),
-                    requested_model=requested_model,
-                    mode=mode_value,
-                    model=selected_model,
-                    tier=tier_value,
-                    decision_tier=decision_tier or tier_value,
-                    confidence=confidence, method=route_method,  # type: ignore[arg-type]
-                    raw_confidence=raw_confidence,
-                    confidence_source=confidence_source,
-                    calibration_version=calibration_version,
-                    calibration_sample_count=calibration_sample_count,
-                    calibration_temperature=calibration_temperature,
-                    calibration_applied_tags=calibration_applied_tags,
-                    estimated_cost=estimated_cost, baseline_cost=baseline_cost, savings=savings,
-                    latency_us=route_latency_us,
-                    transport=_transport_name(native_anthropic_transport),
-                    cache_mode=_cache_mode_name(cache_plan),
-                    cache_family=_cache_family_name(cache_plan),
-                    cache_breakpoints=cache_plan.cache_breakpoints,
-                    input_tokens_before=input_tokens_before,
-                    input_tokens_after=input_tokens_after,
-                    artifacts_created=artifacts_created,
-                    compacted_messages=compacted_messages,
-                    semantic_summaries=semantic_summaries,
-                    semantic_calls=semantic_calls,
-                    semantic_failures=semantic_failures,
-                    semantic_quality_fallbacks=semantic_quality_fallbacks,
-                    checkpoint_created=checkpoint_created,
-                    rehydrated_artifacts=rehydrated_artifacts,
-                    sidechannel_estimated_cost=sidechannel_estimated_cost,
-                    sidechannel_actual_cost=sidechannel_actual_cost,
-                    session_id=session_id,
-                    step_type=step_type, fallback_reason=fallback_reason,
-                    streaming=is_streaming,
-                    request_id=request_id, prompt_preview=prompt_preview,
-                    constraint_tags=constraint_tags,
-                    hint_tags=hint_tags,
-                    feature_tags=feature_tags,
-                    answer_depth=answer_depth_value,
-                ))
+            _record_route_trace(
+                status_code=504,
+                streaming=is_streaming,
+                error_code="timeout",
+                error_stage="upstream_request",
+                error_message="Upstream request timed out",
+            )
             msg = "Upstream request timed out"
             if api_format == "anthropic":
                 return JSONResponse(anthropic_error_response(504, msg), status_code=504, headers=debug_headers)
@@ -3226,7 +3666,7 @@ def create_app(
 
     async def handle_chat_completions(request: Request) -> Response:
         body = await request.json()
-        return await _handle_chat_core(body, request)
+        return await _handle_chat_core(body, request, endpoint_name="chat_completions")
 
     async def handle_messages(request: Request) -> Response:
         raw = await request.json()
@@ -3243,7 +3683,7 @@ def create_app(
         else:
             mode = _forced_messages_default_mode or _routing_store.default_mode()
             body["model"] = VIRTUAL_MODEL_IDS[mode]
-        return await _handle_chat_core(body, request, api_format="anthropic")
+        return await _handle_chat_core(body, request, api_format="anthropic", endpoint_name="messages")
 
     async def handle_responses(request: Request) -> Response:
         raw = await request.json()
@@ -3268,7 +3708,7 @@ def create_app(
             default_model=VIRTUAL_MODEL_IDS[_routing_store.default_mode()],
         )
         response_id = f"resp_{uuid.uuid4().hex[:24]}"
-        upstream_resp = await _handle_chat_core(body, request)
+        upstream_resp = await _handle_chat_core(body, request, endpoint_name="responses")
 
         if upstream_resp.status_code != 200:
             return upstream_resp
@@ -3361,6 +3801,8 @@ def create_app(
         Route("/v1/artifacts/{artifact_id:str}", handle_artifact, methods=["GET"]),
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
+        Route("/v1/traces", handle_traces, methods=["GET"]),
+        Route("/v1/traces/{request_id:str}", handle_trace_detail, methods=["GET"]),
         Route("/v1/route-preview", handle_route_preview, methods=["POST"]),
         Route("/v1/v2-metrics", handle_v2_metrics, methods=["GET"]),
     ]
@@ -3393,6 +3835,7 @@ def serve(
         cli_upstream=str(upstream or "").strip() or None,
         store=ConnectionsStore(),
     )
+    providers = load_providers()
     base = f"http://{host}:{port}"
     bar = "─" * 45
 
@@ -3415,12 +3858,27 @@ def serve(
         print()
         print("  Quick test:")
         print(f"    curl {base}/health")
+    elif providers.providers:
+        names = ", ".join(sorted(providers.providers.keys()))
+        print("  Upstream:    (not configured)")
+        print(f"  BYOK:        {names}")
+        print(f"  Proxy:       {base}")
+        if has_dashboard:
+            print(f"  Dashboard:   {base}/dashboard/")
+        print()
+        print("  Ready in BYOK mode:")
+        print("    Requests will use your configured provider keys.")
+        print("    Run `uncommon-route doctor` to review the active setup.")
     else:
         print("  Upstream:    (not configured)")
         print()
         print("  Get started:")
+        print("    uncommon-route init")
+        print()
+        print("  Manual setup:")
         print('    export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"')
         print('    export UNCOMMON_ROUTE_API_KEY="your-key"')
+        print("    # or: uncommon-route provider add openai sk-...")
         print("    uncommon-route serve")
     print(f"  {bar}")
     print(flush=True)

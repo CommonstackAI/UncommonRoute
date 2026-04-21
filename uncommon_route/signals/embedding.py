@@ -49,6 +49,34 @@ def _extract_last_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _extract_agent_state(messages: list[dict[str, Any]], budget_chars: int = 1600) -> str:
+    """Second embedding input: recent agent state (last 3 assistant/tool messages).
+
+    For multi-step agent trajectories the last_user text is often identical across
+    steps (e.g. a swebench PR description), causing embedding collisions. The
+    tier-discriminating signal lives in the recent assistant/tool exchange —
+    what's been tried, what errors appeared, which tools are being used. We
+    embed that separately and concatenate both vectors at classifier time.
+    """
+    recent: list[str] = []
+    for m in reversed(messages):
+        role = m.get("role")
+        if role not in ("assistant", "tool"):
+            continue
+        content = _normalize_content(m.get("content", ""))
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            names = [(tc.get("function") or {}).get("name") or tc.get("name", "?") for tc in tcs]
+            content = f"[tools: {','.join(names[:5])}] {content}"
+        if content:
+            recent.append(f"[{role}] {content[:500]}")
+        if len(recent) >= 3:
+            break
+    if not recent:
+        return ""
+    return " | ".join(reversed(recent))[:budget_chars]
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a_norm = a / (np.linalg.norm(a) + 1e-9)
     b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-9)
@@ -127,7 +155,13 @@ class EmbeddingSignal:
 
     @staticmethod
     def _extract_meta_features(messages: list[dict[str, Any]], text: str) -> list[float]:
-        """Extract metadata features to augment embedding vector."""
+        """Extract metadata features (15 dims) to augment embedding vector.
+
+        The classifier assigns ~22% of its decision weight to these features —
+        the raw BGE embedding alone saturates on multi-step agent conversations
+        that share identical last-user text, so these structural/conversational
+        cues are what separates step_2 from step_7 of the same issue.
+        """
         msg_count = len(messages)
         has_tools = int(any(m.get("role") == "tool" or m.get("tool_calls") for m in messages))
         tool_count = sum(1 for m in messages if m.get("role") == "tool" or m.get("tool_calls"))
@@ -135,7 +169,47 @@ class EmbeddingSignal:
         user_words = len(text.split())
         has_code = int("```" in text)
         has_question = int("?" in text[-50:] if len(text) > 50 else "?" in text)
-        return [msg_count, has_tools, tool_count, user_len, user_words, has_code, has_question]
+
+        # Conversation-state features for step-within-issue discrimination
+        user_msg_count = sum(1 for m in messages if m.get("role") == "user")
+        step_proxy = max(0, user_msg_count - 1)
+
+        tool_error_count = 0
+        for m in messages:
+            if m.get("role") != "tool":
+                continue
+            c = _normalize_content(m.get("content", "")).lower()
+            if any(k in c for k in ("error", "traceback", "exception", "failed")):
+                tool_error_count += 1
+
+        tool_names: list[str] = []
+        for m in messages:
+            for tc in (m.get("tool_calls") or []):
+                name = (tc.get("function") or {}).get("name") or tc.get("name", "")
+                if name:
+                    tool_names.append(name)
+        unique_tool_names = len(set(tool_names))
+        from collections import Counter as _C
+        tn_counts = _C(tool_names)
+        max_tool_repeat = max(tn_counts.values()) if tn_counts else 0
+        has_retry = int(max_tool_repeat >= 3)
+
+        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+        assistant_msg_count = len(assistant_msgs)
+        if assistant_msgs:
+            lens = [len(_normalize_content(m.get("content", ""))) for m in assistant_msgs]
+            avg_assistant_len = sum(lens) / len(lens)
+        else:
+            avg_assistant_len = 0.0
+        has_code_in_assistant = int(any(
+            "```" in _normalize_content(m.get("content", "")) for m in assistant_msgs
+        ))
+
+        return [
+            msg_count, has_tools, tool_count, user_len, user_words, has_code, has_question,
+            step_proxy, tool_error_count, unique_tool_names, max_tool_repeat, has_retry,
+            avg_assistant_len, assistant_msg_count, has_code_in_assistant,
+        ]
 
     def predict(self, row: dict[str, Any]) -> TierVote:
         if self._embed_fn is None:
@@ -149,13 +223,36 @@ class EmbeddingSignal:
         query_vec = self._embed_fn(text)
         meta_feats = self._extract_meta_features(messages, text)
 
+        # If the classifier was trained on dual embeddings (v0 = last_user,
+        # v1 = agent_state), compute the second embedding too. We detect this
+        # by the classifier's n_features_in_: 399 = single (384 + 15), 783 = dual.
+        state_vec = None
+        if self._classifier is not None and hasattr(self._classifier, "n_features_in_"):
+            expected = int(self._classifier.n_features_in_)
+            single_dim = int(query_vec.shape[-1]) + len(meta_feats)
+            if expected == single_dim + int(query_vec.shape[-1]):
+                state_text = _extract_agent_state(messages)
+                if state_text:
+                    state_vec = self._embed_fn(state_text)
+                else:
+                    # Fall back to duplicating the user embedding so dim matches.
+                    state_vec = query_vec
+
         # Hybrid: classifier first, KNN fallback when classifier is uncertain.
         if self._classifier is not None:
-            vote = self._predict_classifier(query_vec, meta_feats)
+            vote = self._predict_classifier(query_vec, meta_feats, state_vec=state_vec)
             if vote.confidence >= self._clf_fallback_threshold:
                 return vote
             if self._embeddings is not None and self._labels is not None:
-                return self._predict_knn(query_vec)
+                knn_vote = self._predict_knn(query_vec)
+                # When kNN abstains (e.g., embedding collision with mixed labels),
+                # trust the classifier's meta-feature-aware prediction rather
+                # than returning None. This matters for multi-step swebench rows
+                # where the last_user text is identical across steps but the
+                # per-step difficulty varies.
+                if knn_vote.tier_id is None and vote.tier_id is not None:
+                    return vote
+                return knn_vote
             return vote
 
         # No classifier — KNN only
@@ -163,13 +260,16 @@ class EmbeddingSignal:
             return TierVote(tier_id=None, confidence=0.0)
         return self._predict_knn(query_vec)
 
-    def _predict_classifier(self, query_vec: np.ndarray, meta_feats: list[float] | None = None) -> TierVote:
+    def _predict_classifier(self, query_vec: np.ndarray, meta_feats: list[float] | None = None,
+                             state_vec: np.ndarray | None = None) -> TierVote:
         """Predict using classifier on embedding + metadata features.
 
         If meta_scaler is missing but classifier was trained on combined features,
         skip classifier entirely and return low-confidence abstain to trigger KNN fallback.
         """
         vec = query_vec.reshape(1, -1)
+        if state_vec is not None:
+            vec = np.hstack([vec, state_vec.reshape(1, -1)])
         if meta_feats is not None and self._meta_scaler is not None:
             meta_arr = np.array([meta_feats], dtype=float)
             meta_scaled = self._meta_scaler.transform(meta_arr)
@@ -198,6 +298,14 @@ class EmbeddingSignal:
         # out-of-distribution relative to our training set.
         avg_top_sim = float(np.mean(top_k_sims[:3]))
         if avg_top_sim < 0.60:
+            return TierVote(tier_id=None, confidence=0.0)
+
+        # Embedding-collision abstain: when top-K have near-identical similarity
+        # but mixed tier labels, the query text matches multiple rows whose
+        # *steps* differ (same PR description, different mid-task state). The
+        # kNN vote here is noise — abstain so the classifier (which sees meta
+        # features) wins the ensemble.
+        if float(top_k_sims[0]) > 0.995 and len(set(top_k_labels[:3])) > 1:
             return TierVote(tier_id=None, confidence=0.0)
 
         tier_scores: dict[int, float] = Counter()

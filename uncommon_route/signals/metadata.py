@@ -59,11 +59,12 @@ class MetadataSignal:
 
         # Has tools — differentiate by depth.
         # In multi-step agent workflows, tool messages accumulate from prior
-        # steps but the CURRENT step may be simple. Dampen confidence when
-        # the conversation looks like accumulated workflow history so the
-        # embedding signal (which reads the actual content) can dominate.
+        # steps but the CURRENT step may be simple. The global "has_tools →
+        # tier 3" prior breaks here — per-step difficulty is not correlated
+        # with tool-call count. Dampen hard so the embedding signal (which
+        # reads the actual last-user content) can dominate.
         multi_step_workflow = msg_count > 6 and tool_msg_count > 4
-        conf_cap = 0.50 if multi_step_workflow else 1.0
+        conf_cap = 0.30 if multi_step_workflow else 1.0
 
         if tool_msg_count >= 8 and msg_count > 10:
             return TierVote(tier_id=3, confidence=min(0.75, conf_cap))

@@ -39,9 +39,10 @@ DEFAULT_MODEL_PRICING: dict[str, ModelPricing] = {
     "anthropic/claude-haiku-4.5": ModelPricing(1.00, 5.00, cached_input_price=0.10, cache_write_price=1.25),
     "anthropic/claude-sonnet-4.6": ModelPricing(3.00, 15.00, cached_input_price=0.30, cache_write_price=3.75),
     "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00, cached_input_price=0.50, cache_write_price=6.25),
+    "anthropic/claude-opus-4-7": ModelPricing(5.00, 25.00, cached_input_price=0.50, cache_write_price=6.25),
 }
 
-BASELINE_MODEL = "anthropic/claude-opus-4.6"
+BASELINE_MODEL = "anthropic/claude-opus-4-7"
 
 VIRTUAL_MODEL_IDS: dict[RoutingMode, str] = {
     RoutingMode.AUTO: "uncommon-route/auto",

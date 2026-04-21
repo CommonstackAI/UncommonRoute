@@ -152,7 +152,14 @@ class SpendControl:
     def limits(self) -> SpendLimits:
         return self._limits
 
-    def check(self, estimated_cost: float) -> CheckResult:
+    def check(self, estimated_cost: float, additional_committed: float = 0.0) -> CheckResult:
+        """Check whether ``estimated_cost`` fits under every configured window.
+
+        ``additional_committed`` covers in-flight reservations (estimated costs of
+        concurrent requests that passed ``check`` but have not yet been settled).
+        It is added to every windowed denominator but NOT to the per-request
+        comparison, which stays strictly about a single call.
+        """
         now = self._now()
 
         if self._limits.per_request is not None and estimated_cost > self._limits.per_request:
@@ -164,7 +171,7 @@ class SpendControl:
             )
 
         if self._limits.hourly is not None:
-            hourly_spent = self._window_total(now - HOUR_S, now)
+            hourly_spent = self._window_total(now - HOUR_S, now) + additional_committed
             remaining = self._limits.hourly - hourly_spent
             if estimated_cost > remaining:
                 oldest = next((r for r in self._history if r.timestamp >= now - HOUR_S), None)
@@ -176,7 +183,7 @@ class SpendControl:
                 )
 
         if self._limits.daily is not None:
-            daily_spent = self._window_total(now - DAY_S, now)
+            daily_spent = self._window_total(now - DAY_S, now) + additional_committed
             remaining = self._limits.daily - daily_spent
             if estimated_cost > remaining:
                 oldest = next((r for r in self._history if r.timestamp >= now - DAY_S), None)
@@ -188,11 +195,11 @@ class SpendControl:
                 )
 
         if self._limits.session is not None:
-            remaining = self._limits.session - self._session_spent
+            remaining = self._limits.session - self._session_spent - additional_committed
             if estimated_cost > remaining:
                 return CheckResult(
                     allowed=False, blocked_by="session", remaining=remaining,
-                    reason=f"Session limit: ${self._session_spent + estimated_cost:.2f} > ${self._limits.session:.2f}",
+                    reason=f"Session limit: ${self._session_spent + additional_committed + estimated_cost:.2f} > ${self._limits.session:.2f}",
                 )
 
         return CheckResult(allowed=True)

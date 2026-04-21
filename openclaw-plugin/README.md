@@ -18,6 +18,7 @@ This plugin:
 - starts `uncommon-route serve`
 - registers the local provider with OpenClaw
 - exposes the virtual routing modes like `uncommon-route/auto`
+- keeps request traces and support diagnostics local on disk
 
 ## Install
 
@@ -85,14 +86,16 @@ If the plugin is installed but responses are failing:
 2. Make sure `UNCOMMON_ROUTE_API_KEY` is set if your provider requires one.
 3. Open `http://127.0.0.1:8403/health`.
 4. Open `http://127.0.0.1:8403/dashboard/`.
+5. Run `uncommon-route support bundle` to export recent traces and diagnostics.
 
 ## Benchmarks
 
 Current repo benchmarks:
 
-- 92.3% held-out routing accuracy
-- ~0.5ms average routing latency
-- 67% lower simulated cost than always using Claude Opus in a coding session
+- 82% lower cost than always routing to a premium model
+- 93.4% task pass rate on CommonRouterBench
+- ~20–25ms warm-process routing overhead on CPU
+- 78% tier-match accuracy through the production routing path
 
 ## Links
 

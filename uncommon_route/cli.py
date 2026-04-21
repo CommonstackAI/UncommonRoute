@@ -7,6 +7,7 @@ Subcommands:
     debug    — show per-dimension scoring breakdown
     doctor   — check configuration and upstream health
     logs     — tail the background-proxy log file
+    support  — export diagnostics bundle / inspect request traces
     feedback — manage online learning (status/rollback)
     openclaw — manage OpenClaw integration (install/uninstall/status)
     spend    — manage spending limits (set/clear/status/history)
@@ -27,15 +28,17 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from uncommon_route.connections_store import ConnectionsStore, resolve_primary_connection
+from uncommon_route.onboarding import MenuOption, TerminalPrompter, shell_quote, upsert_shell_block
 from uncommon_route.paths import data_dir
 from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 _DATA_DIR = data_dir()
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"
@@ -45,16 +48,18 @@ def _print_help() -> None:
     print(f"""uncommon-route v{VERSION} — Local LLM Router
 
 Quick start:
-  uncommon-route serve              Start proxy (set UNCOMMON_ROUTE_UPSTREAM first)
-  uncommon-route doctor             Check if everything is configured
-  uncommon-route route "hello"      Test routing locally (no upstream needed)
+  uncommon-route init               Guided setup (recommended)
+  uncommon-route doctor             Check whether you're ready to start
+  uncommon-route serve --daemon     Start proxy in background
 
 Commands:
+  init                              Interactive setup wizard for first-time users
   route <prompt>                    Route a prompt (with interactive feedback)
   serve                             Start proxy server (OpenAI + Anthropic)
   stop                              Stop background proxy instance
   doctor                            Check configuration & upstream health
   logs                              Tail background-proxy log
+  support <sub>                     Diagnostics bundle + request lookup (bundle|request)
   setup <client>                    Generate config for a client (claude-code)
   debug <prompt>                    Show per-dimension scoring breakdown
   feedback <sub>                    Online learning + confidence calibration (status|rollback|calibrate)
@@ -84,6 +89,11 @@ Serve options:
 Logs options:
   --limit <n>                         Number of lines to show (default: 50)
   --follow                            Stream new lines (like tail -f)
+
+Support subcommands:
+  support bundle [--limit <n>] [--output <path>]
+                                      Export a zipped diagnostics bundle from local state
+  support request <request_id>        Show the stored trace for one request as JSON
 
 Feedback subcommands:
   feedback status                     Show online learning and route-confidence calibration status
@@ -127,17 +137,203 @@ Setup subcommands:
   setup openai [--port <n>]           Generate OpenAI SDK / Cursor config
 
 Examples:
+  uncommon-route init
   uncommon-route route "what is 2+2"
   uncommon-route serve --port 8403
   uncommon-route serve --daemon
   uncommon-route setup claude-code
   uncommon-route doctor
   uncommon-route logs --follow
+  uncommon-route support bundle
   uncommon-route spend set hourly 5.00
   uncommon-route provider add deepseek sk-...
   uncommon-route config set-default-mode fast
   uncommon-route config set-tier auto SIMPLE openai/gpt-4o-mini --fallback moonshot/kimi-k2.5 --strategy hard-pin
 """)
+
+
+def _print_init_help() -> None:
+    print("""Usage: uncommon-route init [--port <n>]
+
+Interactive first-run setup.
+
+What it can do:
+  - Choose a connection path (Commonstack, local/custom upstream, or BYOK)
+  - Save upstream credentials to ~/.uncommon-route/connections.json
+  - Add BYOK providers to ~/.uncommon-route/providers.json
+  - Configure Claude Code / Codex / OpenAI SDK shell exports
+  - Optionally start the proxy in background
+
+Examples:
+  uncommon-route init
+  uncommon-route init --port 8404
+""")
+
+
+def _print_serve_help() -> None:
+    print("""Usage: uncommon-route serve [--port <n>] [--host <addr>] [--upstream <url>] [--composition-config <path>] [--daemon]
+
+Start the local proxy server.
+
+Options:
+  --port <n>                  Port to listen on (default: 8403)
+  --host <addr>               Host to bind (default: 127.0.0.1)
+  --upstream <url>            Upstream API base URL override
+  --composition-config <path> JSON composition policy override
+  --daemon                    Run in background and write logs to ~/.uncommon-route/serve.log
+
+Tip:
+  Run `uncommon-route init` if this is your first time setting it up.
+""")
+
+
+def _print_doctor_help() -> None:
+    print("""Usage: uncommon-route doctor
+
+Check whether UncommonRoute is configured well enough to start.
+
+Doctor validates:
+  - primary upstream configuration
+  - BYOK provider presence
+  - optional client integration state
+  - optional connectivity diagnostics
+
+Exit codes:
+  0  setup looks ready
+  1  setup is incomplete and still needs attention
+""")
+
+
+def _print_setup_help() -> None:
+    print("""Usage: uncommon-route setup <client> [--port <n>]
+
+Generate shell configuration for a supported client.
+
+Clients:
+  claude-code
+  codex
+  openai
+
+Tip:
+  Run `uncommon-route init` for a guided setup flow that can save configuration for you.
+""")
+
+
+def _print_logs_help() -> None:
+    print("""Usage: uncommon-route logs [--limit <n>] [--follow]
+
+Show background-proxy logs written by `uncommon-route serve --daemon`.
+""")
+
+
+def _print_support_help() -> None:
+    print("""Usage:
+  uncommon-route support bundle [--limit <n>] [--output <path>]
+  uncommon-route support request <request_id>
+
+Diagnostics helpers:
+  bundle   Export a zipped support bundle from local traces and stats
+  request  Print one stored request trace as JSON
+""")
+
+
+def _print_provider_help() -> None:
+    print("""Usage:
+  uncommon-route provider list
+  uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>]
+  uncommon-route provider remove <name>
+  uncommon-route provider models
+
+Known providers:
+  commonstack, openai, anthropic, google, xai, minimax, moonshot, deepseek
+""")
+
+
+def _print_route_help() -> None:
+    print("""Usage: uncommon-route route [--system-prompt <text>] [--max-tokens <n>] [--mode auto|fast|best] [--json] [--no-feedback] <prompt>
+
+Classify a prompt and show the routing decision without sending it upstream.
+""")
+
+
+def _print_generic_subcommand_help(cmd: str) -> None:
+    printers = {
+        "init": _print_init_help,
+        "serve": _print_serve_help,
+        "doctor": _print_doctor_help,
+        "setup": _print_setup_help,
+        "logs": _print_logs_help,
+        "support": _print_support_help,
+        "provider": _print_provider_help,
+        "route": _print_route_help,
+    }
+    printer = printers.get(cmd, _print_help)
+    printer()
+
+
+def _wants_help(args: list[str]) -> bool:
+    return bool(args) and args[0] in {"-h", "--help"}
+
+
+def _detect_rc_path() -> tuple[str, Path]:
+    display = _detect_rc_file()
+    return display, Path(display).expanduser()
+
+
+def _render_client_exports(client: str, *, port: int) -> list[str]:
+    exports: list[tuple[str, str]] = []
+    if port != 8403:
+        exports.append(("UNCOMMON_ROUTE_PORT", str(port)))
+
+    if client == "claude-code":
+        exports.extend([
+            ("ANTHROPIC_BASE_URL", f"http://localhost:{port}"),
+            ("ANTHROPIC_API_KEY", "not-needed"),
+        ])
+    elif client in {"codex", "openai"}:
+        exports.extend([
+            ("OPENAI_BASE_URL", f"http://localhost:{port}/v1"),
+            ("OPENAI_API_KEY", "not-needed"),
+        ])
+
+    return [f"export {name}={shell_quote(value)}" for name, value in exports]
+
+
+def _start_background_proxy(
+    *,
+    port: int,
+    host: str,
+    upstream: str | None = None,
+    composition_config: str = "",
+) -> tuple[bool, str]:
+    _DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+        except ValueError:
+            _PID_FILE.unlink(missing_ok=True)
+        else:
+            try:
+                os.kill(old_pid, 0)
+                return False, f"Already running (PID {old_pid}). Stop first: uncommon-route stop"
+            except OSError:
+                _PID_FILE.unlink(missing_ok=True)
+
+    cmd = [sys.executable, "-m", "uncommon_route.cli", "serve", "--port", str(port), "--host", host]
+    if upstream:
+        cmd.extend(["--upstream", upstream])
+    if composition_config:
+        cmd.extend(["--composition-config", composition_config])
+
+    with open(_LOG_FILE, "a") as lf:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    _PID_FILE.write_text(str(proc.pid))
+    return True, f"Started in background (PID {proc.pid})"
 
 
 def _parse_flags(args: list[str], known_flags: dict[str, bool]) -> tuple[dict[str, str | bool], list[str]]:
@@ -373,32 +569,15 @@ def _cmd_serve(args: list[str]) -> None:
     daemon = bool(flags.get("daemon") or flags.get("background"))
 
     if daemon:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if _PID_FILE.exists():
-            old_pid = int(_PID_FILE.read_text().strip())
-            try:
-                os.kill(old_pid, 0)
-                print(f"  Already running (PID {old_pid}). Stop first: uncommon-route stop")
-                return
-            except OSError:
-                _PID_FILE.unlink(missing_ok=True)
-
-        cmd = [sys.executable, "-m", "uncommon_route.cli", "serve",
-               "--port", str(port), "--host", host]
-        if upstream:
-            cmd.extend(["--upstream", upstream])
-        if composition_config:
-            cmd.extend(["--composition-config", composition_config])
-
-        with open(_LOG_FILE, "a") as lf:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        _PID_FILE.write_text(str(proc.pid))
-        print(f"  Started in background (PID {proc.pid})")
+        started, message = _start_background_proxy(
+            port=port,
+            host=host,
+            upstream=upstream,
+            composition_config=composition_config,
+        )
+        print(f"  {message}")
+        if not started:
+            return
         print(f"  Logs:  {_LOG_FILE}")
         print("  Stop:  uncommon-route stop")
         return
@@ -429,32 +608,59 @@ def _cmd_stop(args: list[str]) -> None:
 
 def _cmd_doctor(args: list[str]) -> None:
     import asyncio
+    from uncommon_route.providers import load_providers
 
-    checks: list[tuple[str, bool, str]] = []
+    checks: list[tuple[str, str, str]] = []
 
     # Python version
     vi = sys.version_info
-    ok = vi >= (3, 11)
-    checks.append(("Python version", ok, f"{vi.major}.{vi.minor}.{vi.micro}"))
+    python_ok = vi >= (3, 11)
+    checks.append(("Python version", "ok" if python_ok else "fail", f"{vi.major}.{vi.minor}.{vi.micro}"))
 
     connection = resolve_primary_connection(store=ConnectionsStore())
     upstream = connection.upstream
-    checks.append(("Upstream configured", bool(upstream), upstream or "(not set)"))
 
     def _upstream_is_local(url: str) -> bool:
         host = (urlparse(url).hostname or "").lower()
         return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
-    # API key configured
     api_key = connection.api_key
+    providers = load_providers()
+    has_byok = bool(providers.providers)
     local_upstream = bool(upstream) and _upstream_is_local(upstream)
+    primary_ready = bool(upstream) and (bool(api_key) or local_upstream)
+
+    if primary_ready:
+        detail = upstream
+        if local_upstream:
+            detail = f"{upstream} (local upstream)"
+        checks.append(("Primary connection", "ok", detail))
+    elif upstream or api_key:
+        missing: list[str] = []
+        if not upstream:
+            missing.append("upstream")
+        if not api_key and not local_upstream:
+            missing.append("api key")
+        checks.append(("Primary connection", "fail", f"incomplete ({', '.join(missing)})"))
+    elif has_byok:
+        checks.append(("Primary connection", "warn", "not set (BYOK mode is available)"))
+    else:
+        checks.append(("Primary connection", "fail", "not configured"))
+
+    if upstream:
+        checks.append(("Upstream configured", "ok", upstream))
+    else:
+        checks.append(("Upstream configured", "warn" if has_byok else "fail", "(not set)"))
+
     key_preview = f"{api_key[:8]}..." if len(api_key) > 8 else ("(set)" if api_key else "(not set)")
     if api_key:
-        checks.append(("API key configured", True, key_preview))
+        checks.append(("API key configured", "ok", key_preview))
     elif local_upstream:
-        checks.append(("API key configured", True, "(not needed for local upstream)"))
+        checks.append(("API key configured", "ok", "(not needed for local upstream)"))
+    elif upstream:
+        checks.append(("API key configured", "fail", "(not set)"))
     else:
-        checks.append(("API key configured", False, key_preview))
+        checks.append(("API key configured", "warn" if has_byok else "fail", "(not set)"))
 
     # Upstream reachable + model discovery
     if upstream and (api_key or local_upstream):
@@ -464,66 +670,63 @@ def _cmd_doctor(args: list[str]) -> None:
         count = asyncio.run(mapper.discover(api_key or None))
         provider_label = f"{mapper.provider}{gw_tag}"
         reachability_detail = provider_label if count > 0 else f"{provider_label} (discovery failed)"
-        checks.append(("Upstream reachable", count > 0, reachability_detail))
-        checks.append(("Models discovered", count > 0, f"{count} models" if count > 0 else "0 models"))
+        checks.append(("Upstream reachable", "ok" if count > 0 else "warn", reachability_detail))
+        checks.append(("Models discovered", "ok" if count > 0 else "warn", f"{count} models" if count > 0 else "0 models"))
         if mapper.discovered:
             unresolved = mapper.unresolved_models()
             if unresolved:
                 names = ", ".join(unresolved[:3])
                 extra = f" (+{len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
-                checks.append(("Model mapping", False, f"{len(unresolved)} unresolved: {names}{extra}"))
+                checks.append(("Model mapping", "warn", f"{len(unresolved)} unresolved: {names}{extra}"))
             else:
-                checks.append(("Model mapping", True, "all internal models resolved"))
+                checks.append(("Model mapping", "ok", "all internal models resolved"))
         else:
-            checks.append(("Model mapping", False, "cannot verify (discovery failed)"))
+            checks.append(("Model mapping", "warn", "cannot verify (discovery failed)"))
     elif upstream:
-        checks.append(("Upstream reachable", False, "cannot test without API key"))
+        checks.append(("Upstream reachable", "warn", "cannot test without API key"))
 
     # BYOK providers
-    from uncommon_route.providers import load_providers
-    providers = load_providers()
     if providers.providers:
         for name, entry in providers.providers.items():
             reachable = asyncio.run(_check_provider(entry.base_url, entry.api_key))
-            checks.append((f"BYOK: {name}", reachable, entry.base_url))
+            checks.append((f"BYOK: {name}", "ok" if reachable else "warn", entry.base_url))
     else:
-        checks.append(("BYOK providers", True, "none configured (optional)"))
+        checks.append(("BYOK providers", "warn", "none configured"))
 
     # Claude Code integration
     anth_base = os.environ.get("ANTHROPIC_BASE_URL", "")
     if anth_base:
-        checks.append(("Claude Code", True, f"ANTHROPIC_BASE_URL={anth_base}"))
+        checks.append(("Claude Code", "ok", f"ANTHROPIC_BASE_URL={anth_base}"))
     else:
-        checks.append(("Claude Code", True, "not configured (optional — run: uncommon-route setup claude-code)"))
+        checks.append(("Claude Code", "warn", "not configured (optional — run: uncommon-route init or uncommon-route setup claude-code)"))
 
     # Daemon status
     if _PID_FILE.exists():
         pid = int(_PID_FILE.read_text().strip())
         try:
             os.kill(pid, 0)
-            checks.append(("Proxy daemon", True, f"running (PID {pid})"))
+            checks.append(("Proxy daemon", "ok", f"running (PID {pid})"))
         except OSError:
-            checks.append(("Proxy daemon", False, f"stale PID file (PID {pid})"))
+            checks.append(("Proxy daemon", "warn", f"stale PID file (PID {pid})"))
     else:
-        checks.append(("Proxy daemon", True, "not running (foreground or stopped)"))
+        checks.append(("Proxy daemon", "warn", "not running (foreground or stopped)"))
 
     checks.append((
         "Primary connection source",
-        True,
+        "ok",
         f"source={connection.source} upstream={connection.upstream_source} api_key={connection.api_key_source}",
     ))
 
-    # Output
-    all_ok = all(ok for _, ok, _ in checks)
+    has_failures = any(state == "fail" for _, state, _ in checks)
     print()
-    for label, ok, detail in checks:
-        icon = "✓" if ok else "✗"
+    for label, state, detail in checks:
+        icon = "✓" if state == "ok" else "!" if state == "warn" else "✗"
         print(f"  {icon} {label}: {detail}")
     print()
-    if all_ok:
-        print("  All checks passed")
-    else:
-        print("  Some checks failed — see above")
+    if has_failures:
+        print("  Setup is incomplete — run `uncommon-route init` to finish configuration")
+        sys.exit(1)
+    print("  Setup looks ready")
 
 
 async def _check_provider(base_url: str, api_key: str) -> bool:
@@ -568,6 +771,215 @@ def _cmd_logs(args: list[str]) -> None:
     lines = _LOG_FILE.read_text().splitlines()
     for line in lines[-limit:]:
         print(line)
+
+
+def _cmd_init(args: list[str]) -> None:
+    from uncommon_route.providers import KNOWN_BASE_URLS, add_provider, load_providers
+
+    flags, _ = _parse_flags(args, {"port": True})
+    port = int(flags.get("port", 8403))
+    prompter = TerminalPrompter()
+    store = ConnectionsStore()
+
+    print()
+    print("  UncommonRoute setup wizard")
+    print("  ─────────────────────────────────────────────")
+    print("  This will help you choose a connection path, configure a client,")
+    print("  and optionally start the proxy in background.")
+    print()
+
+    try:
+        connection_choice = prompter.choose(
+            "How do you want UncommonRoute to connect upstream?",
+            [
+                MenuOption("commonstack", "Commonstack managed upstream", "recommended for first-time setup"),
+                MenuOption("local", "Local or custom upstream", "for Ollama, gateways, or self-hosted APIs"),
+                MenuOption("byok", "Bring your own provider keys", "register OpenAI / Anthropic / Google keys directly"),
+                MenuOption("skip", "Skip connection setup for now", "only configure the client side"),
+            ],
+        )
+
+        configured_connection = "none"
+        if connection_choice.value == "commonstack":
+            upstream = prompter.ask(
+                "Commonstack upstream URL",
+                default="https://api.commonstack.ai/v1",
+            )
+            api_key = prompter.ask("Commonstack API key", secret=True)
+            store.set_primary(upstream=upstream, api_key=api_key)
+            configured_connection = "commonstack"
+            print(f"  ✓ Saved primary upstream: {upstream}")
+            print()
+        elif connection_choice.value == "local":
+            existing = store.primary()
+            default_upstream = existing.upstream or "http://127.0.0.1:11434/v1"
+            upstream = prompter.ask("Local/custom upstream URL", default=default_upstream)
+            api_key = prompter.ask(
+                "API key (leave blank if not needed)",
+                secret=True,
+                allow_empty=True,
+            )
+            store.set_primary(upstream=upstream, api_key=api_key)
+            configured_connection = "local"
+            print(f"  ✓ Saved primary upstream: {upstream}")
+            if api_key:
+                print("  ✓ Saved API key for that upstream")
+            else:
+                print("  ✓ No API key needed for that upstream")
+            print()
+        elif connection_choice.value == "byok":
+            preferred_provider_order = [
+                "openai",
+                "anthropic",
+                "google",
+                "deepseek",
+                "moonshot",
+                "xai",
+                "minimax",
+            ]
+            provider_names = [name for name in preferred_provider_order if name in KNOWN_BASE_URLS]
+            added: list[str] = []
+            if store.primary().upstream and prompter.confirm(
+                "Clear the existing primary upstream and use BYOK-only mode?",
+                default=False,
+            ):
+                store.reset()
+                print("  ✓ Cleared stored primary upstream")
+            while True:
+                provider_choice = prompter.choose(
+                    "Which provider key do you want to add?",
+                    [MenuOption(name, name) for name in provider_names],
+                )
+                api_key = prompter.ask(f"{provider_choice.label} API key", secret=True)
+                add_provider(provider_choice.value, api_key)
+                added.append(provider_choice.value)
+                print(f"  ✓ Saved provider: {provider_choice.label}")
+                print("  ! Run `uncommon-route doctor` to validate the key and provider reachability.")
+                print()
+                if not prompter.confirm("Add another provider?", default=False):
+                    break
+            configured_connection = f"byok:{','.join(added)}"
+        else:
+            print("  Skipping connection setup.")
+            print()
+
+        client_choice = prompter.choose(
+            "Which client do you want to configure?",
+            [
+                MenuOption("claude-code", "Claude Code"),
+                MenuOption("codex", "Codex"),
+                MenuOption("openai", "OpenAI SDK / Cursor"),
+                MenuOption("skip", "Skip client setup for now"),
+            ],
+        )
+
+        wrote_rc = False
+        rc_display = ""
+        rc_path: Path | None = None
+        client_exports: list[str] = []
+        if client_choice.value != "skip":
+            client_exports = _render_client_exports(client_choice.value, port=port)
+            rc_display, rc_path = _detect_rc_path()
+            if prompter.confirm(
+                f"Write {client_choice.label} exports to {rc_display}?",
+                default=True,
+            ):
+                upsert_shell_block(rc_path, "client", client_exports)
+                wrote_rc = True
+                print(f"  ✓ Updated {rc_display}")
+                print()
+            else:
+                print("  Client exports:")
+                for line in client_exports:
+                    print(f"    {line}")
+                print()
+
+        effective = resolve_primary_connection(store=store)
+        providers = load_providers()
+        primary_ready = bool(effective.upstream) and (
+            bool(effective.api_key)
+            or (urlparse(effective.upstream).hostname or "").lower() in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        )
+        ready = primary_ready or bool(providers.providers)
+
+        started_proxy = False
+        if ready and prompter.confirm("Start the proxy in background now?", default=False):
+            started, message = _start_background_proxy(port=port, host="127.0.0.1")
+            print(f"  {'✓' if started else '!'} {message}")
+            if started:
+                print(f"  ✓ Logs: {_LOG_FILE}")
+                started_proxy = True
+            print()
+
+        print("  Setup summary")
+        print("  ─────────────────────────────────────────────")
+        if configured_connection == "commonstack":
+            print("  ✓ Primary connection saved for Commonstack.")
+        elif configured_connection == "local":
+            print("  ✓ Primary connection saved for a local/custom upstream.")
+        elif configured_connection.startswith("byok:"):
+            configured = configured_connection.split(":", 1)[1].split(",")
+            print(f"  ✓ BYOK providers configured: {', '.join(name for name in configured if name)}")
+        else:
+            print("  ! No connection path was changed in this run.")
+
+        if client_choice.value != "skip":
+            if wrote_rc:
+                print(f"  ✓ Client shell exports written to {rc_display}.")
+                print("  ! Restart your terminal or run `source` on that file before launching the client.")
+            else:
+                print("  ! Client exports were not written automatically.")
+        else:
+            print("  ! Client setup was skipped.")
+
+        if started_proxy:
+            print(f"  ✓ Proxy is running at http://localhost:{port}")
+        elif ready:
+            serve_cmd = "uncommon-route serve --daemon" if port == 8403 else f"uncommon-route serve --daemon --port {port}"
+            print(f"  Next: {serve_cmd}")
+        else:
+            print("  Next: finish connection setup, then run `uncommon-route doctor`.")
+
+        if client_choice.value in {"claude-code", "codex", "openai"}:
+            print('  Use model ID: "uncommon-route/auto"')
+        print()
+    except KeyboardInterrupt:
+        print()
+        print("  Setup cancelled.")
+        sys.exit(130)
+
+
+def _cmd_support(args: list[str]) -> None:
+    from uncommon_route.support import build_support_bundle, find_trace
+
+    if not args:
+        args = ["bundle"]
+
+    sub = args[0]
+
+    if sub == "bundle":
+        flags, _ = _parse_flags(args[1:], {"limit": True, "output": True})
+        limit = int(flags.get("limit", 50))
+        output = str(flags.get("output", "")).strip() or None
+        path = build_support_bundle(limit=limit, output_path=output)
+        print(f"  Support bundle written: {path}")
+        return
+
+    if sub == "request":
+        request_id = str(args[1]).strip() if len(args) > 1 else ""
+        if not request_id:
+            print("Usage: uncommon-route support request <request_id>", file=sys.stderr)
+            sys.exit(1)
+        record = find_trace(request_id)
+        if record is None:
+            print(f"  Request not found: {request_id}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(record, indent=2, ensure_ascii=False))
+        return
+
+    print(f"Unknown support subcommand: {sub}", file=sys.stderr)
+    print("  Available: bundle, request", file=sys.stderr)
+    sys.exit(1)
 
 
 def _cmd_openclaw(args: list[str]) -> None:
@@ -1007,6 +1419,7 @@ def _cmd_setup(args: list[str]) -> None:
     if not args:
         print("Usage: uncommon-route setup <client>", file=sys.stderr)
         print("  Available clients: claude-code, codex, openai", file=sys.stderr)
+        print("  Tip: run `uncommon-route init` for guided setup", file=sys.stderr)
         sys.exit(1)
 
     sub = args[0]
@@ -1244,13 +1657,19 @@ def main() -> None:
     cmd = args[0]
     sub_args = args[1:]
 
+    if _wants_help(sub_args):
+        _print_generic_subcommand_help(cmd)
+        sys.exit(0)
+
     commands = {
+        "init": _cmd_init,
         "route": _cmd_route,
         "serve": _cmd_serve,
         "setup": _cmd_setup,
         "stop": _cmd_stop,
         "doctor": _cmd_doctor,
         "logs": _cmd_logs,
+        "support": _cmd_support,
         "debug": _cmd_debug,
         "openclaw": _cmd_openclaw,
         "spend": _cmd_spend,

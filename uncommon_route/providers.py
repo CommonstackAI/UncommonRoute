@@ -108,7 +108,12 @@ def load_providers(path: Path | None = None) -> ProvidersConfig:
                 plan=data.get("plan", ""),
             )
         return config
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[UncommonRoute] warning: failed to load providers from {filepath}: {exc}. "
+            "BYOK routing disabled until resolved.",
+            file=sys.stderr,
+        )
         return ProvidersConfig()
 
 

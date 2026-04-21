@@ -637,7 +637,18 @@ class TestMessagesEndpoint:
         assert data["type"] == "error"
         assert data["error"]["type"] == "overloaded_error"
 
-    def test_upstream_unreachable_returns_anthropic_error(self, messages_client: TestClient) -> None:
+    def test_upstream_unreachable_returns_anthropic_error(
+        self,
+        messages_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FailingClient:
+            is_closed = False
+
+            async def post(self, *args, **kwargs):
+                raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: FailingClient())
         resp = messages_client.post("/v1/messages", json={
             "model": "some-model",
             "max_tokens": 100,

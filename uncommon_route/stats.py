@@ -81,10 +81,18 @@ class RouteRecord:
     request_id: str = ""
     prompt_preview: str = ""
     complexity: float = 0.33
+    route_reasoning: str = ""
     constraint_tags: list[str] | None = None
     hint_tags: list[str] | None = None
     feature_tags: list[str] | None = None
     answer_depth: str = "standard"
+    routing_features_payload: dict[str, Any] | None = None
+    fallback_chain_payload: list[dict[str, Any]] | None = None
+    candidate_scores_payload: list[dict[str, Any]] | None = None
+    status_code: int = 0
+    error_code: str = ""
+    error_stage: str = ""
+    error_message: str = ""
     feedback_signal: str = ""
     feedback_ok: bool = False
     feedback_action: str = ""
@@ -298,6 +306,10 @@ class RouteStats:
         records = list(reversed(self._records))
         return records[:limit] if limit else records
 
+    def export_records(self, limit: int | None = None) -> list[dict[str, Any]]:
+        records = self.history(limit=limit)
+        return [_record_payload(record) for record in records]
+
     def recent(self, limit: int = 30) -> list[dict[str, Any]]:
         """Most recent routed requests that carry a request_id (for feedback)."""
         records = [r for r in reversed(self._records) if r.request_id]
@@ -325,10 +337,15 @@ class RouteStats:
                 "artifacts_created": r.artifacts_created,
                 "prompt_preview": r.prompt_preview,
                 "complexity": getattr(r, "complexity", 0.33),
+                "route_reasoning": r.route_reasoning,
                 "constraint_tags": list(r.constraint_tags or []),
                 "hint_tags": list(r.hint_tags or []),
                 "feature_tags": list(r.feature_tags or []),
                 "answer_depth": r.answer_depth,
+                "status_code": r.status_code,
+                "error_code": r.error_code,
+                "error_stage": r.error_stage,
+                "error_message": r.error_message,
                 "feedback_signal": r.feedback_signal,
                 "feedback_ok": r.feedback_ok,
                 "feedback_action": r.feedback_action,
@@ -505,69 +522,7 @@ class RouteStats:
             self._records = self._records[-MAX_RECORDS:]
 
     def _save(self) -> None:
-        self._storage.save([
-            {
-                "timestamp": r.timestamp,
-                "requested_model": r.requested_model,
-                "mode": r.mode,
-                "model": r.model,
-                "tier": _normalize_tier_label(r.tier),
-                "decision_tier": _normalize_tier_label(r.decision_tier) if r.decision_tier else "",
-                "confidence": r.confidence,
-                "raw_confidence": r.raw_confidence,
-                "confidence_source": r.confidence_source,
-                "calibration_version": r.calibration_version,
-                "calibration_sample_count": r.calibration_sample_count,
-                "calibration_temperature": r.calibration_temperature,
-                "calibration_applied_tags": list(r.calibration_applied_tags or []),
-                "method": r.method,
-                "estimated_cost": r.estimated_cost,
-                "baseline_cost": r.baseline_cost,
-                "actual_cost": r.actual_cost,
-                "savings": r.savings,
-                "latency_us": r.latency_us,
-                "usage_input_tokens": r.usage_input_tokens,
-                "usage_output_tokens": r.usage_output_tokens,
-                "cache_read_input_tokens": r.cache_read_input_tokens,
-                "cache_write_input_tokens": r.cache_write_input_tokens,
-                "cache_hit_ratio": r.cache_hit_ratio,
-                "transport": r.transport,
-                "cache_mode": r.cache_mode,
-                "cache_family": r.cache_family,
-                "cache_breakpoints": r.cache_breakpoints,
-                "input_tokens_before": r.input_tokens_before,
-                "input_tokens_after": r.input_tokens_after,
-                "artifacts_created": r.artifacts_created,
-                "compacted_messages": r.compacted_messages,
-                "semantic_summaries": r.semantic_summaries,
-                "semantic_calls": r.semantic_calls,
-                "semantic_failures": r.semantic_failures,
-                "semantic_quality_fallbacks": r.semantic_quality_fallbacks,
-                "checkpoint_created": r.checkpoint_created,
-                "rehydrated_artifacts": r.rehydrated_artifacts,
-                "sidechannel_estimated_cost": r.sidechannel_estimated_cost,
-                "sidechannel_actual_cost": r.sidechannel_actual_cost,
-                "session_id": r.session_id,
-                "step_type": r.step_type,
-                "fallback_reason": r.fallback_reason,
-                "streaming": r.streaming,
-                "request_id": r.request_id,
-                "prompt_preview": r.prompt_preview,
-                "complexity": r.complexity,
-                "constraint_tags": list(r.constraint_tags or []),
-                "hint_tags": list(r.hint_tags or []),
-                "feature_tags": list(r.feature_tags or []),
-                "answer_depth": r.answer_depth,
-                "feedback_signal": r.feedback_signal,
-                "feedback_ok": r.feedback_ok,
-                "feedback_action": r.feedback_action,
-                "feedback_from_tier": _normalize_tier_label(r.feedback_from_tier) if r.feedback_from_tier else "",
-                "feedback_to_tier": _normalize_tier_label(r.feedback_to_tier) if r.feedback_to_tier else "",
-                "feedback_reason": r.feedback_reason,
-                "feedback_submitted_at": r.feedback_submitted_at,
-            }
-            for r in self._records
-        ])
+        self._storage.save([_record_payload(r) for r in self._records])
 
     def _load(self) -> None:
         for r in self._storage.load():
@@ -621,10 +576,18 @@ class RouteStats:
                 request_id=r.get("request_id", ""),
                 prompt_preview=r.get("prompt_preview", ""),
                 complexity=r.get("complexity", 0.33),
+                route_reasoning=r.get("route_reasoning", ""),
                 constraint_tags=list(r.get("constraint_tags", []) or []),
                 hint_tags=list(r.get("hint_tags", []) or []),
                 feature_tags=list(r.get("feature_tags", []) or []),
                 answer_depth=r.get("answer_depth", "standard"),
+                routing_features_payload=dict(r.get("routing_features_payload", {}) or {}),
+                fallback_chain_payload=list(r.get("fallback_chain_payload", []) or []),
+                candidate_scores_payload=list(r.get("candidate_scores_payload", []) or []),
+                status_code=int(r.get("status_code", 0) or 0),
+                error_code=r.get("error_code", ""),
+                error_stage=r.get("error_stage", ""),
+                error_message=r.get("error_message", ""),
                 feedback_signal=r.get("feedback_signal", ""),
                 feedback_ok=r.get("feedback_ok", False),
                 feedback_action=r.get("feedback_action", ""),
@@ -634,3 +597,74 @@ class RouteStats:
                 feedback_submitted_at=r.get("feedback_submitted_at", 0.0),
             ))
         self._cleanup()
+
+
+def _record_payload(r: RouteRecord) -> dict[str, Any]:
+    return {
+        "timestamp": r.timestamp,
+        "requested_model": r.requested_model,
+        "mode": r.mode,
+        "model": r.model,
+        "tier": _normalize_tier_label(r.tier),
+        "decision_tier": _normalize_tier_label(r.decision_tier) if r.decision_tier else "",
+        "confidence": r.confidence,
+        "raw_confidence": r.raw_confidence,
+        "confidence_source": r.confidence_source,
+        "calibration_version": r.calibration_version,
+        "calibration_sample_count": r.calibration_sample_count,
+        "calibration_temperature": r.calibration_temperature,
+        "calibration_applied_tags": list(r.calibration_applied_tags or []),
+        "method": r.method,
+        "estimated_cost": r.estimated_cost,
+        "baseline_cost": r.baseline_cost,
+        "actual_cost": r.actual_cost,
+        "savings": r.savings,
+        "latency_us": r.latency_us,
+        "usage_input_tokens": r.usage_input_tokens,
+        "usage_output_tokens": r.usage_output_tokens,
+        "cache_read_input_tokens": r.cache_read_input_tokens,
+        "cache_write_input_tokens": r.cache_write_input_tokens,
+        "cache_hit_ratio": r.cache_hit_ratio,
+        "transport": r.transport,
+        "cache_mode": r.cache_mode,
+        "cache_family": r.cache_family,
+        "cache_breakpoints": r.cache_breakpoints,
+        "input_tokens_before": r.input_tokens_before,
+        "input_tokens_after": r.input_tokens_after,
+        "artifacts_created": r.artifacts_created,
+        "compacted_messages": r.compacted_messages,
+        "semantic_summaries": r.semantic_summaries,
+        "semantic_calls": r.semantic_calls,
+        "semantic_failures": r.semantic_failures,
+        "semantic_quality_fallbacks": r.semantic_quality_fallbacks,
+        "checkpoint_created": r.checkpoint_created,
+        "rehydrated_artifacts": r.rehydrated_artifacts,
+        "sidechannel_estimated_cost": r.sidechannel_estimated_cost,
+        "sidechannel_actual_cost": r.sidechannel_actual_cost,
+        "session_id": r.session_id,
+        "step_type": r.step_type,
+        "fallback_reason": r.fallback_reason,
+        "streaming": r.streaming,
+        "request_id": r.request_id,
+        "prompt_preview": r.prompt_preview,
+        "complexity": r.complexity,
+        "route_reasoning": r.route_reasoning,
+        "constraint_tags": list(r.constraint_tags or []),
+        "hint_tags": list(r.hint_tags or []),
+        "feature_tags": list(r.feature_tags or []),
+        "answer_depth": r.answer_depth,
+        "routing_features_payload": dict(r.routing_features_payload or {}),
+        "fallback_chain_payload": list(r.fallback_chain_payload or []),
+        "candidate_scores_payload": list(r.candidate_scores_payload or []),
+        "status_code": r.status_code,
+        "error_code": r.error_code,
+        "error_stage": r.error_stage,
+        "error_message": r.error_message,
+        "feedback_signal": r.feedback_signal,
+        "feedback_ok": r.feedback_ok,
+        "feedback_action": r.feedback_action,
+        "feedback_from_tier": _normalize_tier_label(r.feedback_from_tier) if r.feedback_from_tier else "",
+        "feedback_to_tier": _normalize_tier_label(r.feedback_to_tier) if r.feedback_to_tier else "",
+        "feedback_reason": r.feedback_reason,
+        "feedback_submitted_at": r.feedback_submitted_at,
+    }

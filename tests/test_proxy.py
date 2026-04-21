@@ -894,7 +894,8 @@ class TestChatCompletions:
         })
 
         assert resp.status_code == 502
-        assert "x-uncommon-route-mode" not in resp.headers
+        assert resp.headers["x-uncommon-route-mode"] == "passthrough"
+        assert resp.headers["x-uncommon-route-model"] == "anthropic/claude-sonnet-4.6"
 
     def test_large_tool_result_creates_artifact(self, tmp_path) -> None:
         spend_control = SpendControl(storage=InMemorySpendControlStorage())
@@ -993,14 +994,15 @@ class TestChatCompletions:
         assert resp.status_code == 502
         assert resp.headers["x-uncommon-route-semantic-fallbacks"] == "3"
 
-    def test_passthrough_no_routing_headers(self, client: TestClient) -> None:
+    def test_passthrough_exposes_passthrough_headers(self, client: TestClient) -> None:
         resp = client.post("/v1/chat/completions", json={
             "model": "some-other/model",
             "messages": [{"role": "user", "content": "hello"}],
         })
         # Upstream is fake, expect 502
         assert resp.status_code == 502
-        assert "x-uncommon-route-model" not in resp.headers
+        assert resp.headers["x-uncommon-route-mode"] == "passthrough"
+        assert resp.headers["x-uncommon-route-model"] == "some-other/model"
 
 
 class TestSpendEndpoint:

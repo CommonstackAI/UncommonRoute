@@ -229,6 +229,14 @@ class TestRouteStats:
             "cache_mode": "cache_control",
             "cache_family": "anthropic",
             "cache_breakpoints": 2,
+            "route_reasoning": "selected for low latency",
+            "routing_features_payload": {"step_type": "research"},
+            "fallback_chain_payload": [{"model": "fallback/model", "reason": "cost"}],
+            "candidate_scores_payload": [{"model": "test/model", "score": 0.91}],
+            "status_code": 502,
+            "error_code": "connect_error",
+            "error_stage": "upstream_request",
+            "error_message": "Upstream unreachable",
         }))
         rs1.record(_make_record(model="test/model2", tier="REASONING"))
 
@@ -242,6 +250,14 @@ class TestRouteStats:
         assert h[1].cache_mode == "cache_control"
         assert h[1].cache_family == "anthropic"
         assert h[1].cache_breakpoints == 2
+        assert h[1].route_reasoning == "selected for low latency"
+        assert h[1].routing_features_payload == {"step_type": "research"}
+        assert h[1].fallback_chain_payload == [{"model": "fallback/model", "reason": "cost"}]
+        assert h[1].candidate_scores_payload == [{"model": "test/model", "score": 0.91}]
+        assert h[1].status_code == 502
+        assert h[1].error_code == "connect_error"
+        assert h[1].error_stage == "upstream_request"
+        assert h[1].error_message == "Upstream unreachable"
 
     def test_retention_cleanup(self) -> None:
         t = 1_000_000.0
@@ -328,6 +344,11 @@ class TestStatsEndpoint:
         assert "cache_mode" in recent[0]
         assert "cache_family" in recent[0]
         assert "cache_breakpoints" in recent[0]
+        assert "route_reasoning" in recent[0]
+        assert recent[0]["status_code"] == 502
+        assert recent[0]["error_code"] != ""
+        assert recent[0]["error_stage"] in {"upstream_request", "upstream_response"}
+        assert recent[0]["error_message"] != ""
         assert "feedback_action" in recent[0]
 
     def test_stats_include_selector_feedback_summary(self, stats_client: TestClient) -> None:

@@ -53,11 +53,57 @@ _v2_initialized = False
 
 # tier_id → complexity (inverse of _derive_tier boundaries)
 _TIER_ID_TO_COMPLEXITY = {0: 0.0, 1: 0.40, 2: 0.68, 3: 0.90}
+_TIER_ORDER = {Tier.SIMPLE: 0, Tier.MEDIUM: 1, Tier.COMPLEX: 2}
+_PUBLIC_TIER_COMPLEXITY = {
+    Tier.SIMPLE: 0.0,
+    Tier.MEDIUM: 0.40,
+    Tier.COMPLEX: 0.68,
+}
 
 
-def _should_activate_signal_b(row: dict[str, Any]) -> bool:
-    """Enable Signal B on longer conversations where it improves pass rate."""
-    return len(row.get("messages", [])) >= 4
+def _apply_tier_bounds(
+    complexity: float,
+    *,
+    tier_floor: Tier | None,
+    tier_cap: Tier | None,
+) -> tuple[float, list[str]]:
+    bounded = complexity
+    notes: list[str] = []
+    effective_tier = _derive_tier(bounded)
+
+    if tier_floor is not None and _TIER_ORDER[effective_tier] < _TIER_ORDER[tier_floor]:
+        bounded = _PUBLIC_TIER_COMPLEXITY[tier_floor]
+        effective_tier = tier_floor
+        notes.append(f"tier-floor={tier_floor.value}")
+
+    if tier_cap is not None and _TIER_ORDER[effective_tier] > _TIER_ORDER[tier_cap]:
+        bounded = _PUBLIC_TIER_COMPLEXITY[tier_cap]
+        notes.append(f"tier-cap={tier_cap.value}")
+
+    return bounded, notes
+
+
+def _should_activate_signal_b(row: dict[str, Any], vote_b: TierVote | None = None) -> bool:
+    """Enable Signal B on longer conversations where it improves pass rate.
+
+    Disabled on tool-heavy workflows: in deep agent conversations the last
+    user message is often a repeated task description, which makes B's
+    structural classifier lock onto high-tier text features even when the
+    current step is routine. Let Signal A+C carry in that regime.
+
+    For short, standalone prompts, activate B when it has a strong opinion.
+    That keeps obviously hard asks and structured-output requests from being
+    flattened by metadata priors that only look at message count.
+    """
+    messages = row.get("messages", [])
+    tool_msg_count = sum(1 for m in messages if m.get("role") == "tool" or m.get("tool_calls"))
+    if tool_msg_count >= 4:
+        return False
+    if len(messages) >= 4:
+        return True
+    if vote_b is None or vote_b.abstained:
+        return False
+    return vote_b.confidence >= 0.95 and (vote_b.tier_id or 0) >= 1
 
 
 @dataclass(frozen=True)
@@ -178,6 +224,8 @@ def _v2_classify(
     _ensure_v2_signals()
 
     row = _build_signal_row(prompt, system_prompt, messages, routing_features, context_features)
+    tool_msg_count = sum(1 for m in row.get("messages", []) if m.get("role") == "tool" or m.get("tool_calls"))
+    has_system_prompt = any(m.get("role") == "system" for m in row.get("messages", []))
     vote_a = _v2_sig_a.predict(row) if _v2_sig_a else TierVote(tier_id=1, confidence=0.4)
     vote_b = _v2_sig_b.predict(row) if _v2_sig_b else TierVote(tier_id=None, confidence=0.0)
     vote_c = _v2_sig_c.predict(row) if _v2_sig_c else TierVote(tier_id=None, confidence=0.0)
@@ -196,7 +244,7 @@ def _v2_classify(
     # Signal B is active for longer conversations and can also be
     # globally promoted by the lifecycle tracker.
     from uncommon_route import v2_lifecycle as _lc
-    use_signal_b = _should_activate_signal_b(row) or _lc.is_signal_b_promoted()
+    use_signal_b = _should_activate_signal_b(row, vote_b) or _lc.is_signal_b_promoted()
 
     # Get learned weights from tracker (falls back to defaults if not initialized)
     tracker_weights = _lc._weight_tracker.weights if _lc._weight_tracker else None
@@ -226,14 +274,28 @@ def _v2_classify(
     result = ensemble.decide(active_votes)
 
     tier_id = result.tier_id if result.tier_id is not None else 1
+    structural_floor_applied = False
+    if (
+        tool_msg_count == 0
+        and len(row.get("messages", [])) <= 3
+        and not vote_b.abstained
+        and vote_b.confidence >= (0.70 if has_system_prompt else 0.95)
+        and (vote_b.tier_id or 0) >= 1
+        and tier_id < vote_b.tier_id
+    ):
+        tier_id = vote_b.tier_id
+        structural_floor_applied = True
     complexity = _TIER_ID_TO_COMPLEXITY.get(tier_id, 0.40)
 
-    signals_text = (
+    signals_parts = [
         f"v2:metadata={vote_a.tier_id}({vote_a.confidence:.2f})",
         f"v2:structural={vote_b.tier_id}({vote_b.confidence:.2f})[{'active' if use_signal_b else 'shadow'}]",
         f"v2:embedding={vote_c.tier_id}({vote_c.confidence:.2f})",
         f"v2:tier={tier_id} complexity={complexity:.2f} method={result.method}",
-    )
+    ]
+    if structural_floor_applied:
+        signals_parts.append("v2:structural-floor")
+    signals_text = tuple(signals_parts)
 
     return V2ClassifyResult(
         complexity=complexity,
@@ -295,12 +357,19 @@ def route(
     # v1's route-confidence calibrator still runs on top of v2's ensemble confidence
     confidence_calibrator = route_confidence_calibrator or get_active_route_confidence_calibrator()
 
-    final_tier = _derive_tier(v2.complexity)
+    effective_tier_floor = features.tier_floor or tier_floor
+    effective_tier_cap = features.tier_cap or tier_cap
+    bounded_complexity, bound_notes = _apply_tier_bounds(
+        v2.complexity,
+        tier_floor=effective_tier_floor,
+        tier_cap=effective_tier_cap,
+    )
+    final_tier = _derive_tier(bounded_complexity)
     confidence_estimate = confidence_calibrator.calibrate(
         v2.confidence,
         mode=mode,
         tier=final_tier,
-        complexity=v2.complexity,
+        complexity=bounded_complexity,
         step_type=features.step_type,
         answer_depth=depth,
         constraint_tags=constraints.tags(),
@@ -308,10 +377,12 @@ def route(
         feature_tags=features.tags(),
         streaming=features.streaming,
     )
-    reasoning = ", ".join(v2.signals_text)
+    reasoning_parts = list(v2.signals_text)
+    reasoning_parts.extend(bound_notes)
+    reasoning = ", ".join(reasoning_parts)
 
     decision = select_from_pool(
-        complexity=v2.complexity,
+        complexity=bounded_complexity,
         mode=mode,
         confidence=confidence_estimate.confidence,
         reasoning_text=reasoning,

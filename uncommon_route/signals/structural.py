@@ -15,6 +15,16 @@ from uncommon_route.router.classifier import classify
 from uncommon_route.router.types import Tier
 
 
+def _extract_latest_system_message(messages: list[dict[str, Any]]) -> str | None:
+    for message in reversed(messages):
+        if message.get("role") != "system":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str) and content.strip():
+            return content
+    return None
+
+
 def _map_v1_to_v2_tier_id(tier: Tier | None, complexity: float) -> int | None:
     if tier is None:
         return None
@@ -34,20 +44,22 @@ class StructuralSignal:
     def predict(self, row: dict[str, Any]) -> TierVote:
         messages = row.get("messages", [])
         text = _extract_last_user_message(messages)
+        system_prompt = _extract_latest_system_message(messages)
         if not text.strip():
             return TierVote(tier_id=None, confidence=0.0)
 
-        result = classify(text)
+        result = classify(text, system_prompt=system_prompt)
         tier_id = _map_v1_to_v2_tier_id(result.tier, result.complexity)
         confidence = max(0.0, min(1.0, result.confidence))
 
         # Dampen confidence for very short prompts — structural features
         # are unreliable when there's little text to analyze.
         # Use word count for Latin scripts, character count for CJK.
-        word_count = len(text.split())
-        if word_count <= 2 and len(text) > 15:
+        length_text = text if not system_prompt else f"{system_prompt}\n\n{text}"
+        word_count = len(length_text.split())
+        if word_count <= 2 and len(length_text) > 15:
             # CJK or no-space script: use character length instead
-            word_count = len(text) // 3  # rough CJK word estimate
+            word_count = len(length_text) // 3  # rough CJK word estimate
         if word_count <= 8:
             confidence = min(confidence, 0.50)
         elif word_count <= 15:

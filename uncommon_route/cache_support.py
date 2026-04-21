@@ -88,22 +88,22 @@ def apply_anthropic_cache_breakpoints(
     messages = body.get("messages") or []
     breakpoints = 0
 
-    # Anthropic requires cache_control TTLs to be non-increasing across
-    # tools → system → messages.  Determine the effective TTL by taking the
-    # longest of (a) our session-based preference and (b) any TTL already
-    # present in the request so breakpoints we add never violate ordering.
+    # Anthropic requires longer TTL cache_control blocks to appear before
+    # shorter ones across tools → system → messages. If the incoming request
+    # already contains any 5m/default cache blocks, do not inject new 1h
+    # breakpoints later in the body or the request becomes invalid.
     computed_ttl = "1h" if session_id and step_type != "general" else None
-    existing_max = _max_existing_cache_ttl(body)
-    use_1h = computed_ttl == "1h" or existing_max == "1h"
+    existing_has_1h, existing_has_5m = _existing_cache_ttl_profile(body)
+    use_1h = not existing_has_5m and (computed_ttl == "1h" or existing_has_1h)
     cc: dict[str, Any] = {"type": "ephemeral", "ttl": "1h"} if use_1h else {"type": "ephemeral"}
 
     if tools:
-        tools[-1]["cache_control"] = dict(cc)
+        tools[-1].setdefault("cache_control", dict(cc))
         breakpoints += 1
 
     system = body.get("system")
     if isinstance(system, list) and system:
-        system[-1]["cache_control"] = dict(cc)
+        system[-1].setdefault("cache_control", dict(cc))
         breakpoints += 1
     elif isinstance(system, str) and system.strip():
         body["system"] = [{"type": "text", "text": system, "cache_control": dict(cc)}]
@@ -172,8 +172,10 @@ def _iter_anthropic_cache_control_holders(body: dict[str, Any]) -> list[dict[str
     return holders
 
 
-def _max_existing_cache_ttl(body: dict[str, Any]) -> str | None:
-    """Return ``"1h"`` if any cache_control block in *body* uses that TTL."""
+def _existing_cache_ttl_profile(body: dict[str, Any]) -> tuple[bool, bool]:
+    """Return ``(has_1h, has_5m_or_default)`` for existing cache_control blocks."""
+    has_1h = False
+    has_5m = False
     for key in ("tools", "system", "messages"):
         section = body.get(key)
         if not isinstance(section, list):
@@ -181,18 +183,22 @@ def _max_existing_cache_ttl(body: dict[str, Any]) -> str | None:
         for item in section:
             if not isinstance(item, dict):
                 continue
-            if _cache_control_has_1h(item.get("cache_control")):
-                return "1h"
+            has_1h, has_5m = _merge_cache_control_flags(item.get("cache_control"), has_1h, has_5m)
             content = item.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and _cache_control_has_1h(block.get("cache_control")):
-                        return "1h"
-    return None
+                    if isinstance(block, dict):
+                        has_1h, has_5m = _merge_cache_control_flags(block.get("cache_control"), has_1h, has_5m)
+    return has_1h, has_5m
 
 
-def _cache_control_has_1h(cc: Any) -> bool:
-    return isinstance(cc, dict) and cc.get("ttl") == "1h"
+def _merge_cache_control_flags(cc: Any, has_1h: bool, has_5m: bool) -> tuple[bool, bool]:
+    if not isinstance(cc, dict):
+        return has_1h, has_5m
+    ttl = str(cc.get("ttl", "")).strip().lower()
+    if ttl == "1h":
+        return True, has_5m
+    return has_1h, True
 
 
 def parse_usage_metrics(

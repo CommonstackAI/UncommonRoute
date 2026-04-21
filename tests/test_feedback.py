@@ -15,6 +15,9 @@ from uncommon_route.proxy import create_app
 from uncommon_route.router.classifier import extract_features
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.stats import InMemoryRouteStatsStorage, RouteStats
+from uncommon_route.traces import InMemoryTraceStorage, TraceStore
+
+_ADMIN_HEADERS = {"authorization": "Bearer test-admin"}
 
 
 def _dummy_features() -> dict[str, float]:
@@ -125,12 +128,14 @@ class TestFeedbackCollector:
 
 
 @pytest.fixture
-def fb_client() -> TestClient:
+def fb_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
     app = create_app(
         upstream="http://127.0.0.1:1/fake",
         spend_control=SpendControl(storage=InMemorySpendControlStorage()),
         route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
         feedback=FeedbackCollector(),
+        trace_store=TraceStore(storage=InMemoryTraceStorage()),
     )
     return TestClient(app, raise_server_exceptions=False)
 
@@ -201,6 +206,11 @@ class TestFeedbackEndpoint:
         assert recent[0]["feedback_signal"] == "weak"
         assert recent[0]["feedback_to_tier"] != ""
 
+        trace = fb_client.get(f"/v1/traces/{rid}", headers=_ADMIN_HEADERS).json()
+        assert trace["feedback_action"] == "updated"
+        assert trace["feedback_signal"] == "weak"
+        assert trace["feedback_to_tier"] != ""
+
     def test_recent_hides_closed_feedback_rows(self) -> None:
         feedback = FeedbackCollector()
         app = create_app(
@@ -208,6 +218,7 @@ class TestFeedbackEndpoint:
             spend_control=SpendControl(storage=InMemorySpendControlStorage()),
             route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
             feedback=feedback,
+            trace_store=TraceStore(storage=InMemoryTraceStorage()),
         )
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -230,6 +241,7 @@ class TestFeedbackEndpoint:
             spend_control=SpendControl(storage=InMemorySpendControlStorage()),
             route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
             feedback=feedback,
+            trace_store=TraceStore(storage=InMemoryTraceStorage()),
         )
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -261,16 +273,24 @@ class TestFeedbackEndpoint:
         assert fb.status_code == 400
 
     def test_rollback(self, fb_client: TestClient) -> None:
-        fb = fb_client.post("/v1/feedback", json={"action": "rollback"})
+        fb = fb_client.post("/v1/feedback", json={"action": "rollback"}, headers=_ADMIN_HEADERS)
         assert fb.status_code == 200
         assert "rolled_back" in fb.json()
 
-    def test_passthrough_no_request_id(self, fb_client: TestClient) -> None:
+    def test_passthrough_has_request_id_and_trace(self, fb_client: TestClient) -> None:
         resp = fb_client.post("/v1/chat/completions", json={
             "model": "some-other/model",
             "messages": [{"role": "user", "content": "hello"}],
         })
-        assert "x-uncommon-route-request-id" not in resp.headers
+        assert "x-uncommon-route-request-id" in resp.headers
+        trace = fb_client.get(
+            f"/v1/traces/{resp.headers['x-uncommon-route-request-id']}",
+            headers=_ADMIN_HEADERS,
+        ).json()
+        assert trace["is_virtual"] is False
+        assert trace["mode"] == "passthrough"
+        assert trace["error_code"] != ""
+        assert trace["attempts_payload"][0]["error_code"] == trace["error_code"]
 
     def test_health_includes_feedback(self, fb_client: TestClient) -> None:
         data = fb_client.get("/health").json()

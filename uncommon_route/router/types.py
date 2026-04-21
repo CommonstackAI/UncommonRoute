@@ -12,6 +12,19 @@ class Tier(str, Enum):
     COMPLEX = "COMPLEX"
 
 
+class CapabilityLane(str, Enum):
+    GENERAL = "general"
+    ANTHROPIC_TOOL_SAFE = "anthropic-tool-safe"
+    REASONING = "reasoning"
+    VISION = "vision"
+
+
+class ServedQuality(str, Enum):
+    ECONOMY = "economy"
+    BALANCED = "balanced"
+    PREMIUM = "premium"
+
+
 class RoutingMode(str, Enum):
     AUTO = "auto"
     FAST = "fast"
@@ -106,6 +119,9 @@ class RoutingFeatures:
     tier_floor: Tier | None = None
     tier_cap: Tier | None = None
     session_present: bool = False
+    capability_lane: CapabilityLane | None = None
+    previous_served_quality: ServedQuality | None = None
+    continuity_quality_floor: ServedQuality | None = None
 
     @property
     def tool_count(self) -> int:
@@ -139,6 +155,12 @@ class RoutingFeatures:
             labels.append("structured-output")
         if self.session_present:
             labels.append("session")
+        if self.capability_lane is not None:
+            labels.append(f"lane:{self.capability_lane.value}")
+        if self.previous_served_quality is not None:
+            labels.append(f"prev-quality:{self.previous_served_quality.value}")
+        if self.continuity_quality_floor is not None:
+            labels.append(f"continuity-floor:{self.continuity_quality_floor.value}")
         return tuple(labels)
 
 
@@ -184,6 +206,9 @@ class CandidateScore:
     free_bias: float = 0.0
     local_bias: float = 0.0
     reasoning_bias: float = 0.0
+    quality_alignment: float = 0.0
+    continuity_bias: float = 0.0
+    served_quality: str = ""
     bandit_mean: float = 0.5
     exploration_bonus: float = 0.0
     samples: int = 0
@@ -231,6 +256,11 @@ class RoutingInfeasibleError(RuntimeError):
 class RoutingDecision:
     model: str
     tier: Tier
+    capability_lane: CapabilityLane
+    served_quality: ServedQuality
+    served_quality_target: ServedQuality
+    served_quality_floor: ServedQuality | None
+    continuity_quality_floor: ServedQuality | None
     mode: RoutingMode
     confidence: float
     method: str
@@ -282,6 +312,8 @@ class SelectionWeights:
     free_bias: float = 0.0
     local_bias: float = 0.0
     reasoning_bias: float = 0.05
+    quality_alignment: float = 0.08
+    continuity: float = 0.06
 
 
 @dataclass(frozen=True, slots=True)

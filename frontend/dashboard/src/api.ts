@@ -56,6 +56,8 @@ export interface Stats {
   total_input_tokens_after: number;
   by_mode: Record<string, number>;
   by_tier: Record<string, TierStats>;
+  by_served_quality: Record<string, number>;
+  by_capability_lane: Record<string, number>;
   by_model: Record<string, ModelStats>;
   by_transport: Record<string, ModelStats>;
   by_cache_mode: Record<string, ModelStats>;
@@ -377,6 +379,108 @@ export interface FeedbackResult {
 
 export const fetchRecent = (limit = 30) =>
   get<RecentRequest[]>(`/v1/stats/recent?limit=${limit}`);
+
+export interface TraceAttempt {
+  attempt_index: number;
+  selected_model: string;
+  resolved_model: string;
+  provider_name: string;
+  target_url: string;
+  requested_transport?: string;
+  transport: string;
+  transport_reason?: string;
+  transport_preference_source?: string;
+  cache_mode: string;
+  cache_family: string;
+  cache_breakpoints: number;
+  fallback_from: string;
+  status_code: number;
+  success: boolean;
+  error_code: string;
+  error_message: string;
+  blocked?: boolean;
+}
+
+export interface TraceRecord {
+  timestamp: number;
+  request_id: string;
+  requested_model: string;
+  model: string;
+  status_code: number;
+  mode: string;
+  tier: string;
+  decision_tier: string;
+  served_quality: string;
+  served_quality_target: string;
+  served_quality_floor: string;
+  capability_lane: string;
+  method: string;
+  api_format: string;
+  endpoint: string;
+  is_virtual: boolean;
+  session_id?: string | null;
+  streaming: boolean;
+  prompt_preview: string;
+  prompt_hash: string;
+  step_type: string;
+  route_reasoning: string;
+  confidence: number;
+  raw_confidence: number;
+  confidence_source: string;
+  complexity: number;
+  estimated_cost: number;
+  baseline_cost: number;
+  actual_cost?: number | null;
+  savings: number;
+  latency_us: number;
+  usage_input_tokens: number;
+  usage_output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_write_input_tokens: number;
+  cache_hit_ratio: number;
+  transport: string;
+  requested_transport: string;
+  transport_reason: string;
+  transport_preference_source: string;
+  cache_mode: string;
+  cache_family: string;
+  cache_breakpoints: number;
+  input_tokens_before: number;
+  input_tokens_after: number;
+  fallback_reason: string;
+  answer_depth: string;
+  constraint_tags: string[];
+  hint_tags: string[];
+  feature_tags: string[];
+  attempts_payload: TraceAttempt[];
+  error_code: string;
+  error_stage: string;
+  error_message: string;
+}
+
+export interface TraceListResponse {
+  total_requests: number;
+  summary: {
+    total_requests: number;
+    error_count: number;
+    virtual_requests: number;
+    passthrough_requests: number;
+    by_endpoint: Record<string, number>;
+    by_mode: Record<string, number>;
+    by_method: Record<string, number>;
+    by_status: Record<string, number>;
+    by_error_code: Record<string, number>;
+    by_served_quality: Record<string, number>;
+    by_capability_lane: Record<string, number>;
+  };
+  items: TraceRecord[];
+}
+
+export const fetchTraces = (limit = 30, errorsOnly = false) =>
+  get<TraceListResponse>(`/v1/traces?limit=${limit}${errorsOnly ? "&errors_only=1" : ""}`);
+
+export const fetchTraceDetail = (requestId: string) =>
+  get<TraceRecord>(`/v1/traces/${encodeURIComponent(requestId)}`);
 
 export async function submitFeedback(
   requestId: string,

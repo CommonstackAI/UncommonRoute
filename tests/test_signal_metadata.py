@@ -38,7 +38,7 @@ def test_medium_no_tools_predicts_low():
     assert vote.tier_id == 0
 
 
-def test_heavy_tools_predicts_high():
+def test_heavy_tools_predicts_high_with_damped_confidence():
     msgs = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Fix the bug."},
@@ -55,7 +55,7 @@ def test_heavy_tools_predicts_high():
     sig = MetadataSignal()
     vote = sig.predict(_make_row(messages=msgs))
     assert vote.tier_id == 3
-    assert vote.confidence >= 0.5
+    assert 0.0 < vote.confidence <= 0.3
 
 
 def test_light_tools_predicts_mid():

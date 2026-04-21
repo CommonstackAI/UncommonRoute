@@ -13,6 +13,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,7 @@ from uncommon_route.proxy import VERSION as PROXY_VERSION
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING
 from uncommon_route.router.types import ModelPricing
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
+from uncommon_route.traces import FileTraceStorage, RequestTrace, TraceStore
 
 PYTHON = sys.executable
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +36,12 @@ _SPEND_TEST_PRICING["nvidia/gpt-oss-120b"] = ModelPricing(0.10, 0.40)
 CLI_MODULE = [PYTHON, "-m", "uncommon_route.cli"]
 
 
-def run_cli(args: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     merged_env = dict(os.environ)
     merged_env["PYTHONPATH"] = str(PACKAGE_ROOT)
     if env:
@@ -42,6 +50,7 @@ def run_cli(args: list[str], *, env: dict[str, str] | None = None) -> subprocess
         [*CLI_MODULE, *args],
         capture_output=True,
         text=True,
+        input=input_text,
         cwd=PACKAGE_ROOT,
         env=merged_env,
     )
@@ -50,8 +59,12 @@ def run_cli(args: list[str], *, env: dict[str, str] | None = None) -> subprocess
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 @pytest.fixture
-def proxy_client() -> TestClient:
+def proxy_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Full proxy with spend control, fake upstream."""
+    monkeypatch.setattr(
+        "uncommon_route.proxy._LOCAL_CLIENT_HOSTS",
+        {"127.0.0.1", "::1", "localhost", "testclient"},
+    )
     sc = SpendControl(storage=InMemorySpendControlStorage())
     app = create_app(upstream="http://127.0.0.1:1/fake", spend_control=sc)
     return TestClient(app, raise_server_exceptions=False)
@@ -77,8 +90,15 @@ class TestCLI:
         r = run_cli(["--help"])
         assert r.returncode == 0
         assert "uncommon-route" in r.stdout
+        assert "init" in r.stdout
         assert "openclaw" in r.stdout
         assert "spend" in r.stdout
+
+    def test_serve_subcommand_help(self) -> None:
+        r = run_cli(["serve", "--help"])
+        assert r.returncode == 0
+        assert "Usage: uncommon-route serve" in r.stdout
+        assert "Start the local proxy server." in r.stdout
 
     def test_route_text(self) -> None:
         r = run_cli(["route", "what is 2+2"])
@@ -134,16 +154,205 @@ class TestCLI:
         r = run_cli(["route"])
         assert r.returncode != 0
 
-    def test_doctor_local_upstream_without_key(self) -> None:
-        env = dict(os.environ)
-        env["UNCOMMON_ROUTE_UPSTREAM"] = "http://127.0.0.1:11434/v1"
-        env.pop("UNCOMMON_ROUTE_API_KEY", None)
-        env.pop("COMMONSTACK_API_KEY", None)
+    def test_doctor_local_upstream_without_key(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "UNCOMMON_ROUTE_UPSTREAM": "http://127.0.0.1:11434/v1",
+        }
 
         r = run_cli(["doctor"], env=env)
 
         assert r.returncode == 0
         assert "✓ API key configured: (not needed for local upstream)" in r.stdout
+
+    def test_doctor_fails_when_not_configured(self, tmp_path: Path) -> None:
+        r = run_cli(
+            ["doctor"],
+            env={
+                "HOME": str(tmp_path),
+                "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            },
+        )
+
+        assert r.returncode == 1
+        assert "Setup is incomplete" in r.stdout
+
+    def test_doctor_byok_only_is_ready(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "SHELL": "/bin/zsh",
+        }
+        init = run_cli(["init"], env=env, input_text="3\n1\nsk-test\nn\n4\nn\n")
+        assert init.returncode == 0
+
+        doctor = run_cli(["doctor"], env=env)
+        assert doctor.returncode == 0
+        assert "Primary connection: not set (BYOK mode is available)" in doctor.stdout
+
+    def test_init_commonstack_writes_connection_and_client_shell_block(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "SHELL": "/bin/zsh",
+        }
+        r = run_cli(
+            ["init"],
+            env=env,
+            input_text="1\n\ncsk-test-key\n2\ny\nn\n",
+        )
+
+        assert r.returncode == 0
+        assert "Setup summary" in r.stdout
+
+        connections_path = tmp_path / ".uncommon-route" / "connections.json"
+        payload = json.loads(connections_path.read_text())
+        assert payload["primary"]["upstream"] == "https://api.commonstack.ai/v1"
+        assert payload["primary"]["api_key"] == "csk-test-key"
+
+        rc_path = tmp_path / ".zshrc"
+        rc_contents = rc_path.read_text()
+        assert "OPENAI_BASE_URL" in rc_contents
+        assert "OPENAI_API_KEY" in rc_contents
+
+    def test_init_commonstack_writes_claude_code_auth_token_block(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "SHELL": "/bin/zsh",
+        }
+        r = run_cli(
+            ["init"],
+            env=env,
+            input_text="1\n\ncsk-test-key\n1\ny\nn\n",
+        )
+
+        assert r.returncode == 0
+        rc_path = tmp_path / ".zshrc"
+        rc_contents = rc_path.read_text()
+        assert 'ANTHROPIC_BASE_URL="http://localhost:8403"' in rc_contents
+        assert 'ANTHROPIC_AUTH_TOKEN="not-needed"' in rc_contents
+        assert 'ANTHROPIC_API_KEY="not-needed"' not in rc_contents
+
+    def test_init_byok_writes_provider_config(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "SHELL": "/bin/zsh",
+        }
+        r = run_cli(
+            ["init"],
+            env=env,
+            input_text="3\n1\nsk-openai\nn\n4\nn\n",
+        )
+
+        assert r.returncode == 0
+        providers_path = tmp_path / ".uncommon-route" / "providers.json"
+        payload = json.loads(providers_path.read_text())
+        assert payload["providers"]["openai"]["api_key"] == "sk-openai"
+
+    def test_support_bundle_exports_recent_traces(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / ".uncommon-route"
+        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces.record(RequestTrace(
+            timestamp=time.time(),
+            request_id="reqsupport01",
+            requested_model="uncommon-route/auto",
+            model="moonshot/kimi-k2.5",
+            status_code=502,
+            mode="auto",
+            tier="SIMPLE",
+            decision_tier="SIMPLE",
+            confidence=0.91,
+            method="pool",
+            estimated_cost=0.002,
+            prompt_preview="hello world",
+            prompt_hash="abc123",
+            endpoint="chat_completions",
+            is_virtual=True,
+            streaming=False,
+            step_type="general",
+            route_reasoning="selected for low latency",
+            routing_features_payload={"step_type": "general"},
+            fallback_chain_payload=[{"model": "fallback/model", "reason": "cost"}],
+            candidate_scores_payload=[{"model": "moonshot/kimi-k2.5", "score": 0.91}],
+            selection_weights_payload={"editorial": 0.55, "cost": 0.45},
+            attempts_payload=[{"selected_model": "moonshot/kimi-k2.5", "status_code": 502}],
+            error_code="connect_error",
+            error_stage="upstream_request",
+            error_message="Upstream unreachable: http://127.0.0.1:1/fake",
+        ))
+
+        r = run_cli(
+            ["support", "bundle", "--limit", "5"],
+            env={
+                "UNCOMMON_ROUTE_DATA_DIR": str(data_dir),
+                "HOME": str(tmp_path),
+            },
+        )
+
+        assert r.returncode == 0
+        output_line = r.stdout.strip().splitlines()[-1]
+        assert output_line.startswith("Support bundle written:")
+
+        bundle_path = Path(output_line.split(": ", 1)[1])
+        assert bundle_path.exists()
+
+        with zipfile.ZipFile(bundle_path) as bundle:
+            assert "manifest.json" in bundle.namelist()
+            assert "diagnostics/recent_traces.json" in bundle.namelist()
+            assert "diagnostics/recent_errors.json" in bundle.namelist()
+            assert "diagnostics/trace_summary.json" in bundle.namelist()
+
+            traces = json.loads(bundle.read("diagnostics/recent_traces.json"))
+            assert len(traces) == 1
+            assert traces[0]["request_id"] == "reqsupport01"
+            assert traces[0]["route_reasoning"] == "selected for low latency"
+            assert traces[0]["error_code"] == "connect_error"
+            assert traces[0]["routing_features_payload"] == {"step_type": "general"}
+            assert traces[0]["attempts_payload"][0]["status_code"] == 502
+
+    def test_support_request_prints_trace(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / ".uncommon-route"
+        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces.record(RequestTrace(
+            timestamp=time.time(),
+            request_id="reqlookup001",
+            requested_model="uncommon-route/auto",
+            model="moonshot/kimi-k2.5",
+            status_code=502,
+            mode="auto",
+            tier="SIMPLE",
+            decision_tier="SIMPLE",
+            confidence=0.91,
+            method="pool",
+            estimated_cost=0.002,
+            prompt_preview="debug me",
+            prompt_hash="def456",
+            endpoint="chat_completions",
+            is_virtual=True,
+            streaming=False,
+            route_reasoning="selected for low latency",
+            error_code="connect_error",
+            error_stage="upstream_request",
+            error_message="Upstream unreachable",
+        ))
+
+        r = run_cli(
+            ["support", "request", "reqlookup001"],
+            env={
+                "UNCOMMON_ROUTE_DATA_DIR": str(data_dir),
+                "HOME": str(tmp_path),
+            },
+        )
+
+        assert r.returncode == 0
+        payload = json.loads(r.stdout)
+        assert payload["request_id"] == "reqlookup001"
+        assert payload["status_code"] == 502
+        assert payload["error_code"] == "connect_error"
+        assert payload["route_reasoning"] == "selected for low latency"
 
 
 # ── Mode 2: Python SDK ───────────────────────────────────────────────
@@ -239,7 +448,8 @@ class TestHTTPProxy:
             "messages": [{"role": "user", "content": "hello"}],
         })
         assert r.status_code == 502
-        assert "x-uncommon-route-model" not in r.headers
+        assert r.headers["x-uncommon-route-mode"] == "passthrough"
+        assert r.headers["x-uncommon-route-model"] == "openai/gpt-4o"
 
 
 # ── Mode 4: OpenClaw Integration ─────────────────────────────────────
@@ -293,6 +503,10 @@ class TestSpendControlE2E:
 
     def test_spend_clear_and_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("uncommon_route.proxy._get_pricing", lambda: _SPEND_TEST_PRICING)
+        monkeypatch.setattr(
+            "uncommon_route.proxy._LOCAL_CLIENT_HOSTS",
+            {"127.0.0.1", "::1", "localhost", "testclient"},
+        )
         sc = SpendControl(storage=InMemorySpendControlStorage())
         sc.set_limit("per_request", 0.00005)  # Below estimated ~0.0001 for "hello"
         app = create_app(upstream="http://127.0.0.1:1/fake", spend_control=sc)

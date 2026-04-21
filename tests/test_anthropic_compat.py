@@ -875,34 +875,211 @@ class TestNativeAnthropicTransportForChatCompletions:
 
 
 class TestAuthPriority:
-    """Env key takes precedence over client-provided auth."""
+    """Per-request auth takes precedence over process launch key."""
 
-    def test_env_key_overrides_request_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_messages_request_x_api_key_overrides_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_auth_priority",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "pong"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async def fake_discover(self, api_key: str | None = None) -> int:
+            return 0
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.model_map.ModelMapper.discover", fake_discover)
         monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
-        app = create_app(upstream="http://127.0.0.1:1/fake")
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/v1/messages",
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 100,
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-            headers={"x-api-key": "client-key-should-be-ignored"},
-        )
-        assert resp.status_code == 502
 
-    def test_client_header_used_when_no_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("UNCOMMON_ROUTE_API_KEY", raising=False)
-        monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
-        app = create_app(upstream="http://127.0.0.1:1/fake")
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "some-model",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-            headers={"Authorization": "Bearer client-key"},
-        )
-        assert resp.status_code == 502
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"x-api-key": "request-key-999"},
+            )
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["x-api-key"] == "request-key-999"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
+class TestRecursionGuard:
+    def test_virtual_chat_forwards_recursion_guard_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_guard",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "openai/gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async def fake_discover(self, api_key: str | None = None) -> int:
+            return 0
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.model_map.ModelMapper.discover", fake_discover)
+
+        try:
+            app = create_app(upstream="https://api.openai.com/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                headers={"authorization": "Bearer request-key-abc"},
+            )
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["x-uncommon-route-recursion-guard"] == "1"
+            assert headers["x-uncommon-route-original-model"] == "uncommon-route/auto"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["model"] != "uncommon-route/auto"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_recursion_guard_header_blocks_virtual_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_passthrough_guard",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "uncommon-route/auto",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async def fake_discover(self, api_key: str | None = None) -> int:
+            return 0
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.model_map.ModelMapper.discover", fake_discover)
+
+        try:
+            app = create_app(upstream="https://api.openai.com/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                headers={"x-uncommon-route-recursion-guard": "1"},
+            )
+            assert resp.status_code == 400
+            body = resp.json()
+            assert "Virtual model is not allowed with recursion guard" in body["error"]["message"]
+            assert captured == {}
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_chat_completions_request_authorization_overrides_env_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_auth_priority",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "openai/gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async def fake_discover(self, api_key: str | None = None) -> int:
+            return 0
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.model_map.ModelMapper.discover", fake_discover)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.openai.com/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"authorization": "Bearer request-key-abc"},
+            )
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["authorization"] == "Bearer request-key-abc"
+        finally:
+            asyncio.run(async_client.aclose())

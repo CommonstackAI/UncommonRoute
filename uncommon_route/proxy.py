@@ -67,7 +67,9 @@ from uncommon_route.router.structural import estimate_tokens, estimate_output_bu
 from uncommon_route.router.types import (
     ModelPricing,
     RequestRequirements,
+    RoutingFailureCode,
     RoutingFeatures,
+    RoutingInfeasibility,
     RoutingInfeasibleError,
     RoutingMode,
     Tier,
@@ -110,7 +112,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1297,6 +1299,88 @@ def _choose_transport(
     )
 
 
+def _requires_transport_safe_candidates(
+    *,
+    api_format: str,
+    endpoint_name: str,
+    step_type: str,
+    has_tools: bool,
+    has_tool_results: bool,
+) -> bool:
+    requested_transport = _requested_transport_name(
+        api_format=api_format,
+        endpoint_name=endpoint_name,
+    )
+    if requested_transport != "anthropic-messages":
+        return False
+    return (
+        step_type in {"tool-selection", "tool-result-followup"}
+        or has_tools
+        or has_tool_results
+    )
+
+
+def _filter_transport_compatible_models(
+    *,
+    available_models: list[str],
+    api_format: str,
+    endpoint_name: str,
+    upstream_provider: str,
+    upstream_base: str,
+    step_type: str,
+    has_tools: bool,
+    has_tool_results: bool,
+    anthropic_beta_present: bool,
+    providers_config: ProvidersConfig,
+) -> tuple[list[str], str]:
+    if not available_models:
+        return [], ""
+    if not _requires_transport_safe_candidates(
+        api_format=api_format,
+        endpoint_name=endpoint_name,
+        step_type=step_type,
+        has_tools=has_tools,
+        has_tool_results=has_tool_results,
+    ):
+        return list(available_models), ""
+
+    compatible: list[str] = []
+    for model_name in available_models:
+        transport_decision = _choose_transport(
+            api_format=api_format,
+            endpoint_name=endpoint_name,
+            selected_model=model_name,
+            provider_entry=providers_config.get_for_model(model_name),
+            upstream_provider=upstream_provider,
+            upstream_base=upstream_base,
+            step_type=step_type,
+            has_tools=has_tools,
+            has_tool_results=has_tool_results,
+            anthropic_beta_present=anthropic_beta_present,
+        )
+        if transport_decision.native_anthropic_transport:
+            compatible.append(model_name)
+
+    if compatible:
+        note = f"transport-filter=anthropic-native-tools({len(compatible)}/{len(available_models)})"
+        return compatible, note
+
+    raise RoutingInfeasibleError(
+        RoutingInfeasibility(
+            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
+            message=(
+                "Anthropic tool semantics require native anthropic transport, "
+                "but no compatible models are available for the current upstream"
+            ),
+            available_model_count=len(available_models),
+            candidate_count=0,
+            constraint_tags=("transport-safe",),
+            failed_constraints=("anthropic-native-transport",),
+            missing_capabilities=("anthropic-tool-transport",),
+        )
+    )
+
+
 def _can_reuse_native_anthropic_body(
     *,
     upstream_body: dict[str, Any],
@@ -1785,6 +1869,21 @@ def create_app(
         )
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
+        available_models = _circuit_breaker.filter_available(
+            _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+        )
+        available_models, transport_pool_note = _filter_transport_compatible_models(
+            available_models=available_models,
+            api_format="openai",
+            endpoint_name="chat_completions",
+            upstream_provider=_mapper.provider,
+            upstream_base=upstream,
+            step_type=step_type,
+            has_tools=bool(body.get("tools") or body.get("customTools")),
+            has_tool_results=routing_features.has_tool_results,
+            anthropic_beta_present=False,
+            providers_config=_providers,
+        )
         decision = route(
             prompt,
             system_prompt,
@@ -1797,10 +1896,13 @@ def create_app(
             route_confidence_calibrator=_route_confidence,
             context_features=ctx_features,
             pricing=_get_pricing(),
-            available_models=_mapper.available_models if _mapper.discovered else None,
+            available_models=available_models or None,
             model_capabilities=_routing_config.model_capabilities,
             messages=body.get("messages"),
         )
+        reasoning = decision.reasoning
+        if transport_pool_note:
+            reasoning = f"{reasoning} | {transport_pool_note}"
 
         effective_requirements = decision.routing_features.request_requirements()
         effective_hints = decision.routing_features.workload_hints()
@@ -1813,7 +1915,7 @@ def create_app(
             "served_tier": decision.tier.value,
             "mode": decision.mode.value,
             "method": decision.method,
-            "reasoning": decision.reasoning,
+            "reasoning": reasoning,
             "confidence": round(decision.confidence, 6),
             "raw_confidence": round(decision.raw_confidence, 6),
             "confidence_source": decision.confidence_source,
@@ -2549,7 +2651,23 @@ def create_app(
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
+            transport_pool_note = ""
             try:
+                route_available_models = _circuit_breaker.filter_available(
+                    _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+                )
+                route_available_models, transport_pool_note = _filter_transport_compatible_models(
+                    available_models=route_available_models,
+                    api_format=api_format,
+                    endpoint_name=endpoint_name,
+                    upstream_provider=_mapper.provider,
+                    upstream_base=upstream,
+                    step_type=step_type,
+                    has_tools=bool(body.get("tools") or body.get("customTools")),
+                    has_tool_results=routing_features.has_tool_results,
+                    anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
+                    providers_config=_providers,
+                )
                 decision = route(
                     prompt,
                     system_prompt,
@@ -2562,9 +2680,7 @@ def create_app(
                     route_confidence_calibrator=_route_confidence,
                     context_features=ctx_features,
                     pricing=_get_pricing(),
-                    available_models=_circuit_breaker.filter_available(
-                        _mapper.available_models if _mapper.discovered else []
-                    ) or None,
+                    available_models=route_available_models or None,
                     model_capabilities=_routing_config.model_capabilities,
                     messages=body.get("messages"),
                 )
@@ -2649,6 +2765,9 @@ def create_app(
                 )
             reasoning = decision.reasoning
             route_reasoning = decision.reasoning
+            if transport_pool_note:
+                route_reasoning = f"{route_reasoning} | {transport_pool_note}"
+                reasoning = route_reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence

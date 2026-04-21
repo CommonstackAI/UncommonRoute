@@ -18,9 +18,17 @@ from uncommon_route.anthropic_compat import (
     anthropic_error_response,
     OpenAIToAnthropicStreamConverter,
 )
+from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import create_app
-from uncommon_route.router.types import RoutingDecision, RoutingFeatures, RoutingMode, Tier
+from uncommon_route.router.types import (
+    ModelCapabilities,
+    ModelPricing,
+    RoutingDecision,
+    RoutingFeatures,
+    RoutingMode,
+    Tier,
+)
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.traces import InMemoryTraceStorage, TraceStore
 
@@ -626,6 +634,27 @@ def messages_client() -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
+def _build_seed_mapper(*model_ids: str) -> ModelMapper:
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in model_ids:
+        provider = model_id.split("/", 1)[0] if "/" in model_id else "unknown"
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._discovered = True
+
+    async def _fake_discover(api_key: str | None = None) -> int:
+        return len(mapper._pool)
+
+    mapper.discover = _fake_discover  # type: ignore[method-assign]
+    return mapper
+
+
 class TestMessagesEndpoint:
     def test_no_upstream_returns_anthropic_error(self) -> None:
         app = create_app(upstream="")
@@ -812,6 +841,157 @@ class TestAutoRouting:
 
 
 class TestTransportRouting:
+    def test_virtual_messages_tool_steps_filter_candidates_to_native_anthropic_transport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+        routed: dict[str, object] = {}
+
+        def fake_route(*args, **kwargs):
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="minimax/minimax-m2.1",
+                tier=Tier.MEDIUM,
+                mode=RoutingMode.AUTO,
+                confidence=0.92,
+                method="pool",
+                reasoning="forced minimax route for transport-safe pool test",
+                cost_estimate=0.001,
+                baseline_cost=0.004,
+                savings=0.75,
+                raw_confidence=0.92,
+                complexity=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_minimax_safe_pool",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "minimax/minimax-m2.1",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 18, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            mapper = _build_seed_mapper(
+                "deepseek/deepseek-v3.2",
+                "minimax/minimax-m2.1",
+            )
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "tools": [{
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }],
+                    "messages": [{"role": "user", "content": "Check weather in Hong Kong"}],
+                },
+                headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
+            )
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == ["minimax/minimax-m2.1"]
+            assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport"] == "anthropic-messages"
+            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_virtual_messages_tool_steps_fail_closed_when_no_transport_safe_models_exist(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        called = {"route": False, "upstream": False}
+
+        def fake_route(*args, **kwargs):
+            called["route"] = True
+            raise AssertionError("route() should not run when no transport-safe models exist")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called["upstream"] = True
+            raise AssertionError("Upstream request should not be attempted when routing is infeasible")
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            mapper = _build_seed_mapper("deepseek/deepseek-v3.2")
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "tools": [{
+                        "name": "mkdir",
+                        "description": "Create directories",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }],
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "toolu_99",
+                                "name": "mkdir",
+                                "input": {"path": "weather-cli"},
+                            }],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_99",
+                                "content": [{"type": "text", "text": "done"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
+            )
+
+            assert resp.status_code == 400
+            payload = resp.json()
+            assert payload["error"]["code"] == "routing_constraints_unmet"
+            assert "native anthropic transport" in payload["error"]["message"].lower()
+            assert payload["error"]["details"]["failed_constraints"] == ["anthropic-native-transport"]
+            assert payload["error"]["details"]["missing_capabilities"] == ["anthropic-tool-transport"]
+            assert called["route"] is False
+            assert called["upstream"] is False
+        finally:
+            asyncio.run(async_client.aclose())
+
     def test_messages_use_native_anthropic_transport_for_minimax_and_preserve_tool_result_blocks(
         self,
         monkeypatch: pytest.MonkeyPatch,

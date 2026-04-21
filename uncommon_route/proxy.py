@@ -123,6 +123,9 @@ VERSION = "0.7.6"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
+_RECURSION_GUARD_HEADER = "x-uncommon-route-recursion-guard"
+_ORIGINAL_MODEL_HEADER = "x-uncommon-route-original-model"
+
 # Cross-provider safe ceiling for outgoing max_tokens. Upstream gateways cap
 # output below the model's native limit (e.g. GLM-4.6 via some gateways rejects
 # >32768 even though the model supports 131k). Clients like Claude Code default
@@ -515,7 +518,7 @@ def _build_debug_response(prompt: str, system_prompt: str | None, routing_config
         lines.append("")
 
     lines.extend([
-        f"Scoring",
+        "Scoring",
         f"  Signals: {', '.join(result.signals)}",
         "",
         f"Tier Boundaries: SIMPLE <{tier_boundaries.simple_medium:.2f}"
@@ -579,6 +582,38 @@ def _extract_assistant_text(content: bytes) -> str:
                 parts.append(item.get("text", ""))
         return "\n".join(parts)
     return str(text)
+
+
+def _request_authorization_header(request: Request) -> str | None:
+    """Resolve request-scoped auth, preferring explicit Authorization."""
+    auth = request.headers.get("authorization")
+    if auth:
+        return auth
+    x_api_key = request.headers.get("x-api-key")
+    if x_api_key:
+        return f"Bearer {x_api_key}"
+    x_goog_api_key = request.headers.get("x-goog-api-key")
+    if x_goog_api_key:
+        return f"Bearer {x_goog_api_key}"
+    return None
+
+
+def _is_recursion_guard_enabled(request: Request, guard_secret: str) -> bool:
+    value = str(request.headers.get(_RECURSION_GUARD_HEADER, "")).strip()
+    if not value:
+        return False
+    if guard_secret:
+        return value == guard_secret
+    return value.lower() in {"1", "true", "yes", "on", "internal"}
+
+
+def _recursion_guard_header_value(guard_secret: str) -> str:
+    return guard_secret or "1"
+
+
+def _is_virtual_model_name(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return routing_mode_from_model(normalized) is not None
 
 
 class UpstreamSemanticCompressor:
@@ -777,7 +812,7 @@ class UpstreamSemanticCompressor:
         if provider_entry:
             headers["authorization"] = f"Bearer {provider_entry.api_key}"
         else:
-            auth = request.headers.get("authorization")
+            auth = _request_authorization_header(request)
             if auth:
                 headers["authorization"] = auth
             elif self._primary_api_key:
@@ -1663,6 +1698,7 @@ def create_app(
     forced_messages_upstream_model = str(
         os.environ.get("UNCOMMON_ROUTE_FORCE_MESSAGES_UPSTREAM_MODEL", "")
     ).strip()
+    recursion_guard_secret = str(os.environ.get("UNCOMMON_ROUTE_RECURSION_GUARD_SECRET", "")).strip()
     _forced_messages_default_mode: RoutingMode | None = None
     disable_anthropic_cache = str(os.environ.get("UNCOMMON_ROUTE_DISABLE_ANTHROPIC_CACHE", "")).strip().lower() in {
         "1",
@@ -2615,6 +2651,7 @@ def create_app(
         model = (body.get("model") or "").strip().lower()
         is_streaming = body.get("stream", False)
         response_model = str(body.pop("_client_requested_model", "") or model).strip()
+        recursion_guard_enabled = _is_recursion_guard_enabled(request, recursion_guard_secret)
 
         if not model:
             default_mode = _routing_store.default_mode()
@@ -2623,7 +2660,15 @@ def create_app(
 
         requested_model = model
         routing_mode = routing_mode_from_model(model)
-        is_virtual = routing_mode is not None
+        if recursion_guard_enabled and routing_mode is not None:
+            msg = "Virtual model is not allowed with recursion guard"
+            if api_format == "anthropic":
+                return JSONResponse(anthropic_error_response(400, msg), status_code=400)
+            return JSONResponse(
+                {"error": {"message": msg, "type": "invalid_request_error"}},
+                status_code=400,
+            )
+        is_virtual = routing_mode is not None and not recursion_guard_enabled
         route_start = time.perf_counter_ns()
         route_method: str = "pool"
         confidence = 0.0
@@ -2747,7 +2792,6 @@ def create_app(
                 has_tools=bool(body.get("tools") or body.get("customTools")),
             )
             ctx_features = extract_context_features(body, step_type, prompt)
-            requirements = routing_features.request_requirements()
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
@@ -2866,6 +2910,15 @@ def create_app(
                     headers=debug_headers,
                 )
             selected_model = decision.model
+            if _is_virtual_model_name(selected_model):
+                msg = f"Router selected a virtual model recursively: {selected_model}"
+                logger.error(msg)
+                if api_format == "anthropic":
+                    return JSONResponse(anthropic_error_response(500, msg), status_code=500)
+                return JSONResponse(
+                    {"error": {"message": msg, "type": "routing_error"}},
+                    status_code=500,
+                )
             tier_value = decision.tier.value
             decision_tier = tier_value
             served_quality_value = decision.served_quality.value
@@ -3088,7 +3141,7 @@ def create_app(
             )
             fallback_models = [
                 fb.model for fb in decision.fallback_chain
-                if fb.model != selected_model
+                if fb.model != selected_model and not _is_virtual_model_name(fb.model)
             ]
         else:
             selected_model = model
@@ -3151,17 +3204,29 @@ def create_app(
             if isinstance(_requested_max, int) and _requested_max > UPSTREAM_MAX_OUTPUT_TOKENS:
                 attempt_upstream_body["max_tokens"] = UPSTREAM_MAX_OUTPUT_TOKENS
             attempt_headers: dict[str, str] = {}
-            for key in ("authorization", "content-type", "accept", "user-agent"):
+            for key in (
+                "authorization",
+                "x-api-key",
+                "x-goog-api-key",
+                "content-type",
+                "accept",
+                "user-agent",
+                _RECURSION_GUARD_HEADER,
+                _ORIGINAL_MODEL_HEADER,
+            ):
                 val = request.headers.get(key)
                 if val:
                     attempt_headers[key] = val
-            if api_format == "anthropic" and "authorization" not in attempt_headers:
-                x_api_key = request.headers.get("x-api-key")
-                if x_api_key:
-                    attempt_headers["authorization"] = f"Bearer {x_api_key}"
+            request_auth = _request_authorization_header(request)
+            if request_auth and "authorization" not in attempt_headers:
+                attempt_headers["authorization"] = request_auth
             if "content-type" not in attempt_headers:
                 attempt_headers["content-type"] = "application/json"
             attempt_headers["user-agent"] = f"uncommon-route/{VERSION}"
+            if is_virtual and not attempt_provider_entry:
+                attempt_headers[_RECURSION_GUARD_HEADER] = _recursion_guard_header_value(recursion_guard_secret)
+                if requested_model:
+                    attempt_headers[_ORIGINAL_MODEL_HEADER] = requested_model
 
             resolved_model = model_name
             if not attempt_provider_entry:
@@ -3250,7 +3315,9 @@ def create_app(
                     attempt_headers["x-api-key"] = attempt_provider_entry.api_key
                 else:
                     attempt_headers["authorization"] = f"Bearer {attempt_provider_entry.api_key}"
-            elif primary_key:
+            elif primary_key and not any(
+                key in attempt_headers for key in ("authorization", "x-api-key", "x-goog-api-key")
+            ):
                 if attempt_native_anthropic_transport:
                     attempt_headers.pop("authorization", None)
                     attempt_headers["x-api-key"] = primary_key

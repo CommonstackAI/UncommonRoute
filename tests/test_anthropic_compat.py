@@ -98,6 +98,32 @@ class TestAnthropicToOpenAIRequest:
         assert out["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
         assert out["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
+    def test_thinking_blocks_are_preserved_in_preview(self) -> None:
+        body = {
+            "model": "m",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Plan it"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "Need to inspect requirements first.",
+                            "signature": "sig_123",
+                        },
+                        {"type": "text", "text": "Let me think."},
+                    ],
+                },
+            ],
+        }
+
+        out = anthropic_to_openai_request(body)
+
+        assert out["messages"][1]["role"] == "assistant"
+        assert out["messages"][1]["content"][0]["type"] == "thinking"
+        assert out["messages"][1]["content"][0]["signature"] == "sig_123"
+
     def test_user_content_blocks(self) -> None:
         body = {
             "model": "m",
@@ -346,6 +372,37 @@ class TestOpenAIToAnthropicRequest:
         assert out["tool_choice"] == {"type": "any"}
         assert any(block["type"] == "tool_use" for block in out["messages"][1]["content"])
         assert out["messages"][2]["content"][0]["type"] == "tool_result"
+
+    def test_openai_request_preserves_thinking_blocks(self) -> None:
+        body = {
+            "model": "claude-sonnet",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Plan it"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "Need to inspect requirements first.",
+                            "signature": "sig_123",
+                        },
+                        {"type": "text", "text": "Let me think."},
+                    ],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{\"city\":\"SF\"}"},
+                    }],
+                },
+            ],
+        }
+
+        out = openai_to_anthropic_request(body)
+
+        assert out["messages"][1]["content"][0]["type"] == "thinking"
+        assert out["messages"][1]["content"][0]["signature"] == "sig_123"
+        assert out["messages"][1]["content"][-1]["type"] == "tool_use"
 
     def test_tool_calls_response(self) -> None:
         oai = {
@@ -1077,6 +1134,83 @@ class TestTransportRouting:
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "env-key-123"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_messages_with_thinking_blocks_force_source_body_reuse_for_native_transport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_native_thinking",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-opus-4-7",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy._can_reuse_native_anthropic_body", lambda **kwargs: False)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "anthropic/claude-opus-4-7",
+                    "max_tokens": 64,
+                    "messages": [
+                        {"role": "user", "content": "Plan it"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "thinking",
+                                    "thinking": "Need to inspect requirements first.",
+                                    "signature": "sig_123",
+                                },
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_01",
+                                    "name": "get_weather",
+                                    "input": {"city": "Hong Kong"},
+                                },
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01",
+                                "content": [{"type": "text", "text": "28C and sunny"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
+            )
+
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][1]["content"][0]["type"] == "thinking"
+            assert body["messages"][1]["content"][0]["signature"] == "sig_123"
         finally:
             asyncio.run(async_client.aclose())
 

@@ -119,7 +119,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1399,6 +1399,24 @@ def _can_reuse_native_anthropic_body(
         if upstream_body.get(key) != source_preview_body.get(key):
             return False
     return True
+
+
+def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
+    if not isinstance(body, dict):
+        return False
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}:
+                return True
+    return False
 
 
 def _reuse_anthropic_source_body(
@@ -3173,6 +3191,7 @@ def create_app(
             )
             attempt_native_anthropic_transport = attempt_transport_decision.native_anthropic_transport
             if attempt_native_anthropic_transport:
+                source_has_thinking = _contains_anthropic_thinking_blocks(source_body)
                 target_base = attempt_provider_entry.base_url if attempt_provider_entry and attempt_provider_entry.base_url else upstream
                 target_base = _anthropic_transport_base(
                     target_base,
@@ -3188,9 +3207,12 @@ def create_app(
                 if (
                     api_format == "anthropic"
                     and source_body is not None
-                    and _can_reuse_native_anthropic_body(
-                        upstream_body=attempt_upstream_body,
-                        source_preview_body=source_preview_body,
+                    and (
+                        source_has_thinking
+                        or _can_reuse_native_anthropic_body(
+                            upstream_body=attempt_upstream_body,
+                            source_preview_body=source_preview_body,
+                        )
                     )
                 ):
                     attempt_transport_body = _reuse_anthropic_source_body(

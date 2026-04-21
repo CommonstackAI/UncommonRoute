@@ -13,6 +13,7 @@ Key differences handled:
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import time
 import uuid
@@ -48,6 +49,8 @@ _STATUS_TO_ERROR_TYPE: dict[int, str] = {
     504: "api_error",
 }
 
+_PASSTHROUGH_CONTENT_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+
 
 # ---------------------------------------------------------------------------
 # Request conversion: Anthropic → OpenAI
@@ -72,6 +75,25 @@ def _preserve_text_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             item["cache_control"] = block["cache_control"]
         preserved.append(item)
     return preserved
+
+
+def _preserve_passthrough_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") not in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
+        return None
+    return deepcopy(block)
+
+
+def _should_preserve_block_content(blocks: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(block, dict)
+        and (
+            "cache_control" in block
+            or block.get("type") in _PASSTHROUGH_CONTENT_BLOCK_TYPES
+        )
+        for block in blocks
+    )
 
 
 def anthropic_to_openai_request(body: dict[str, Any]) -> dict[str, Any]:
@@ -257,10 +279,14 @@ def _convert_user_message(
             if "cache_control" in block:
                 item["cache_control"] = block["cache_control"]
             preserved_blocks.append(item)
+        elif btype in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
+            preserved = _preserve_passthrough_block(block)
+            if preserved is not None:
+                preserved_blocks.append(preserved)
         elif btype == "tool_result":
             tool_results.append(block)
 
-    if preserved_blocks and any("cache_control" in block for block in preserved_blocks):
+    if preserved_blocks and _should_preserve_block_content(preserved_blocks):
         messages.append({"role": "user", "content": preserved_blocks})
     elif text_parts:
         messages.append({"role": "user", "content": "\n".join(text_parts)})
@@ -298,6 +324,10 @@ def _convert_assistant_message(
             if "cache_control" in block:
                 item["cache_control"] = block["cache_control"]
             preserved_blocks.append(item)
+        elif btype in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
+            preserved = _preserve_passthrough_block(block)
+            if preserved is not None:
+                preserved_blocks.append(preserved)
         elif btype == "tool_use":
             tool_calls.append({
                 "id": block.get("id", ""),
@@ -310,7 +340,11 @@ def _convert_assistant_message(
 
     assistant_msg: dict[str, Any] = {
         "role": "assistant",
-        "content": preserved_blocks if preserved_blocks and any("cache_control" in block for block in preserved_blocks) else ("\n".join(text_parts) if text_parts else None),
+        "content": (
+            preserved_blocks
+            if preserved_blocks and _should_preserve_block_content(preserved_blocks)
+            else ("\n".join(text_parts) if text_parts else None)
+        ),
     }
     if tool_calls:
         assistant_msg["tool_calls"] = tool_calls
@@ -362,6 +396,8 @@ def _openai_content_to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
                 if "cache_control" in item:
                     block["cache_control"] = item["cache_control"]
                 blocks.append(block)
+            elif item_type in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
+                blocks.append(deepcopy(item))
             elif item_type == "tool_result":
                 blocks.append(item)
         return blocks or [{"type": "text", "text": ""}]

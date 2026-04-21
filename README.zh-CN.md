@@ -37,8 +37,36 @@ UncommonRoute 自动选最便宜、又能完成任务的模型。
 ### 1. 安装
 
 ```bash
-pip install uncommon-route
+pipx install uncommon-route
 ```
+
+对大多数 CLI 用户来说，`pipx` 是更好的默认方案：它会把 UncommonRoute 安装到独立环境里，不污染系统 Python，卸载也更干净。
+
+如果你还没有安装 `pipx`，优先使用系统包管理器安装会更稳妥，比如 macOS 上用 `brew install pipx`，较新的 Ubuntu 用 `sudo apt install pipx`，Fedora 用 `sudo dnf install pipx`，然后执行 `pipx ensurepath`。
+
+如果系统里没有现成的 `pipx` 包，再参考 [pipx 官方安装文档](https://pipx.pypa.io/stable/installation/) 或直接运行：
+
+```bash
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+```
+
+如果你本来就在虚拟环境里工作，用 `pip` 也完全可以：
+
+```bash
+python3 -m pip install uncommon-route
+```
+
+<details>
+<summary><strong>安装排障：什么时候用 pip，什么时候用 pipx</strong></summary>
+
+- 如果你是在安装一个平时直接在终端里用的 CLI 工具，优先用 `pipx install uncommon-route`。
+- 如果你已经在某个项目的虚拟环境里，直接在那个环境里运行 `python -m pip install uncommon-route`。
+- 如果你不确定 `pip` 指向哪个 Python，优先写成 `python3 -m pip ...`，这样不会装到错误的解释器里。
+- 如果你的系统 Python 报了 “externally managed environment” 之类的错误，不要强行往系统环境里装，改用 `pipx` 或虚拟环境。
+- 如果你必须绑定某个 Python 版本，`pipx` 也可以直接指定，比如：`pipx install --python python3.12 uncommon-route`。
+
+</details>
 
 ### 2. 运行引导式配置
 
@@ -187,6 +215,32 @@ uncommon-route support request <request_id>
 ```
 
 诊断包会包含最近请求 trace、最近错误、统计摘要、provider / 配置快照，以及脱敏后的本地状态。默认只写到你的本机，只有你主动分享时才会离开电脑。
+
+---
+
+## 停用与卸载
+
+停止代理服务：
+
+- 前台运行时：在运行 `uncommon-route serve` 的终端里按 `Ctrl+C`
+- 后台 daemon：运行 `uncommon-route stop`
+- 查看后台日志：运行 `uncommon-route logs --follow`
+
+如果你不想让客户端继续走 UncommonRoute，把 `uncommon-route init` 写进 shell rc 的那段配置删掉或注释掉即可。这个文件通常是 `~/.zshrc`、`~/.bashrc` 或 `~/.config/fish/config.fish`。改完后重开终端；如果只想让当前 shell 立刻失效，也可以直接执行：
+
+```bash
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+```
+
+卸载包本身：
+
+```bash
+pipx uninstall uncommon-route
+# 如果你是用 pip 装到某个特定环境里的：
+python3 -m pip uninstall uncommon-route
+```
+
+如果你还想把本地状态一起删掉，再移除 `~/.uncommon-route/` 即可。这个目录里包含保存的连接信息、provider key、日志、trace 和诊断包。
 
 ---
 

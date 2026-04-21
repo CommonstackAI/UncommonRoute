@@ -37,8 +37,36 @@ UncommonRoute picks the cheapest model that still gets the job done — automati
 ### 1. Install
 
 ```bash
-pip install uncommon-route
+pipx install uncommon-route
 ```
+
+`pipx` is the best default for most CLI users: it installs UncommonRoute into its own isolated environment, keeps your system Python clean, and gives you a clean uninstall path.
+
+If you do not have `pipx` yet, prefer your OS package manager when it is available (`brew install pipx` on macOS, `sudo apt install pipx` on recent Ubuntu, `sudo dnf install pipx` on Fedora), then run `pipx ensurepath`.
+
+If that is not available, see the [pipx installation guide](https://pipx.pypa.io/stable/installation/) or install it with:
+
+```bash
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+```
+
+If you already work inside a virtual environment, `pip` is still fine:
+
+```bash
+python3 -m pip install uncommon-route
+```
+
+<details>
+<summary><strong>Install troubleshooting: pip vs. pipx</strong></summary>
+
+- If you are installing a command-line app for everyday use, prefer `pipx install uncommon-route`.
+- If you are already inside a project virtual environment, use `python -m pip install uncommon-route` inside that environment.
+- Prefer `python3 -m pip ...` over bare `pip ...` when you are unsure which Python interpreter `pip` points at.
+- If your OS Python reports an "externally managed environment" error, use `pipx` or a virtual environment instead of forcing a system-wide install.
+- If you need a specific interpreter, `pipx` can target it directly, for example: `pipx install --python python3.12 uncommon-route`.
+
+</details>
 
 ### 2. Run the guided setup
 
@@ -125,7 +153,7 @@ Every request is analyzed by three independent signals, then routed to the cheap
 | **Embedding** | Semantic similarity to known task patterns (bge-small) | ~20ms |
 | **Structural** | Text complexity features (shadow mode) | <1ms |
 
-End-to-end `route()` overhead on a warm process is **~20–25ms** (dominated by the embedding signal). Cold start is a few hundred ms for the first request. GPU or a cached embedding path can bring this under 5ms; benchmark with `scripts/bench_overhead.py`.
+End-to-end `route()` overhead on a warm process is **~20–25ms** (dominated by the embedding signal). Cold start is a few hundred ms for the first request. GPU or a cached embedding path can bring this under 5ms.
 
 Signals vote. The ensemble picks the tier. The router selects the cheapest model in that tier. If uncertain, it leans conservative — better to spend a little more than to fail the task.
 
@@ -189,6 +217,32 @@ uncommon-route support request <request_id>
 ```
 
 The bundle includes recent request traces, recent errors, stats summaries, provider/config snapshots, and redacted local state. It stays on your machine until you choose to share it.
+
+---
+
+## Stopping and Uninstalling
+
+To stop the proxy:
+
+- foreground run: press `Ctrl+C` in the terminal running `uncommon-route serve`
+- background daemon: run `uncommon-route stop`
+- background logs: run `uncommon-route logs --follow`
+
+To stop routing your clients through UncommonRoute, remove or comment out the shell block that `uncommon-route init` added to your shell rc file (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`), then restart your terminal. For the current shell only, you can also unset the proxy variables:
+
+```bash
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+```
+
+To uninstall the package:
+
+```bash
+pipx uninstall uncommon-route
+# or, if you installed it with pip in a specific environment:
+python3 -m pip uninstall uncommon-route
+```
+
+If you also want to remove local state, delete `~/.uncommon-route/`. That directory contains saved connections, provider keys, logs, traces, and support bundles.
 
 ---
 

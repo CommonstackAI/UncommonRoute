@@ -154,11 +154,12 @@ class TestCLI:
         r = run_cli(["route"])
         assert r.returncode != 0
 
-    def test_doctor_local_upstream_without_key(self) -> None:
-        env = dict(os.environ)
-        env["UNCOMMON_ROUTE_UPSTREAM"] = "http://127.0.0.1:11434/v1"
-        env.pop("UNCOMMON_ROUTE_API_KEY", None)
-        env.pop("COMMONSTACK_API_KEY", None)
+    def test_doctor_local_upstream_without_key(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "UNCOMMON_ROUTE_UPSTREAM": "http://127.0.0.1:11434/v1",
+        }
 
         r = run_cli(["doctor"], env=env)
 
@@ -214,6 +215,25 @@ class TestCLI:
         rc_contents = rc_path.read_text()
         assert "OPENAI_BASE_URL" in rc_contents
         assert "OPENAI_API_KEY" in rc_contents
+
+    def test_init_commonstack_writes_claude_code_auth_token_block(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "SHELL": "/bin/zsh",
+        }
+        r = run_cli(
+            ["init"],
+            env=env,
+            input_text="1\n\ncsk-test-key\n1\ny\nn\n",
+        )
+
+        assert r.returncode == 0
+        rc_path = tmp_path / ".zshrc"
+        rc_contents = rc_path.read_text()
+        assert 'ANTHROPIC_BASE_URL="http://localhost:8403"' in rc_contents
+        assert 'ANTHROPIC_AUTH_TOKEN="not-needed"' in rc_contents
+        assert 'ANTHROPIC_API_KEY="not-needed"' not in rc_contents
 
     def test_init_byok_writes_provider_config(self, tmp_path: Path) -> None:
         env = {

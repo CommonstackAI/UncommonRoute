@@ -91,7 +91,7 @@ uncommon-route doctor
 
 | Client | Change |
 |---|---|
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` and `export ANTHROPIC_AUTH_TOKEN="not-needed"` |
 | Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
 | OpenClaw | Plugin — see [openclaw.ai](https://openclaw.ai) |
 
@@ -231,7 +231,7 @@ To stop the proxy:
 To stop routing your clients through UncommonRoute, remove or comment out the shell block that `uncommon-route init` added to your shell rc file (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`), then restart your terminal. For the current shell only, you can also unset the proxy variables:
 
 ```bash
-unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
 ```
 
 To uninstall the package:

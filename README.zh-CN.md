@@ -91,7 +91,7 @@ uncommon-route doctor
 
 | 客户端 | 改动 |
 |---|---|
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` |
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` 和 `export ANTHROPIC_AUTH_TOKEN="not-needed"` |
 | Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
 | OpenClaw | 插件接入——详见 [openclaw.ai](https://openclaw.ai) |
 
@@ -229,7 +229,7 @@ uncommon-route support request <request_id>
 如果你不想让客户端继续走 UncommonRoute，把 `uncommon-route init` 写进 shell rc 的那段配置删掉或注释掉即可。这个文件通常是 `~/.zshrc`、`~/.bashrc` 或 `~/.config/fish/config.fish`。改完后重开终端；如果只想让当前 shell 立刻失效，也可以直接执行：
 
 ```bash
-unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
 ```
 
 卸载包本身：

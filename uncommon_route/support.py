@@ -46,7 +46,7 @@ def _package_version() -> str:
 
         return version("uncommon-route")
     except Exception:
-        return "0.7.0"
+        return "0.7.1"
 
 
 def _feedback_buffer_summary(root: Path) -> dict[str, Any]:

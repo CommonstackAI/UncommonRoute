@@ -38,7 +38,7 @@ from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 _DATA_DIR = data_dir()
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"
@@ -288,7 +288,7 @@ def _render_client_exports(client: str, *, port: int) -> list[str]:
     if client == "claude-code":
         exports.extend([
             ("ANTHROPIC_BASE_URL", f"http://localhost:{port}"),
-            ("ANTHROPIC_API_KEY", "not-needed"),
+            ("ANTHROPIC_AUTH_TOKEN", "not-needed"),
         ])
     elif client in {"codex", "openai"}:
         exports.extend([
@@ -1481,7 +1481,7 @@ def _setup_claude_code(args: list[str]) -> None:
 
     # --- Claude Code → UncommonRoute ---
     export ANTHROPIC_BASE_URL="http://localhost:{port}"
-    export ANTHROPIC_API_KEY="not-needed"
+    export ANTHROPIC_AUTH_TOKEN="not-needed"
 
   Then:
 
@@ -1494,7 +1494,7 @@ def _setup_claude_code(args: list[str]) -> None:
     Claude Code  --POST /v1/messages-->  UncommonRoute  --best model-->  Upstream API
                                          (smart routing)
 
-    - Auth is managed by the proxy. Claude Code does not need a real API key.
+    - Auth is managed by the proxy. Claude Code does not need a real Anthropic key.
     - All requests are smart-routed to the best model automatically.
     - Responses are converted back to Anthropic format transparently.
 """)

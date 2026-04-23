@@ -38,7 +38,7 @@ from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 _DATA_DIR = data_dir()
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"
@@ -281,22 +281,26 @@ def _detect_rc_path() -> tuple[str, Path]:
 
 
 def _render_client_exports(client: str, *, port: int) -> list[str]:
-    exports: list[tuple[str, str]] = []
+    exports: list[str] = []
     if port != 8403:
-        exports.append(("UNCOMMON_ROUTE_PORT", str(port)))
+        exports.append(f"export UNCOMMON_ROUTE_PORT={shell_quote(str(port))}")
 
     if client == "claude-code":
         exports.extend([
-            ("ANTHROPIC_BASE_URL", f"http://localhost:{port}"),
-            ("ANTHROPIC_AUTH_TOKEN", "not-needed"),
+            f"export ANTHROPIC_BASE_URL={shell_quote(f'http://localhost:{port}')}",
+            f"export ANTHROPIC_AUTH_TOKEN={shell_quote('not-needed')}",
+            'export NO_PROXY="localhost,127.0.0.1,::1${NO_PROXY:+,$NO_PROXY}"',
+            'export no_proxy="$NO_PROXY"',
         ])
     elif client in {"codex", "openai"}:
         exports.extend([
-            ("OPENAI_BASE_URL", f"http://localhost:{port}/v1"),
-            ("OPENAI_API_KEY", "not-needed"),
+            f"export OPENAI_BASE_URL={shell_quote(f'http://localhost:{port}/v1')}",
+            f"export OPENAI_API_KEY={shell_quote('not-needed')}",
+            'export NO_PROXY="localhost,127.0.0.1,::1${NO_PROXY:+,$NO_PROXY}"',
+            'export no_proxy="$NO_PROXY"',
         ])
 
-    return [f"export {name}={shell_quote(value)}" for name, value in exports]
+    return exports
 
 
 def _start_background_proxy(
@@ -624,6 +628,35 @@ def _cmd_doctor(args: list[str]) -> None:
         host = (urlparse(url).hostname or "").lower()
         return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
+    def _local_proxy_no_proxy_warning() -> str | None:
+        local_targets = [
+            os.environ.get("ANTHROPIC_BASE_URL", ""),
+            os.environ.get("OPENAI_BASE_URL", ""),
+        ]
+        if upstream:
+            local_targets.append(upstream)
+        if not any(target and _upstream_is_local(target) for target in local_targets):
+            return None
+
+        proxy_values = [
+            os.environ.get("http_proxy", ""),
+            os.environ.get("HTTP_PROXY", ""),
+            os.environ.get("https_proxy", ""),
+            os.environ.get("HTTPS_PROXY", ""),
+        ]
+        if not any(proxy_values):
+            return None
+
+        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+        tokens = {item.strip().lower() for item in no_proxy.split(",") if item.strip()}
+        required = {"localhost", "127.0.0.1", "::1"}
+        missing = sorted(required - tokens)
+        if not missing:
+            return None
+
+        missing_text = ", ".join(missing)
+        return f"proxy env is set; add NO_PROXY for local proxy access ({missing_text})"
+
     api_key = connection.api_key
     providers = load_providers()
     has_byok = bool(providers.providers)
@@ -699,6 +732,10 @@ def _cmd_doctor(args: list[str]) -> None:
         checks.append(("Claude Code", "ok", f"ANTHROPIC_BASE_URL={anth_base}"))
     else:
         checks.append(("Claude Code", "warn", "not configured (optional — run: uncommon-route init or uncommon-route setup claude-code)"))
+
+    no_proxy_warning = _local_proxy_no_proxy_warning()
+    if no_proxy_warning:
+        checks.append(("Proxy env", "warn", no_proxy_warning))
 
     # Daemon status
     if _PID_FILE.exists():
@@ -1482,6 +1519,8 @@ def _setup_claude_code(args: list[str]) -> None:
     # --- Claude Code → UncommonRoute ---
     export ANTHROPIC_BASE_URL="http://localhost:{port}"
     export ANTHROPIC_AUTH_TOKEN="not-needed"
+    export NO_PROXY="localhost,127.0.0.1,::1${{NO_PROXY:+,$NO_PROXY}}"
+    export no_proxy="$NO_PROXY"
 
   Then:
 

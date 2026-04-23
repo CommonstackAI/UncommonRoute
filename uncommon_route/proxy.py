@@ -119,7 +119,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1129,7 +1129,51 @@ def _apply_provider_cache_plan(
         return CacheRequestPlan(family="anthropic", mode="stable-prefix")
     if family == "deepseek":
         return CacheRequestPlan(family="deepseek", mode="stable-prefix")
+    if family == "google":
+        _strip_openai_cache_hints_for_google(body)
+        return CacheRequestPlan(family="google", mode="cache-bypass")
     return CacheRequestPlan(family=family)
+
+
+def _strip_openai_cache_hints_for_google(body: dict[str, Any]) -> None:
+    """Remove Anthropic-derived cache hints that Gemini/OpenAI transport cannot accept."""
+    for tool in body.get("tools", []) or []:
+        if isinstance(tool, dict):
+            tool.pop("cache_control", None)
+
+    for message in body.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        flattened_text_parts: list[str] = []
+        normalized_parts: list[dict[str, Any]] = []
+        only_text_parts = True
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            normalized.pop("cache_control", None)
+            item_type = normalized.get("type")
+            if item_type in {"text", "input_text"}:
+                flattened_text_parts.append(str(normalized.get("text", "")))
+            else:
+                only_text_parts = False
+                normalized_parts.append(normalized)
+
+        if only_text_parts:
+            message["content"] = "\n".join(part for part in flattened_text_parts if part)
+            continue
+
+        if flattened_text_parts:
+            normalized_parts.insert(0, {
+                "type": "text",
+                "text": "\n".join(part for part in flattened_text_parts if part),
+            })
+        message["content"] = normalized_parts
 
 
 def _anthropic_messages_url(base_url: str) -> str:

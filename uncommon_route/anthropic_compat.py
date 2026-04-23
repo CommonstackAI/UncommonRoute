@@ -726,6 +726,8 @@ class OpenAIToAnthropicStreamConverter:
         self._message_started = False
         self._block_index = -1
         self._block_type: str | None = None
+        self._open_tool_call_index: int | None = None
+        self._tool_call_meta: dict[int, dict[str, str]] = {}
         self._output_tokens = 0
         self._buffer = ""
         self._finished = False
@@ -788,10 +790,13 @@ class OpenAIToAnthropicStreamConverter:
         self._block_index += 1
         self._block_type = btype
         if btype == "text":
+            self._open_tool_call_index = None
             block: dict[str, Any] = {"type": "text", "text": ""}
         elif btype == "tool_use":
+            self._open_tool_call_index = kw.get("tool_index")
             block = {"type": "tool_use", "id": kw.get("id", ""), "name": kw.get("name", ""), "input": {}}
         else:
+            self._open_tool_call_index = None
             block = {"type": btype}
         return self._sse("content_block_start", {
             "type": "content_block_start",
@@ -812,6 +817,7 @@ class OpenAIToAnthropicStreamConverter:
             "index": self._block_index,
         })
         self._block_type = None
+        self._open_tool_call_index = None
         return ev
 
     # -- chunk processing ---------------------------------------------------
@@ -849,15 +855,36 @@ class OpenAIToAnthropicStreamConverter:
 
         # Tool calls
         for tc in delta.get("tool_calls", []):
+            raw_index = tc.get("index", 0)
+            tc_index = int(raw_index) if isinstance(raw_index, int) or str(raw_index).isdigit() else 0
+            meta = self._tool_call_meta.setdefault(tc_index, {
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "name": "",
+            })
+
             tc_id = tc.get("id")
             tc_fn = tc.get("function", {})
             tc_name = tc_fn.get("name")
             tc_args = tc_fn.get("arguments", "")
 
             if tc_id:
+                meta["id"] = tc_id
+            if tc_name:
+                meta["name"] = tc_name
+
+            should_start_tool_block = (
+                self._block_type != "tool_use"
+                or self._open_tool_call_index != tc_index
+            )
+            if should_start_tool_block and (meta["id"] or meta["name"] or tc_args):
                 if self._block_type is not None:
                     events.append(self._stop_block())
-                events.append(self._start_block("tool_use", id=tc_id, name=tc_name or ""))
+                events.append(self._start_block(
+                    "tool_use",
+                    id=meta["id"],
+                    name=meta["name"],
+                    tool_index=tc_index,
+                ))
 
             if tc_args:
                 events.append(self._block_delta({

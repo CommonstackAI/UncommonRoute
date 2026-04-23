@@ -413,6 +413,52 @@ def test_issue6_anthropic_model_resolution():
     # Gateway mode should keep the full provider/model prefix
 
 
+def test_issue6_legacy_model_ids_resolve_to_live_successors():
+    """Legacy internal ids should map onto current upstream successors."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+    from uncommon_route.router.types import ModelCapabilities, ModelPricing
+
+    live_models = [
+        "x-ai/grok-4-1-fast-non-reasoning",
+        "openai/gpt-4.1",
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5.4-mini-2026-03-17",
+        "openai/gpt-5.4-2026-03-05",
+    ]
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in live_models:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4-1-fast-non-reasoning"
+    assert mapper.resolve("openai/gpt-4o") == "openai/gpt-4.1"
+    assert mapper.resolve("openai/gpt-5.2-codex") == "openai/gpt-5.3-codex"
+    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert mapper.resolve("openai/o3") == "openai/gpt-5.4-2026-03-05"
+    assert mapper.resolve("openai/o4-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert not any(
+        model in mapper.unresolved_models()
+        for model in (
+            "xai/grok-4-0709",
+            "openai/gpt-4o",
+            "openai/gpt-5.2-codex",
+            "openai/o1-mini",
+            "openai/o3",
+            "openai/o4-mini",
+        )
+    )
+
+
 # ─── Summary: combined issue reproduction ───
 
 def test_combined_claude_code_session_simulation():

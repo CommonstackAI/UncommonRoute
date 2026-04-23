@@ -191,6 +191,21 @@ class TestCLI:
         assert doctor.returncode == 0
         assert "Primary connection: not set (BYOK mode is available)" in doctor.stdout
 
+    def test_doctor_warns_when_proxy_env_can_break_local_proxy_access(self, tmp_path: Path) -> None:
+        env = {
+            "HOME": str(tmp_path),
+            "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
+            "UNCOMMON_ROUTE_UPSTREAM": "http://127.0.0.1:11434/v1",
+            "ANTHROPIC_BASE_URL": "http://localhost:8403",
+            "http_proxy": "http://127.0.0.1:9",
+            "https_proxy": "http://127.0.0.1:9",
+        }
+
+        r = run_cli(["doctor"], env=env)
+
+        assert r.returncode == 0
+        assert "Proxy env: proxy env is set; add NO_PROXY for local proxy access" in r.stdout
+
     def test_init_commonstack_writes_connection_and_client_shell_block(self, tmp_path: Path) -> None:
         env = {
             "HOME": str(tmp_path),
@@ -233,6 +248,8 @@ class TestCLI:
         rc_contents = rc_path.read_text()
         assert 'ANTHROPIC_BASE_URL="http://localhost:8403"' in rc_contents
         assert 'ANTHROPIC_AUTH_TOKEN="not-needed"' in rc_contents
+        assert 'export NO_PROXY="localhost,127.0.0.1,::1${NO_PROXY:+,$NO_PROXY}"' in rc_contents
+        assert 'export no_proxy="$NO_PROXY"' in rc_contents
         assert 'ANTHROPIC_API_KEY="not-needed"' not in rc_contents
 
     def test_init_byok_writes_provider_config(self, tmp_path: Path) -> None:

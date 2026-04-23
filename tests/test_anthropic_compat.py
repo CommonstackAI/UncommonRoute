@@ -618,6 +618,74 @@ class TestStreamConverter:
         msg_delta = next(e for e in parsed if e["_event"] == "message_delta")
         assert msg_delta["delta"]["stop_reason"] == "tool_use"
 
+    def test_tool_call_stream_without_initial_id_starts_valid_tool_block(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        chunks = [
+            _make_oai_sse({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"name": "search", "arguments": '{"q":'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "function": {"arguments": '"test"}'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+
+        all_events: list[bytes] = []
+        for c in chunks:
+            all_events.extend(converter.feed(c))
+        all_events.extend(converter.finish())
+
+        parsed = _parse_anthropic_events(all_events)
+        first_delta = next(e for e in parsed if e["_event"] == "content_block_delta")
+        first_block_start = next(e for e in parsed if e["_event"] == "content_block_start")
+
+        assert first_block_start["content_block"]["type"] == "tool_use"
+        assert first_block_start["content_block"]["id"]
+        assert first_block_start["content_block"]["name"] == "search"
+        assert first_delta["index"] == first_block_start["index"] == 0
+
+        json_deltas = [
+            e for e in parsed
+            if e["_event"] == "content_block_delta" and e["delta"].get("type") == "input_json_delta"
+        ]
+        joined = "".join(d["delta"]["partial_json"] for d in json_deltas)
+        assert json.loads(joined) == {"q": "test"}
+
+    def test_tool_call_stream_keeps_same_block_when_id_arrives_late(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        chunks = [
+            _make_oai_sse({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"name": "search", "arguments": '{"q":'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "function": {"arguments": '"test"}'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+
+        all_events: list[bytes] = []
+        for c in chunks:
+            all_events.extend(converter.feed(c))
+        all_events.extend(converter.finish())
+
+        parsed = _parse_anthropic_events(all_events)
+        block_starts = [e for e in parsed if e["_event"] == "content_block_start"]
+        block_stops = [e for e in parsed if e["_event"] == "content_block_stop"]
+
+        assert len(block_starts) == 1
+        assert len(block_stops) == 1
+        assert block_starts[0]["content_block"]["type"] == "tool_use"
+
     def test_done_signal(self) -> None:
         converter = OpenAIToAnthropicStreamConverter(model="m")
 
@@ -1752,6 +1820,87 @@ class TestNativeAnthropicTransportForChatCompletions:
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "env-key-123"
             assert headers["anthropic-version"] == "2023-06-01"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
+class TestGeminiCacheBypass:
+    def test_anthropic_cache_hints_are_stripped_for_gemini_openai_transport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_gemini",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "google/gemini-2.5-pro",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "google/gemini-2.5-pro",
+                    "max_tokens": 64,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": "You are a weather assistant.",
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                        },
+                    ],
+                    "tools": [{
+                        "name": "get_weather",
+                        "description": "Get current weather",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                    }],
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "What is the weather in Tokyo?",
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                        }],
+                    }],
+                },
+                headers={"anthropic-version": "2023-06-01", "x-api-key": "not-needed"},
+            )
+
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][0]["content"] == "You are a weather assistant."
+            assert body["messages"][1]["content"] == "What is the weather in Tokyo?"
+            assert "cache_control" not in body["tools"][0]
+            assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
         finally:
             asyncio.run(async_client.aclose())
 

@@ -83,6 +83,25 @@ SEED_ALIASES: dict[str, list[str]] = {
     "google/gemini-2.5-flash-lite": [
         "google/gemini-3.1-flash-lite-preview",
     ],
+    "xai/grok-4-0709": [
+        "x-ai/grok-4-1-fast-non-reasoning",
+    ],
+    "openai/gpt-4o": [
+        "openai/gpt-4.1",
+    ],
+    "openai/gpt-5.2-codex": [
+        "openai/gpt-5.3-codex",
+    ],
+    "openai/o1-mini": [
+        "openai/gpt-5.4-mini-2026-03-17",
+    ],
+    "openai/o3": [
+        "openai/gpt-5.4-2026-03-05",
+        "openai/gpt-5",
+    ],
+    "openai/o4-mini": [
+        "openai/gpt-5.4-mini-2026-03-17",
+    ],
 }
 
 # Backward compat

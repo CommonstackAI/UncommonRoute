@@ -119,7 +119,7 @@ from uncommon_route.responses_compat import (
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1417,6 +1417,58 @@ def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
             if isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}:
                 return True
     return False
+
+
+def _apply_anthropic_thinking_model_lock(
+    *,
+    available_models: list[str],
+    api_format: str,
+    endpoint_name: str,
+    session_id: str | None,
+    source_body: dict[str, Any] | None,
+    trace_store: TraceStore,
+) -> tuple[list[str], str]:
+    if not available_models:
+        return [], ""
+    if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
+        return list(available_models), ""
+    if not session_id or not _contains_anthropic_thinking_blocks(source_body):
+        return list(available_models), ""
+
+    previous_trace = trace_store.latest_for_session(
+        session_id,
+        step_types=("tool-selection", "tool-result-followup", "general"),
+    )
+    if previous_trace is None:
+        return list(available_models), ""
+    if previous_trace.status_code >= 400:
+        return list(available_models), ""
+    if previous_trace.api_format != "anthropic":
+        return list(available_models), ""
+    if previous_trace.transport != "anthropic-messages":
+        return list(available_models), ""
+
+    previous_model = str(previous_trace.model or "").strip()
+    if not previous_model:
+        return list(available_models), ""
+    if previous_model in available_models:
+        note = f"thinking-stickiness={previous_model}(1/{len(available_models)})"
+        return [previous_model], note
+
+    raise RoutingInfeasibleError(
+        RoutingInfeasibility(
+            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
+            message=(
+                "Anthropic thinking follow-ups must stay on the previous model "
+                f"({previous_model}), but that model is not currently available"
+            ),
+            available_model_count=len(available_models),
+            candidate_count=0,
+            constraint_tags=("thinking-signature", "session-continuity"),
+            failed_constraints=("thinking-model-continuity",),
+            missing_capabilities=("previous-thinking-model",),
+        )
+    )
 
 
 def _reuse_anthropic_source_body(
@@ -2751,7 +2803,7 @@ def create_app(
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
-            transport_pool_note = ""
+            route_pool_notes: list[str] = []
             try:
                 route_available_models = _circuit_breaker.filter_available(
                     _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
@@ -2768,6 +2820,18 @@ def create_app(
                     anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
                     providers_config=_providers,
                 )
+                if transport_pool_note:
+                    route_pool_notes.append(transport_pool_note)
+                route_available_models, thinking_lock_note = _apply_anthropic_thinking_model_lock(
+                    available_models=route_available_models,
+                    api_format=api_format,
+                    endpoint_name=endpoint_name,
+                    session_id=session_id,
+                    source_body=source_body,
+                    trace_store=_traces,
+                )
+                if thinking_lock_note:
+                    route_pool_notes.append(thinking_lock_note)
                 decision = route(
                     prompt,
                     system_prompt,
@@ -2886,8 +2950,8 @@ def create_app(
                 )
             reasoning = decision.reasoning
             route_reasoning = decision.reasoning
-            if transport_pool_note:
-                route_reasoning = f"{route_reasoning} | {transport_pool_note}"
+            if route_pool_notes:
+                route_reasoning = f"{route_reasoning} | {' | '.join(route_pool_notes)}"
                 reasoning = route_reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost

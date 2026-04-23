@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
+from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
 from uncommon_route.feedback import (
     FeedbackCollector,
     _adjust_tier,
 )
 from uncommon_route.proxy import create_app
 from uncommon_route.router.classifier import extract_features
+from uncommon_route.router.types import (
+    CapabilityLane,
+    RoutingDecision,
+    RoutingFeatures,
+    RoutingMode,
+    ServedQuality,
+    Tier,
+)
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.stats import InMemoryRouteStatsStorage, RouteStats
 from uncommon_route.traces import InMemoryTraceStorage, TraceStore
@@ -22,6 +33,66 @@ _ADMIN_HEADERS = {"authorization": "Bearer test-admin"}
 
 def _dummy_features() -> dict[str, float]:
     return extract_features("explain quicksort in Python")
+
+
+def _make_feedback_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    feedback: FeedbackCollector | None = None,
+) -> tuple[TestClient, httpx.AsyncClient]:
+    def fake_route(*args, **kwargs) -> RoutingDecision:
+        features = kwargs.get("routing_features") or RoutingFeatures()
+        return RoutingDecision(
+            model="minimax/minimax-m2.5",
+            tier=Tier.SIMPLE,
+            capability_lane=features.capability_lane or CapabilityLane.GENERAL,
+            served_quality=ServedQuality.ECONOMY,
+            served_quality_target=ServedQuality.ECONOMY,
+            served_quality_floor=ServedQuality.ECONOMY,
+            continuity_quality_floor=features.continuity_quality_floor,
+            mode=RoutingMode.AUTO,
+            confidence=0.91,
+            method="pool",
+            reasoning="test feedback route",
+            cost_estimate=0.001,
+            baseline_cost=0.004,
+            savings=0.75,
+            raw_confidence=0.91,
+            complexity=0.2,
+            routing_features=features,
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl_feedback",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "minimax/minimax-m2.5",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+            },
+            headers={"content-type": "application/json"},
+        )
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+    monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+    app = create_app(
+        upstream="http://127.0.0.1:1/fake",
+        spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+        route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
+        feedback=feedback or FeedbackCollector(),
+        trace_store=TraceStore(storage=InMemoryTraceStorage()),
+        connections_store=ConnectionsStore(storage=InMemoryConnectionsStorage()),
+    )
+    return TestClient(app, raise_server_exceptions=False), async_client
 
 
 class TestAdjustTier:
@@ -128,16 +199,14 @@ class TestFeedbackCollector:
 
 
 @pytest.fixture
-def fb_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def fb_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
-    app = create_app(
-        upstream="http://127.0.0.1:1/fake",
-        spend_control=SpendControl(storage=InMemorySpendControlStorage()),
-        route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
-        feedback=FeedbackCollector(),
-        trace_store=TraceStore(storage=InMemoryTraceStorage()),
-    )
-    return TestClient(app, raise_server_exceptions=False)
+    client, async_client = _make_feedback_app(monkeypatch)
+    try:
+        yield client
+    finally:
+        client.close()
+        asyncio.run(async_client.aclose())
 
 
 class TestFeedbackEndpoint:
@@ -211,53 +280,45 @@ class TestFeedbackEndpoint:
         assert trace["feedback_signal"] == "weak"
         assert trace["feedback_to_tier"] != ""
 
-    def test_recent_hides_closed_feedback_rows(self) -> None:
+    def test_recent_hides_closed_feedback_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         feedback = FeedbackCollector()
-        app = create_app(
-            upstream="http://127.0.0.1:1/fake",
-            spend_control=SpendControl(storage=InMemorySpendControlStorage()),
-            route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
-            feedback=feedback,
-            trace_store=TraceStore(storage=InMemoryTraceStorage()),
-        )
-        client = TestClient(app, raise_server_exceptions=False)
+        client, async_client = _make_feedback_app(monkeypatch, feedback=feedback)
+        try:
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+            rid = resp.headers["x-uncommon-route-request-id"]
+            assert feedback.has_pending(rid) is True
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "hello"}],
-        })
-        rid = resp.headers["x-uncommon-route-request-id"]
-        assert feedback.has_pending(rid) is True
+            feedback._buffer.clear()
 
-        feedback._buffer.clear()
+            recent = client.get("/v1/stats/recent").json()
+            assert recent == []
+        finally:
+            client.close()
+            asyncio.run(async_client.aclose())
 
-        recent = client.get("/v1/stats/recent").json()
-        assert recent == []
-
-    def test_stats_reset_clears_pending_feedback(self) -> None:
+    def test_stats_reset_clears_pending_feedback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         feedback = FeedbackCollector()
-        app = create_app(
-            upstream="http://127.0.0.1:1/fake",
-            spend_control=SpendControl(storage=InMemorySpendControlStorage()),
-            route_stats=RouteStats(storage=InMemoryRouteStatsStorage()),
-            feedback=feedback,
-            trace_store=TraceStore(storage=InMemoryTraceStorage()),
-        )
-        client = TestClient(app, raise_server_exceptions=False)
+        client, async_client = _make_feedback_app(monkeypatch, feedback=feedback)
+        try:
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+            rid = resp.headers["x-uncommon-route-request-id"]
+            assert feedback.has_pending(rid) is True
+            assert client.get("/health").json()["feedback"]["pending"] == 1
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "uncommon-route/auto",
-            "messages": [{"role": "user", "content": "hello"}],
-        })
-        rid = resp.headers["x-uncommon-route-request-id"]
-        assert feedback.has_pending(rid) is True
-        assert client.get("/health").json()["feedback"]["pending"] == 1
-
-        reset = client.post("/v1/stats", json={"action": "reset"})
-        assert reset.status_code == 200
-        assert reset.json()["feedback_cleared"] == 1
-        assert client.get("/health").json()["feedback"]["pending"] == 0
-        assert client.get("/v1/stats/recent").json() == []
+            reset = client.post("/v1/stats", json={"action": "reset"})
+            assert reset.status_code == 200
+            assert reset.json()["feedback_cleared"] == 1
+            assert client.get("/health").json()["feedback"]["pending"] == 0
+            assert client.get("/v1/stats/recent").json() == []
+        finally:
+            client.close()
+            asyncio.run(async_client.aclose())
 
     def test_feedback_expired_request(self, fb_client: TestClient) -> None:
         fb = fb_client.post("/v1/feedback", json={
@@ -289,8 +350,9 @@ class TestFeedbackEndpoint:
         ).json()
         assert trace["is_virtual"] is False
         assert trace["mode"] == "passthrough"
-        assert trace["error_code"] != ""
-        assert trace["attempts_payload"][0]["error_code"] == trace["error_code"]
+        assert trace["error_code"] == ""
+        assert trace["attempts_payload"][0]["error_code"] == ""
+        assert trace["attempts_payload"][0]["selected_model"] == "some-other/model"
 
     def test_health_includes_feedback(self, fb_client: TestClient) -> None:
         data = fb_client.get("/health").json()

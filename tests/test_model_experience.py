@@ -226,6 +226,75 @@ def test_route_adapts_to_model_experience() -> None:
         selector._rng.setstate(rng_state)
 
 
+def test_select_from_pool_uses_local_feedback_prior_strength(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "alpha/model": 0.90,
+                "beta/model": 0.70,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+
+    store = ModelExperienceStore(storage=InMemoryModelExperienceStorage(), alpha=0.25)
+    for _ in range(5):
+        store.record_feedback("alpha/model", RoutingMode.AUTO, Tier.SIMPLE, "weak")
+
+    common_kwargs = dict(
+        complexity=0.15,
+        mode=RoutingMode.AUTO,
+        confidence=0.8,
+        reasoning_text="test",
+        available_models=["alpha/model", "beta/model"],
+        estimated_input_tokens=100,
+        max_output_tokens=100,
+        prompt="hello",
+        pricing={
+            "alpha/model": ModelPricing(1.0, 1.0),
+            "beta/model": ModelPricing(1.0, 1.0),
+        },
+        capabilities={
+            "alpha/model": infer_capabilities("alpha/model", ModelPricing(1.0, 1.0), has_explicit_pricing=True),
+            "beta/model": infer_capabilities("beta/model", ModelPricing(1.0, 1.0), has_explicit_pricing=True),
+        },
+        requirements=RequestRequirements(),
+        selection_weights=SelectionWeights(
+            editorial=0.0,
+            cost=0.0,
+            latency=0.0,
+            reliability=0.0,
+            feedback=0.0,
+            cache_affinity=0.0,
+            byok=0.0,
+            free_bias=0.0,
+            local_bias=0.0,
+            reasoning_bias=0.0,
+            quality_alignment=0.0,
+            continuity=0.0,
+        ),
+        model_experience=store,
+    )
+
+    high_prior = select_from_pool(
+        **common_kwargs,
+        bandit_config=BanditConfig(enabled=False, prior_n=20.0),
+    )
+    low_prior = select_from_pool(
+        **common_kwargs,
+        bandit_config=BanditConfig(enabled=False, prior_n=5.0),
+    )
+
+    assert high_prior.model == "alpha/model"
+    assert low_prior.model == "beta/model"
+
+    high_alpha = next(score for score in high_prior.candidate_scores if score.model == "alpha/model")
+    low_alpha = next(score for score in low_prior.candidate_scores if score.model == "alpha/model")
+    assert high_alpha.predicted_quality > 0.70
+    assert low_alpha.predicted_quality < 0.70
+
+
 def test_best_mode_uses_higher_quality_threshold() -> None:
     """BEST mode's higher threshold excludes lower-quality models."""
     pricing = {

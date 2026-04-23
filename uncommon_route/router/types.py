@@ -321,6 +321,7 @@ class BanditConfig:
     enabled: bool = True
     reward_weight: float = 0.12
     exploration_weight: float = 0.18
+    prior_n: float = 5.0
     warmup_pulls: int = 2
     min_samples_for_guardrail: int = 3
     min_reliability: float = 0.25

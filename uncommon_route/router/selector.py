@@ -833,7 +833,7 @@ def select_from_pool(
 
     mu = complexity
     bandit_active = bc.enabled
-    prior_n = 20.0
+    prior_n = max(0.0, float(bc.prior_n))
 
     # Mode controls quality-vs-cost preference:
     #   FAST  → strongly prefer cheap (low cost_sensitivity = quality matters less)

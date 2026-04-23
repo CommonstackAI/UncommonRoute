@@ -10,6 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from uncommon_route.anthropic_compat import (
+    _sanitize_tool_id,
     anthropic_to_openai_response,
     anthropic_to_openai_request,
     AnthropicToOpenAIStreamConverter,
@@ -678,6 +679,74 @@ class TestAnthropicToOpenAIStreamConverter:
         usage_chunk = next(event for event in parsed if event.get("choices") == [])
         assert usage_chunk["usage"]["prompt_tokens"] == 141
         assert usage_chunk["usage"]["completion_tokens"] == 7
+
+
+# =========================================================================
+# Tool ID sanitization (issue #12)
+# =========================================================================
+
+class TestToolIdSanitization:
+    def test_valid_id_unchanged(self) -> None:
+        assert _sanitize_tool_id("toolu_01ABC123") == "toolu_01ABC123"
+        assert _sanitize_tool_id("call_abc-XYZ_99") == "call_abc-XYZ_99"
+
+    def test_dots_replaced(self) -> None:
+        assert _sanitize_tool_id("call_abc.def.123") == "call_abc_def_123"
+
+    def test_colons_replaced(self) -> None:
+        assert _sanitize_tool_id("tool:use:id") == "tool_use_id"
+
+    def test_empty_generates_toolu_prefix(self) -> None:
+        result = _sanitize_tool_id("")
+        assert result.startswith("toolu_")
+        assert len(result) > 6
+
+    def test_deterministic(self) -> None:
+        assert _sanitize_tool_id("a.b:c") == _sanitize_tool_id("a.b:c")
+
+    def test_roundtrip_openai_response_sanitizes(self) -> None:
+        openai_resp = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [{"id": "call_abc.def:123", "type": "function",
+                                "function": {"name": "read", "arguments": "{}"}}],
+            }, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        anthropic_resp = openai_to_anthropic_response(openai_resp, "test-model")
+        tool_block = next(b for b in anthropic_resp["content"] if b["type"] == "tool_use")
+        assert tool_block["id"] == "call_abc_def_123"
+
+    def test_roundtrip_openai_request_sanitizes(self) -> None:
+        openai_req = {
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "call_x.y:z", "type": "function",
+                                 "function": {"name": "bash", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_x.y:z", "content": "done"},
+            ],
+        }
+        anthropic_req = openai_to_anthropic_request(openai_req)
+        assistant_msg = anthropic_req["messages"][1]
+        tool_use = next(b for b in assistant_msg["content"] if b["type"] == "tool_use")
+        assert tool_use["id"] == "call_x_y_z"
+
+    def test_streaming_converter_sanitizes(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter("test-model")
+        chunk = json.dumps({
+            "choices": [{"delta": {"tool_calls": [
+                {"id": "call_a.b:c", "type": "function",
+                 "function": {"name": "read", "arguments": ""}}
+            ]}, "finish_reason": None}],
+        }).encode()
+        events = converter.feed(b"data: " + chunk + b"\n\n")
+        event_data = [json.loads(e.split(b"\n")[1].removeprefix(b"data: ")) for e in events if b"content_block_start" in e]
+        assert len(event_data) == 1
+        assert event_data[0]["content_block"]["id"] == "call_a_b_c"
 
 
 # =========================================================================

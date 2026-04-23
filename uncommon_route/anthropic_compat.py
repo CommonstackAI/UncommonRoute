@@ -15,9 +15,21 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 import time
 import uuid
 from typing import Any
+
+_VALID_TOOL_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _sanitize_tool_id(tid: str) -> str:
+    """Ensure a tool ID conforms to Anthropic's ``^[a-zA-Z0-9_-]+$`` pattern."""
+    if tid and _VALID_TOOL_ID_RE.match(tid):
+        return tid
+    if not tid:
+        return f"toolu_{uuid.uuid4().hex[:24]}"
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", tid)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +212,7 @@ def openai_to_anthropic_request(body: dict[str, Any]) -> dict[str, Any]:
                     input_data = {}
                 blocks.append({
                     "type": "tool_use",
-                    "id": tc.get("id", ""),
+                    "id": _sanitize_tool_id(tc.get("id", "")),
                     "name": fn.get("name", ""),
                     "input": input_data,
                 })
@@ -490,7 +502,7 @@ def openai_to_anthropic_response(
             input_data = {}
         content_blocks.append({
             "type": "tool_use",
-            "id": tc.get("id", ""),
+            "id": _sanitize_tool_id(tc.get("id", "")),
             "name": fn.get("name", ""),
             "input": input_data,
         })
@@ -857,7 +869,7 @@ class OpenAIToAnthropicStreamConverter:
             if tc_id:
                 if self._block_type is not None:
                     events.append(self._stop_block())
-                events.append(self._start_block("tool_use", id=tc_id, name=tc_name or ""))
+                events.append(self._start_block("tool_use", id=_sanitize_tool_id(tc_id or ""), name=tc_name or ""))
 
             if tc_args:
                 events.append(self._block_delta({

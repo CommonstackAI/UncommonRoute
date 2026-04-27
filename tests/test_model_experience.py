@@ -19,7 +19,7 @@ from uncommon_route.model_experience import (
     InMemoryModelExperienceStorage,
     ModelExperienceStore,
 )
-from uncommon_route.model_map import infer_capabilities
+from uncommon_route.model_map import _parse_upstream_pricing, infer_capabilities
 from uncommon_route.router.config import get_selection_weights
 from uncommon_route.router.selector import select_from_pool
 
@@ -59,6 +59,42 @@ def test_infer_capabilities_marks_only_zero_priced_models_as_free() -> None:
         has_explicit_pricing=False,
     )
     assert unknown_cost.free is False
+
+
+def test_infer_capabilities_marks_gpt5_family_as_reasoning() -> None:
+    capabilities = infer_capabilities(
+        "openai/gpt-5.2",
+        ModelPricing(1.75, 14.0),
+        has_explicit_pricing=True,
+    )
+
+    assert capabilities.reasoning is True
+
+
+def test_invalid_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({"prompt": "not-a-number", "completion": "0"})
+    capabilities = infer_capabilities(
+        "provider/ambiguous-model",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert capabilities.free is False
+
+
+def test_incomplete_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({"prompt": "0"})
+    capabilities = infer_capabilities(
+        "provider/incomplete-model",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert capabilities.free is False
 
 
 def test_model_experience_updates_from_observation_and_feedback() -> None:
@@ -293,6 +329,62 @@ def test_select_from_pool_uses_local_feedback_prior_strength(monkeypatch) -> Non
     low_alpha = next(score for score in low_prior.candidate_scores if score.model == "alpha/model")
     assert high_alpha.predicted_quality > 0.70
     assert low_alpha.predicted_quality < 0.70
+
+
+def test_select_from_pool_respects_bandit_enabled_tiers(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "alpha/model": 0.90,
+                "beta/model": 0.80,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    pricing = {
+        "alpha/model": ModelPricing(1.0, 1.0),
+        "beta/model": ModelPricing(1.0, 1.0),
+    }
+    capabilities = {
+        model: infer_capabilities(model, model_pricing, has_explicit_pricing=True)
+        for model, model_pricing in pricing.items()
+    }
+
+    decision = select_from_pool(
+        complexity=0.90,
+        mode=RoutingMode.AUTO,
+        confidence=0.9,
+        reasoning_text="test",
+        available_models=list(pricing),
+        estimated_input_tokens=1_000,
+        max_output_tokens=100,
+        prompt="Design a distributed system.",
+        pricing=pricing,
+        capabilities=capabilities,
+        requirements=RequestRequirements(),
+        selection_weights=SelectionWeights(
+            editorial=0.0,
+            cost=0.0,
+            latency=0.0,
+            reliability=0.0,
+            feedback=0.0,
+            cache_affinity=0.0,
+            byok=0.0,
+            free_bias=0.0,
+            local_bias=0.0,
+            reasoning_bias=0.0,
+            quality_alignment=0.0,
+            continuity=0.0,
+        ),
+        bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.SIMPLE,)),
+    )
+
+    alpha = next(score for score in decision.candidate_scores if score.model == "alpha/model")
+    beta = next(score for score in decision.candidate_scores if score.model == "beta/model")
+    assert decision.tier is Tier.COMPLEX
+    assert alpha.predicted_quality == 0.90
+    assert beta.predicted_quality == 0.80
 
 
 def test_best_mode_uses_higher_quality_threshold() -> None:

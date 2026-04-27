@@ -167,7 +167,7 @@ def model_served_quality(
             return ServedQuality.ECONOMY
         if _contains_any(core, ("gpt-5", "gpt-4.1", "gpt-oss", "o3", "o4")):
             return ServedQuality.BALANCED
-    if provider == "moonshotai":
+    if provider in {"moonshot", "moonshotai"}:
         if "thinking" in core:
             return ServedQuality.PREMIUM
         return ServedQuality.BALANCED
@@ -196,6 +196,23 @@ def quality_alignment_score(
     if delta == -1:
         return 0.18
     return 0.0
+
+
+def scoring_served_quality_target(
+    mode: RoutingMode,
+    tier: Tier,
+    target: ServedQuality,
+    floor: ServedQuality,
+) -> ServedQuality:
+    """Return the quality level used for score alignment.
+
+    AUTO+COMPLEX should mean "balanced or better, prefer quality when it is
+    worth the cost", not "always give premium models a scoring bonus".
+    BEST keeps the stricter premium target.
+    """
+    if mode is RoutingMode.AUTO and tier is Tier.COMPLEX:
+        return floor
+    return target
 
 
 def continuity_alignment_score(
@@ -228,6 +245,7 @@ def apply_quality_guards(
     lane: CapabilityLane,
     capabilities: dict[str, ModelCapabilities],
     continuity_floor: ServedQuality | None = None,
+    step_risk: str = "normal",
 ) -> QualityGuardResult:
     quality_by_model = {
         model: model_served_quality(model, lane, capabilities.get(model))
@@ -235,28 +253,51 @@ def apply_quality_guards(
     }
     target = target_served_quality(mode, tier)
     floor = minimum_served_quality(mode, tier)
-    effective_floor = stronger_quality(floor, continuity_floor) or floor
-    preferred_threshold = stronger_quality(target, continuity_floor) or target
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
+    risk_floor = (
+        ServedQuality.BALANCED
+        if normalized_step_risk == "high"
+        else None
+    )
+    hard_continuity_floor = continuity_floor if mode is RoutingMode.BEST else None
+    effective_floor = stronger_quality(
+        stronger_quality(floor, risk_floor),
+        hard_continuity_floor,
+    ) or floor
+    preferred_threshold = (
+        stronger_quality(stronger_quality(target, effective_floor), hard_continuity_floor)
+        or target
+    )
     notes: list[str] = [
         f"lane={lane.value}",
         f"served-quality-target={target.value}",
         f"served-quality-floor={effective_floor.value}",
     ]
+    if normalized_step_risk != "normal":
+        notes.append(f"step-risk={normalized_step_risk}")
+    if risk_floor is not None:
+        notes.append(f"step-risk-floor={risk_floor.value}")
+    if continuity_floor is not None and hard_continuity_floor is None:
+        notes.append(f"continuity-soft={continuity_floor.value}")
+    prefer_floor_pool = (
+        mode is RoutingMode.AUTO
+        and normalized_step_risk != "high"
+    )
 
     preferred = [
         model for model in candidates
         if quality_rank(quality_by_model[model]) >= quality_rank(preferred_threshold)
     ]
-    if preferred:
-        if continuity_floor is not None and quality_rank(preferred_threshold) > quality_rank(target):
-            notes.append(f"continuity-floor={continuity_floor.value}")
+    if preferred and not prefer_floor_pool:
+        if hard_continuity_floor is not None and quality_rank(preferred_threshold) > quality_rank(target):
+            notes.append(f"continuity-floor={hard_continuity_floor.value}")
         notes.append(f"served-quality>=target({len(preferred)}/{len(candidates)})")
         return QualityGuardResult(
             allowed_models=preferred,
             quality_by_model=quality_by_model,
             target=target,
             floor=effective_floor,
-            continuity_floor=continuity_floor,
+            continuity_floor=hard_continuity_floor,
             notes=tuple(notes),
         )
 
@@ -265,26 +306,28 @@ def apply_quality_guards(
         if quality_rank(quality_by_model[model]) >= quality_rank(effective_floor)
     ]
     if floor_candidates:
-        if continuity_floor is not None:
-            notes.append(f"continuity-floor-unavailable={continuity_floor.value}")
+        if hard_continuity_floor is not None:
+            notes.append(f"continuity-floor-unavailable={hard_continuity_floor.value}")
+        if prefer_floor_pool and preferred:
+            notes.append(f"served-quality-target-preferred={target.value}({len(preferred)}/{len(candidates)})")
         notes.append(f"served-quality>=floor({len(floor_candidates)}/{len(candidates)})")
         return QualityGuardResult(
             allowed_models=floor_candidates,
             quality_by_model=quality_by_model,
             target=target,
             floor=effective_floor,
-            continuity_floor=continuity_floor,
+            continuity_floor=hard_continuity_floor,
             notes=tuple(notes),
         )
 
-    if continuity_floor is not None:
-        notes.append(f"continuity-floor-unavailable={continuity_floor.value}")
+    if hard_continuity_floor is not None:
+        notes.append(f"continuity-floor-unavailable={hard_continuity_floor.value}")
     notes.append("served-quality-floor-unavailable")
     return QualityGuardResult(
         allowed_models=list(candidates),
         quality_by_model=quality_by_model,
         target=target,
         floor=effective_floor,
-        continuity_floor=continuity_floor,
+        continuity_floor=hard_continuity_floor,
         notes=tuple(notes),
     )

@@ -1309,7 +1309,7 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_lock_to_previous_session_model(
+    def test_virtual_messages_with_thinking_blocks_do_not_lock_to_previous_session_model(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1429,28 +1429,64 @@ class TestTransportRouting:
             )
 
             assert resp.status_code == 200
-            assert routed["available_models"] == ["minimax/minimax-m2.7"]
+            assert set(routed["available_models"]) == {
+                "minimax/minimax-m2.7",
+                "anthropic/claude-opus-4-5",
+            }
             assert captured["url"] == "https://api.commonstack.ai/v1/messages"
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-stickiness=minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert "thinking-context=previous:minimax/minimax-m2.7" in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_fail_closed_when_previous_model_unavailable(
+    def test_virtual_messages_with_thinking_blocks_continue_when_previous_model_unavailable(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         called = {"route": False, "upstream": False}
+        routed: dict[str, object] = {}
 
         def fake_route(*args, **kwargs):
             called["route"] = True
-            raise AssertionError("route() should not run when thinking continuity cannot be satisfied")
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-opus-4-5",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.81,
+                method="pool",
+                reasoning="rerouted despite previous thinking model being unavailable",
+                cost_estimate=0.004,
+                baseline_cost=0.02,
+                savings=0.80,
+                raw_confidence=0.81,
+                complexity=0.4,
+                routing_features=kwargs["routing_features"],
+            )
 
         def handler(request: httpx.Request) -> httpx.Response:
             called["upstream"] = True
-            raise AssertionError("Upstream request should not run when thinking continuity fails")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_thinking_rerouted",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-opus-4-5",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
 
         traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
         traces.record(RequestTrace(
@@ -1471,6 +1507,7 @@ class TestTransportRouting:
         async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
         monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
 
         try:
             mapper = _build_seed_mapper("anthropic/claude-opus-4-5")
@@ -1520,14 +1557,14 @@ class TestTransportRouting:
                 },
             )
 
-            assert resp.status_code == 400
-            payload = resp.json()
-            assert payload["error"]["code"] == "routing_constraints_unmet"
-            assert "must stay on the previous model" in payload["error"]["message"].lower()
-            assert payload["error"]["details"]["failed_constraints"] == ["thinking-model-continuity"]
-            assert payload["error"]["details"]["missing_capabilities"] == ["previous-thinking-model"]
-            assert called["route"] is False
-            assert called["upstream"] is False
+            assert resp.status_code == 200
+            assert routed["available_models"] == ["anthropic/claude-opus-4-5"]
+            assert called["route"] is True
+            assert called["upstream"] is True
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=previous-unavailable:minimax/minimax-m2.7" in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 

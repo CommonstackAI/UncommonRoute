@@ -329,6 +329,7 @@ def route(
     available_models: list[str] | None = None,
     model_capabilities: dict[str, ModelCapabilities] | None = None,
     messages: list[dict[str, Any]] | None = None,
+    record_lifecycle: bool = True,
     # Legacy parameters — accepted but ignored
     tier_cap: Tier | None = None,
     tier_floor: Tier | None = None,
@@ -411,25 +412,26 @@ def route(
         calibration_applied_tags=confidence_estimate.applied_adjustments,
     )
 
-    # ─── v2: record to lifecycle (metrics, shadow, logging) ───
-    try:
-        from uncommon_route.v2_lifecycle import on_route_complete
-        on_route_complete(
-            request_id="",  # filled by proxy if available
-            tier_id=v2.tier_id,
-            model=decision.model,
-            method=v2.method,
-            confidence=v2.confidence,
-            signal_a_tier=v2.vote_a.tier_id,
-            signal_a_conf=v2.vote_a.confidence,
-            signal_b_tier=v2.vote_b.tier_id,
-            signal_b_conf=v2.vote_b.confidence,
-            signal_c_tier=v2.vote_c.tier_id,
-            signal_c_conf=v2.vote_c.confidence,
-            query_embedding=v2.query_embedding,
-        )
-    except Exception:
-        pass  # lifecycle not initialized yet (e.g. during tests)
+    if record_lifecycle:
+        # ─── v2: record to lifecycle (metrics, shadow, logging) ───
+        try:
+            from uncommon_route.v2_lifecycle import on_route_complete
+            on_route_complete(
+                request_id="",  # filled by proxy if available
+                tier_id=v2.tier_id,
+                model=decision.model,
+                method=v2.method,
+                confidence=v2.confidence,
+                signal_a_tier=v2.vote_a.tier_id,
+                signal_a_conf=v2.vote_a.confidence,
+                signal_b_tier=v2.vote_b.tier_id,
+                signal_b_conf=v2.vote_b.confidence,
+                signal_c_tier=v2.vote_c.tier_id,
+                signal_c_conf=v2.vote_c.confidence,
+                query_embedding=v2.query_embedding,
+            )
+        except Exception:
+            pass  # lifecycle not initialized yet (e.g. during tests)
 
     return decision
 

@@ -112,6 +112,7 @@ class RoutingFeatures:
     needs_vision: bool = False
     needs_structured_output: bool = False
     response_format: str | None = None
+    step_risk: str = "normal"
     is_agentic: bool = False
     is_coding: bool = False
     prefers_reasoning: bool = False
@@ -149,10 +150,14 @@ class RoutingFeatures:
             labels.append(f"tools:{len(self.tool_names)}")
         if self.has_tool_results:
             labels.append("tool-results")
+        if self.step_risk != "normal":
+            labels.append(f"risk:{self.step_risk}")
         if self.needs_vision:
             labels.append("vision")
         if self.needs_structured_output:
             labels.append("structured-output")
+        if self.prefers_reasoning:
+            labels.append("reasoning")
         if self.session_present:
             labels.append("session")
         if self.capability_lane is not None:

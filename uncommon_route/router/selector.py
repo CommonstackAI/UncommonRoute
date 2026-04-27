@@ -7,6 +7,7 @@ Supports two selection modes:
 """
 
 from __future__ import annotations
+from dataclasses import replace
 from uncommon_route.model_experience import CandidateExperience
 from uncommon_route.router.config import BASELINE_MODEL, DEFAULT_MODEL_PRICING
 from uncommon_route.router.quality import (
@@ -14,6 +15,7 @@ from uncommon_route.router.quality import (
     continuity_alignment_score,
     quality_alignment_score,
     request_capability_lane,
+    scoring_served_quality_target,
 )
 from uncommon_route.router.structural import estimate_output_budget
 from uncommon_route.router.types import (
@@ -48,6 +50,28 @@ logger = logging.getLogger("uncommon-route")
 
 _rng = random.Random()
 
+_UNKNOWN_MODEL_PRICING = ModelPricing(5.0, 25.0)
+
+
+def _pricing_for_model(model: str, pricing: dict[str, ModelPricing]) -> ModelPricing:
+    """Use conservative pricing for unknown models instead of treating them as free."""
+    return pricing.get(model) or DEFAULT_MODEL_PRICING.get(model) or _UNKNOWN_MODEL_PRICING
+
+
+def _stabilize_agent_step_selection(features: RoutingFeatures) -> bool:
+    """Disable stochastic exploration for the current agent/tool step.
+
+    This is intentionally not a hard model lock and does not make routing
+    session-level. It only removes Thompson-sampling randomness on steps where
+    the current request carries tool/protocol state.
+    """
+    return bool(
+        features.is_agentic
+        or features.has_tool_results
+        or features.needs_tool_calling
+        or features.step_type in {"tool-selection", "tool-result-followup"}
+    )
+
 
 def _calc_cost(
     model: str,
@@ -57,7 +81,7 @@ def _calc_cost(
     *,
     input_cost_multiplier: float = 1.0,
 ) -> float:
-    mp = pricing.get(model, ModelPricing(0, 0))
+    mp = _pricing_for_model(model, pricing)
     effective_multiplier = max(0.1, min(2.0, input_cost_multiplier))
     return (
         (input_tokens / 1_000_000) * mp.input_price * effective_multiplier
@@ -278,6 +302,10 @@ def select_model(
     hints = workload_hints or WorkloadHints()
     weights = selection_weights or SelectionWeights()
     effective_features = routing_features or RoutingFeatures()
+    effective_bandit = bandit_config or BanditConfig()
+    step_stable = _stabilize_agent_step_selection(effective_features)
+    if step_stable and effective_bandit.enabled:
+        effective_bandit = replace(effective_bandit, enabled=False)
     lane = request_capability_lane(effective_features)
     tc = tier_configs.get(tier, TierConfig())
     configured_candidates = [candidate for candidate in [
@@ -340,9 +368,20 @@ def select_model(
         lane=lane,
         capabilities=capabilities,
         continuity_floor=effective_features.continuity_quality_floor,
+        step_risk=effective_features.step_risk,
     )
     scoring_candidates = quality_guard.allowed_models
     reasoning = f"{reasoning} | {' | '.join(quality_guard.notes)}"
+    if step_stable:
+        reasoning = f"{reasoning} | step-stable=no-bandit"
+    alignment_target = scoring_served_quality_target(
+        mode,
+        tier,
+        quality_guard.target,
+        quality_guard.floor,
+    )
+    if alignment_target is not quality_guard.target:
+        reasoning = f"{reasoning} | served-quality-score-target={alignment_target.value}"
 
     # R2-Router: estimate optimal output budget from prompt + tier
     budget = estimate_output_budget(prompt, tier.value)
@@ -360,11 +399,11 @@ def select_model(
         capabilities=capabilities,
         requirements=requirements,
         weights=weights,
-        target_quality=quality_guard.target,
+        target_quality=alignment_target,
         previous_served_quality=effective_features.previous_served_quality,
         quality_by_model=quality_guard.quality_by_model,
         user_keyed_models=user_keyed_models,
-        bandit_config=bandit_config or BanditConfig(),
+        bandit_config=effective_bandit,
         model_experience=model_experience,
     )
     candidate_scores.sort(key=lambda item: item.total, reverse=True)
@@ -682,7 +721,7 @@ def _normalized_costs(
     """
     raw = {}
     for m in models:
-        mp = pricing.get(m, ModelPricing(0, 0))
+        mp = _pricing_for_model(m, pricing)
         raw[m] = math.log1p(mp.input_price + mp.output_price)
     if not raw:
         return {}
@@ -735,6 +774,9 @@ def select_from_pool(
     hints = workload_hints or WorkloadHints()
     tier = _derive_tier(complexity)
     effective_features = routing_features or RoutingFeatures()
+    step_stable = _stabilize_agent_step_selection(effective_features)
+    if step_stable and bc.enabled:
+        bc = replace(bc, enabled=False)
     lane = request_capability_lane(effective_features)
 
     if not available_models:
@@ -777,8 +819,15 @@ def select_from_pool(
         lane=lane,
         capabilities=capabilities,
         continuity_floor=effective_features.continuity_quality_floor,
+        step_risk=effective_features.step_risk,
     )
     candidates = quality_guard.allowed_models
+    alignment_target = scoring_served_quality_target(
+        mode,
+        tier,
+        quality_guard.target,
+        quality_guard.floor,
+    )
 
     benchmark_quality: dict[str, float] | None = None
     try:
@@ -832,7 +881,7 @@ def select_from_pool(
             )
 
     mu = complexity
-    bandit_active = bc.enabled
+    bandit_active = bc.enabled and tier in bc.enabled_tiers
     prior_n = max(0.0, float(bc.prior_n))
 
     # Mode controls quality-vs-cost preference:
@@ -869,7 +918,7 @@ def select_from_pool(
         cost_norm = actual_cost_norm.get(model, 0.5)
         reasoning_bias = 1.0 if requirements.prefers_reasoning and cap.reasoning else 0.0
         candidate_quality = quality_guard.quality_by_model.get(model, quality_guard.floor)
-        quality_alignment = quality_alignment_score(candidate_quality, quality_guard.target)
+        quality_alignment = quality_alignment_score(candidate_quality, alignment_target)
         continuity_bias = continuity_alignment_score(candidate_quality, effective_features.previous_served_quality)
         byok = 1.0 if user_keyed_models and model in user_keyed_models else 0.0
         free_bias = 1.0 if cap.free else 0.0
@@ -993,7 +1042,11 @@ def select_from_pool(
         reasoning_parts.append(f"constraints={','.join(constraint_tags)}")
     if hint_tags:
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
+    if step_stable:
+        reasoning_parts.append("step-stable=no-bandit")
     reasoning_parts.extend(quality_guard.notes)
+    if alignment_target is not quality_guard.target:
+        reasoning_parts.append(f"served-quality-score-target={alignment_target.value}")
 
     return RoutingDecision(
         model=model,

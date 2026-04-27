@@ -115,7 +115,9 @@ KNOWN_ALIASES = SEED_ALIASES
 def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
     """Convert per-token pricing from upstream into per-1M-token ModelPricing."""
     if not raw or not isinstance(raw, dict):
-        return ModelPricing(0.0, 0.0)
+        return ModelPricing(5.0, 25.0)
+    if "prompt" not in raw or "completion" not in raw:
+        return ModelPricing(5.0, 25.0)
     try:
         input_price = float(raw.get("prompt", 0)) * 1_000_000
         output_price = float(raw.get("completion", 0)) * 1_000_000
@@ -128,14 +130,14 @@ def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
             cache_write_price=round(float(cache_write) * 1_000_000, 4) if cache_write else None,
         )
     except (ValueError, TypeError):
-        return ModelPricing(0.0, 0.0)
+        return ModelPricing(5.0, 25.0)
 
 
 # ---------------------------------------------------------------------------
 # Capability inference
 # ---------------------------------------------------------------------------
 
-_REASONING_POSITIVE = ("reason", "r1", "thinking", "think", "o1-", "o3", "o4-")
+_REASONING_POSITIVE = ("reason", "r1", "thinking", "think", "o1-", "o3", "o4-", "gpt-5")
 _REASONING_NEGATIVE = ("non-reason", "non_reason", "no-reason", "non-thinking")
 
 

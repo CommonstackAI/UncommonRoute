@@ -773,7 +773,10 @@ async def _check_provider(base_url: str, api_key: str) -> bool:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
             resp = await client.get(
                 f"{base_url.rstrip('/')}/models",
-                headers={"authorization": f"Bearer {api_key}"},
+                headers={
+                    "authorization": f"Bearer {api_key}",
+                    "user-agent": "uncommon-route/provider-check",
+                },
             )
             return resp.status_code == 200
     except Exception:  # noqa: BLE001

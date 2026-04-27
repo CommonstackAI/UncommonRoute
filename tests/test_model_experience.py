@@ -71,6 +71,17 @@ def test_infer_capabilities_marks_gpt5_family_as_reasoning() -> None:
     assert capabilities.reasoning is True
 
 
+def test_infer_capabilities_does_not_mark_image_generation_as_tool_chat() -> None:
+    capabilities = infer_capabilities(
+        "google/gemini-3-pro-image-preview",
+        ModelPricing(2.0, 12.0),
+        has_explicit_pricing=True,
+    )
+
+    assert capabilities.vision is True
+    assert capabilities.tool_calling is False
+
+
 def test_invalid_upstream_pricing_is_not_treated_as_free() -> None:
     pricing = _parse_upstream_pricing({"prompt": "not-a-number", "completion": "0"})
     capabilities = infer_capabilities(
@@ -427,6 +438,51 @@ def test_best_mode_uses_higher_quality_threshold() -> None:
     opus_best = next(s for s in best_decision.candidate_scores if "opus" in s.model)
     assert opus_best.predicted_quality == opus_auto.predicted_quality, \
         "Same model should have same predicted quality regardless of mode"
+
+
+def test_auto_mode_cost_sanity_guard_blocks_dominated_expensive_exploration(monkeypatch) -> None:
+    """AUTO exploration should not pick pricier same-quality peers with weaker priors."""
+    import uncommon_route.benchmark as benchmark
+    import uncommon_route.router.selector as selector
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "anthropic/claude-opus-4-7": 0.84,
+                "google/gemini-3.1-pro-preview": 0.88,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    draws = iter([0.99, 0.10])
+    monkeypatch.setattr(selector._rng, "betavariate", lambda _alpha, _beta: next(draws))
+
+    pricing = {
+        "anthropic/claude-opus-4-7": ModelPricing(5.0, 25.0),
+        "google/gemini-3.1-pro-preview": ModelPricing(2.0, 12.0),
+    }
+    capabilities = {
+        model: infer_capabilities(model, model_pricing, has_explicit_pricing=True)
+        for model, model_pricing in pricing.items()
+    }
+
+    decision = select_from_pool(
+        complexity=0.90,
+        mode=RoutingMode.AUTO,
+        confidence=0.9,
+        reasoning_text="test",
+        available_models=list(pricing),
+        estimated_input_tokens=4_000,
+        max_output_tokens=800,
+        prompt="Solve a hard reasoning bug.",
+        pricing=pricing,
+        capabilities=capabilities,
+        requirements=RequestRequirements(prefers_reasoning=True),
+        selection_weights=get_selection_weights(DEFAULT_CONFIG, RoutingMode.AUTO),
+        bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.COMPLEX,)),
+    )
+
+    assert decision.model == "google/gemini-3.1-pro-preview"
+    assert "cost-sanity=anthropic/claude-opus-4-7->google/gemini-3.1-pro-preview" in decision.reasoning
 
 
 def test_feedback_collector_updates_model_experience() -> None:

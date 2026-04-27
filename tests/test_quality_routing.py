@@ -57,6 +57,16 @@ def test_model_served_quality_normalizes_moonshot_provider_aliases() -> None:
     assert model_served_quality("moonshotai/kimi-k2.5", CapabilityLane.GENERAL, caps) is ServedQuality.BALANCED
 
 
+def test_openai_nano_is_not_premium_for_reasoning_lane() -> None:
+    caps = ModelCapabilities(tool_calling=True, reasoning=True)
+
+    assert model_served_quality(
+        "openai/gpt-5.4-nano-2026-03-17",
+        CapabilityLane.REASONING,
+        caps,
+    ) is ServedQuality.ECONOMY
+
+
 def test_quality_guards_keep_auto_complex_at_balanced_floor_without_opus_only_pool() -> None:
     caps = _caps()
     guard = apply_quality_guards(

@@ -196,7 +196,10 @@ def verify_key(base_url: str, api_key: str) -> tuple[bool, str]:
     try:
         resp = httpx.get(
             url,
-            headers={"authorization": f"Bearer {api_key}"},
+            headers={
+                "authorization": f"Bearer {api_key}",
+                "user-agent": "uncommon-route/provider-check",
+            },
             timeout=httpx.Timeout(8.0, connect=4.0),
         )
         if resp.status_code == 200:

@@ -243,11 +243,19 @@ def _v2_classify(
 
     # Signal B is active for longer conversations and can also be
     # globally promoted by the lifecycle tracker.
-    from uncommon_route import v2_lifecycle as _lc
-    use_signal_b = _should_activate_signal_b(row, vote_b) or _lc.is_signal_b_promoted()
+    try:
+        from uncommon_route import v2_lifecycle as _lc
+        signal_b_promoted = _lc.is_signal_b_promoted()
+        tracker_weights = _lc._weight_tracker.weights if _lc._weight_tracker else None
+    except Exception:
+        # Keep the core router usable in lightweight installs where optional
+        # lifecycle dependencies (for example numpy-backed index growth) are
+        # unavailable. Lifecycle learning is additive, not required for routing.
+        signal_b_promoted = False
+        tracker_weights = None
+    use_signal_b = _should_activate_signal_b(row, vote_b) or signal_b_promoted
 
     # Get learned weights from tracker (falls back to defaults if not initialized)
-    tracker_weights = _lc._weight_tracker.weights if _lc._weight_tracker else None
 
     # Build ensemble with active signals, using learned weights when available
     if use_signal_b:
@@ -285,6 +293,22 @@ def _v2_classify(
     ):
         tier_id = vote_b.tier_id
         structural_floor_applied = True
+    structural_medium_floor_applied = False
+    if (
+        not structural_floor_applied
+        and tool_msg_count == 0
+        and len(row.get("messages", [])) <= 3
+        and not vote_b.abstained
+        and vote_b.confidence >= 0.70
+        and (vote_b.tier_id or 0) >= 1
+        and tier_id < 1
+    ):
+        # Short standalone implementation/design prompts are often capped to
+        # 0.70 confidence by Signal B's short-text dampener. Do not let
+        # metadata-only priors route those steps as economy, but avoid
+        # escalating them all the way to premium unless Signal B is stronger.
+        tier_id = 1
+        structural_medium_floor_applied = True
     complexity = _TIER_ID_TO_COMPLEXITY.get(tier_id, 0.40)
 
     signals_parts = [
@@ -295,6 +319,8 @@ def _v2_classify(
     ]
     if structural_floor_applied:
         signals_parts.append("v2:structural-floor")
+    if structural_medium_floor_applied:
+        signals_parts.append("v2:structural-medium-floor")
     signals_text = tuple(signals_parts)
 
     return V2ClassifyResult(

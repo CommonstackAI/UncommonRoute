@@ -2345,7 +2345,7 @@ def create_app(
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
         available_models = _circuit_breaker.filter_available(
-            _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+            _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
         )
         available_models, transport_pool_note = _filter_transport_compatible_models(
             available_models=available_models,
@@ -3202,7 +3202,7 @@ def create_app(
             route_pool_notes: list[str] = []
             try:
                 route_available_models = _circuit_breaker.filter_available(
-                    _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+                    _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
                 )
                 route_available_models, transport_pool_note = _filter_transport_compatible_models(
                     available_models=route_available_models,

@@ -14,6 +14,7 @@ from uncommon_route.router.quality import (
     apply_quality_guards,
     continuity_alignment_score,
     quality_alignment_score,
+    quality_rank,
     request_capability_lane,
     scoring_served_quality_target,
 )
@@ -710,6 +711,62 @@ def _quality_prior_scores(
     return {m: 0.5 for m in models}
 
 
+def _apply_cost_sanity_guard(
+    ranked: list[CandidateScore],
+    *,
+    mode: RoutingMode,
+) -> tuple[list[CandidateScore], str]:
+    """Prevent AUTO/FAST exploration from preferring dominated expensive peers.
+
+    Thompson sampling intentionally explores, but it should not let a same-
+    quality, lower-prior, materially more expensive model beat a cheaper peer
+    with comparable or stronger benchmark quality. BEST is left quality-first.
+    """
+    if mode is RoutingMode.BEST or len(ranked) < 2:
+        return ranked, ""
+
+    selected = ranked[0]
+    selected_cost = max(0.0, selected.predicted_cost)
+    if selected_cost <= 0:
+        return ranked, ""
+
+    selected_quality_rank = quality_rank(selected.served_quality)
+    quality_tolerance = 0.03
+    material_savings = 0.25
+
+    alternatives = [
+        score
+        for score in ranked[1:]
+        if quality_rank(score.served_quality) >= selected_quality_rank
+        and score.editorial >= selected.editorial - quality_tolerance
+        and score.predicted_cost > 0
+        and score.predicted_cost <= selected_cost * (1.0 - material_savings)
+    ]
+    if not alternatives:
+        return ranked, ""
+
+    replacement = max(
+        alternatives,
+        key=lambda score: (
+            quality_rank(score.served_quality),
+            score.editorial,
+            -score.predicted_cost,
+            score.total,
+        ),
+    )
+    if replacement.model == selected.model:
+        return ranked, ""
+
+    reordered = [replacement]
+    reordered.extend(score for score in ranked if score.model != replacement.model)
+    note = (
+        "cost-sanity="
+        f"{selected.model}->{replacement.model}"
+        f"({selected_cost:.6f}->{replacement.predicted_cost:.6f})"
+    )
+    return reordered, note
+
+
 def _normalized_costs(
     models: list[str],
     pricing: dict[str, ModelPricing],
@@ -997,6 +1054,8 @@ def select_from_pool(
     else:
         ranked.sort(key=lambda s: s.predicted_quality, reverse=True)
 
+    ranked, cost_guard_note = _apply_cost_sanity_guard(ranked, mode=mode)
+
     if user_keyed_models:
         keyed = [s for s in ranked if s.model in user_keyed_models]
         if keyed:
@@ -1044,6 +1103,8 @@ def select_from_pool(
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
     if step_stable:
         reasoning_parts.append("step-stable=no-bandit")
+    if cost_guard_note:
+        reasoning_parts.append(cost_guard_note)
     reasoning_parts.extend(quality_guard.notes)
     if alignment_target is not quality_guard.target:
         reasoning_parts.append(f"served-quality-score-target={alignment_target.value}")

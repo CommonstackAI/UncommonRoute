@@ -126,7 +126,11 @@ def model_served_quality(
         if "thinking" in core or "reason" in core:
             return ServedQuality.PREMIUM
         if provider == "openai" and _contains_any(core, ("pro", "o3", "gpt-5.4", "gpt-5.2", "gpt-5")):
-            return ServedQuality.BALANCED if "mini" in core else ServedQuality.PREMIUM
+            if "nano" in core:
+                return ServedQuality.ECONOMY
+            if "mini" in core:
+                return ServedQuality.BALANCED
+            return ServedQuality.PREMIUM
         if provider == "google" and "pro" in core:
             return ServedQuality.PREMIUM
         if caps.reasoning:

@@ -115,11 +115,11 @@ from uncommon_route.responses_compat import (
     openai_chat_response_to_responses,
     responses_to_openai_chat_request,
 )
+from uncommon_route.version import VERSION
 
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.10"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -1771,7 +1771,39 @@ def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
     return False
 
 
-def _annotate_anthropic_thinking_context(
+def _anthropic_thinking_enabled(body: dict[str, Any] | None) -> bool:
+    if not isinstance(body, dict):
+        return False
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    thinking_type = str(thinking.get("type") or "").strip().lower()
+    return bool(thinking_type and thinking_type != "disabled")
+
+
+def _supports_anthropic_thinking_payload(model: str) -> bool:
+    value = str(model or "").strip().lower()
+    provider, _, core = value.partition("/")
+    if not core:
+        core = provider
+        provider = ""
+    core = re.sub(r"(\d)\.(\d)", r"\1-\2", core)
+
+    if provider == "anthropic":
+        if "haiku" in core:
+            return False
+        return (
+            "claude-opus-4" in core
+            or "claude-sonnet-4" in core
+            or "claude-3-7-sonnet" in core
+            or "claude-sonnet-3-7" in core
+        )
+    if provider == "minimax":
+        return "minimax-m2-7" in core or "minimax-m2-5" in core
+    return False
+
+
+def _filter_anthropic_thinking_context(
     *,
     available_models: list[str],
     api_format: str,
@@ -1784,30 +1816,41 @@ def _annotate_anthropic_thinking_context(
         return [], ""
     if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
         return list(available_models), ""
-    if not session_id or not _contains_anthropic_thinking_blocks(source_body):
+    if not (
+        _anthropic_thinking_enabled(source_body)
+        or _contains_anthropic_thinking_blocks(source_body)
+    ):
         return list(available_models), ""
 
-    note = "thinking-context=present"
+    previous_note = ""
     previous_trace = trace_store.latest_for_session(
         session_id,
         step_types=("tool-selection", "tool-result-followup", "general"),
+    ) if session_id else None
+    if (
+        previous_trace is not None
+        and previous_trace.status_code < 400
+        and previous_trace.api_format == "anthropic"
+        and previous_trace.transport == "anthropic-messages"
+    ):
+        previous_model = str(previous_trace.model or "").strip()
+        if previous_model:
+            if previous_model in available_models:
+                previous_note = f";previous={previous_model}"
+            else:
+                previous_note = f";previous-unavailable={previous_model}"
+
+    compatible_models = [
+        model for model in available_models if _supports_anthropic_thinking_payload(model)
+    ]
+    if not compatible_models:
+        return list(available_models), f"thinking-context=no-compatible-pool{previous_note}"
+    if len(compatible_models) == len(available_models):
+        return list(available_models), f"thinking-context=compatible-pool{previous_note}"
+    return compatible_models, (
+        f"thinking-context=compatible-pool({len(compatible_models)}/{len(available_models)})"
+        f"{previous_note}"
     )
-    if previous_trace is None:
-        return list(available_models), note
-    if previous_trace.status_code >= 400:
-        return list(available_models), note
-    if previous_trace.api_format != "anthropic":
-        return list(available_models), note
-    if previous_trace.transport != "anthropic-messages":
-        return list(available_models), note
-
-    previous_model = str(previous_trace.model or "").strip()
-    if not previous_model:
-        return list(available_models), note
-    if previous_model in available_models:
-        return list(available_models), f"thinking-context=previous:{previous_model}"
-
-    return list(available_models), f"thinking-context=previous-unavailable:{previous_model}"
 
 
 def _reuse_anthropic_source_body(
@@ -3218,7 +3261,7 @@ def create_app(
                 )
                 if transport_pool_note:
                     route_pool_notes.append(transport_pool_note)
-                route_available_models, thinking_lock_note = _annotate_anthropic_thinking_context(
+                route_available_models, thinking_lock_note = _filter_anthropic_thinking_context(
                     available_models=route_available_models,
                     api_format=api_format,
                     endpoint_name=endpoint_name,

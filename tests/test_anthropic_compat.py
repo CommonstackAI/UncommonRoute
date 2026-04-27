@@ -1309,7 +1309,7 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_do_not_lock_to_previous_session_model(
+    def test_virtual_messages_with_thinking_blocks_use_compatible_pool_without_locking_previous_model(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1329,7 +1329,7 @@ class TestTransportRouting:
                 mode=RoutingMode.AUTO,
                 confidence=0.93,
                 method="pool",
-                reasoning="forced sticky minimax route for thinking continuity",
+                reasoning="forced minimax route for thinking continuity",
                 cost_estimate=0.005,
                 baseline_cost=0.02,
                 savings=0.75,
@@ -1437,7 +1437,93 @@ class TestTransportRouting:
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-context=previous:minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert "thinking-context=compatible-pool;previous=minimax/minimax-m2.7" in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_virtual_messages_with_thinking_enabled_filters_unsupported_models(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+
+        def fake_route(*args, **kwargs):
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-sonnet-4-6",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.BALANCED,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.84,
+                method="pool",
+                reasoning="forced sonnet route for thinking support",
+                cost_estimate=0.004,
+                baseline_cost=0.02,
+                savings=0.80,
+                raw_confidence=0.84,
+                complexity=0.4,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_thinking_supported",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+            mapper = _build_seed_mapper(
+                "anthropic/claude-haiku-4-5",
+                "anthropic/claude-sonnet-4-6",
+                "minimax/minimax-m2.1",
+                "minimax/minimax-m2.7",
+            )
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "thinking": {"type": "adaptive", "display": "summarized"},
+                    "messages": [{"role": "user", "content": "Plan it"}],
+                },
+            )
+
+            assert resp.status_code == 200
+            assert set(routed["available_models"]) == {
+                "anthropic/claude-sonnet-4-6",
+                "minimax/minimax-m2.7",
+            }
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=compatible-pool(2/4)" in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 
@@ -1564,7 +1650,7 @@ class TestTransportRouting:
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-context=previous-unavailable:minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert "thinking-context=compatible-pool;previous-unavailable=minimax/minimax-m2.7" in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 

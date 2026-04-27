@@ -18,6 +18,7 @@ from uncommon_route.routing_config_store import RoutingConfigStore
 from uncommon_route.spend_control import SpendControl
 from uncommon_route.stats import RouteStats
 from uncommon_route.traces import TraceStore
+from uncommon_route.version import get_version
 
 
 def _now_stamp() -> str:
@@ -41,12 +42,7 @@ def _output_path(output_path: str | None) -> Path:
 
 
 def _package_version() -> str:
-    try:
-        from importlib.metadata import version
-
-        return version("uncommon-route")
-    except Exception:
-        return "0.7.10"
+    return get_version()
 
 
 def _feedback_buffer_summary(root: Path) -> dict[str, Any]:

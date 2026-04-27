@@ -37,8 +37,8 @@ from uncommon_route.paths import data_dir
 from uncommon_route.router.api import route
 from uncommon_route.router.classifier import classify
 from uncommon_route.router.structural import extract_structural_features, extract_unicode_block_features
+from uncommon_route.version import VERSION
 
-VERSION = "0.7.10"
 _DATA_DIR = data_dir()
 _PID_FILE = _DATA_DIR / "serve.pid"
 _LOG_FILE = _DATA_DIR / "serve.log"

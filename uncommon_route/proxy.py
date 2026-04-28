@@ -84,7 +84,12 @@ from uncommon_route.router.types import (
 )
 from uncommon_route.semantic import SemanticCallResult, SemanticCompressor
 from uncommon_route.semantic import SideChannelTaskConfig, score_semantic_quality
-from uncommon_route.session import derive_session_id
+from uncommon_route.session import RecentSessions, derive_session_id, derive_session_id_v2
+from uncommon_route.normalize import (
+    hash16,
+    normalize_message_text,
+    normalize_messages_to_hashes,
+)
 from uncommon_route.spend_control import SpendControl
 from uncommon_route.stats import RouteRecord, RouteStats
 from uncommon_route.traces import RequestTrace, TraceStore, prompt_hash as trace_prompt_hash
@@ -116,6 +121,13 @@ from uncommon_route.responses_compat import (
     responses_to_openai_chat_request,
 )
 from uncommon_route.version import VERSION
+from uncommon_route.content_capture import (
+    extract_assistant_blocks_anthropic,
+    extract_assistant_blocks_openai_chat,
+    extract_assistant_blocks_openai_responses,
+    parse_stream_assistant_content,
+    truncate_content_payload,
+)
 
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
@@ -587,6 +599,82 @@ def _extract_assistant_text(content: bytes) -> str:
     return str(text)
 
 
+def _capture_enabled() -> bool:
+    return os.environ.get("UNCOMMON_ROUTE_CAPTURE_CONTENT", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _build_capture_dict(
+    body: dict, text: str, calls: list[dict[str, Any]], finish: str
+) -> dict[str, Any]:
+    sys_field = body.get("system", "")
+    if isinstance(sys_field, list):
+        system_text = " ".join(
+            (b.get("text") or "")
+            for b in sys_field
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        system_text = str(sys_field) if sys_field else ""
+    raw_tools = body.get("tools") or body.get("customTools") or []
+    raw = {
+        "request_messages": list(body.get("messages") or []),
+        "request_system": system_text,
+        "request_tools_count": len(raw_tools) if isinstance(raw_tools, list) else 0,
+        "response_text": text,
+        "response_tool_calls": calls,
+        "response_finish_reason": finish,
+        "content_truncated": False,
+    }
+    cap_bytes = _content_cap_bytes()
+    if cap_bytes <= 0:
+        raw["content_truncated"] = False
+        return raw
+    truncated, was_trunc = truncate_content_payload(raw, cap_bytes=cap_bytes)
+    truncated["content_truncated"] = was_trunc
+    return truncated
+
+
+def _content_cap_bytes() -> int:
+    """Per-row size cap for captured content. 0 disables truncation entirely."""
+    raw = os.environ.get("UNCOMMON_ROUTE_CONTENT_CAP_BYTES", "").strip()
+    if not raw:
+        return 256 * 1024
+    try:
+        return int(raw)
+    except ValueError:
+        return 256 * 1024
+
+
+def _capture_non_streaming(
+    body: dict, response_content: bytes, transport: str
+) -> dict[str, Any]:
+    """Return cold-field dict to merge into a RequestTrace, or {} if disabled."""
+    if not _capture_enabled():
+        return {}
+    if transport == "anthropic-messages":
+        text, calls, finish = extract_assistant_blocks_anthropic(response_content)
+    elif transport == "openai-chat":
+        text, calls, finish = extract_assistant_blocks_openai_chat(response_content)
+    elif transport == "openai-responses":
+        text, calls, finish = extract_assistant_blocks_openai_responses(response_content)
+    else:
+        return {}
+    return _build_capture_dict(body, text, calls, finish)
+
+
+def _capture_streaming(
+    body: dict, stream_chunks: list[bytes], transport: str
+) -> dict[str, Any]:
+    if not _capture_enabled():
+        return {}
+    text, calls, finish = parse_stream_assistant_content(stream_chunks, transport)
+    return _build_capture_dict(body, text, calls, finish)
+
+
 class UpstreamSemanticCompressor:
     """Runs semantic compression tasks through cheap upstream models."""
 
@@ -802,6 +890,75 @@ def _resolve_session_id(request: Request, body: dict) -> str | None:
         return sid
     messages = body.get("messages", [])
     return derive_session_id(messages)
+
+
+# Process-wide registry for derive_session_id_v2 (shadow mode).
+_SESSION_V2_REGISTRY = RecentSessions(
+    capacity=int(os.environ.get("UNCOMMON_ROUTE_SESSION_TABLE_SIZE", "5000")),
+    ttl_seconds=float(os.environ.get("UNCOMMON_ROUTE_SESSION_TTL_S", "21600")),
+)
+
+
+def _extract_session_v2_inputs(
+    request: Request, body: dict
+) -> dict[str, Any]:
+    """Compute session_id_v2 inputs and shadow output for this request.
+
+    Returns a dict suitable for **-splatting into RequestTrace(...).
+    """
+    messages = body.get("messages") or []
+    msg_hashes = normalize_messages_to_hashes(messages)
+    first_user_v2 = ""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            first_user_v2 = hash16(normalize_message_text(m))
+            break
+    system_text = ""
+    sys_field = body.get("system")
+    if isinstance(sys_field, str):
+        system_text = sys_field
+    elif isinstance(sys_field, list):
+        system_text = " ".join(
+            (b.get("text") or "")
+            for b in sys_field
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "system":
+                system_text = normalize_message_text(m)
+                break
+    system_h = hash16(system_text) if system_text else ""
+
+    metadata_uid = ""
+    md = body.get("metadata") or {}
+    if isinstance(md, dict):
+        metadata_uid = str(md.get("user_id", "") or "")
+
+    prev_response = str(body.get("previous_response_id", "") or "")
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    user_agent = headers.get("user-agent", "")
+
+    sid_v2 = derive_session_id_v2(
+        msg_hashes=msg_hashes,
+        first_user_v2=first_user_v2,
+        system_hash=system_h,
+        metadata_uid=metadata_uid,
+        prev_response=prev_response,
+        registry=_SESSION_V2_REGISTRY,
+        now=time.time(),
+    )
+
+    return {
+        "messages_count": len(messages),
+        "msg_hashes": msg_hashes,
+        "first_user_hash_v2": first_user_v2,
+        "system_hash": system_h,
+        "metadata_user_id": metadata_uid,
+        "previous_response_id": prev_response,
+        "user_agent": user_agent,
+        "session_id_v2": sid_v2,
+    }
 
 
 def _classify_step(body: dict) -> tuple[str, list[str]]:
@@ -2047,6 +2204,218 @@ def _normalize_selector_body(
     return payload, None
 
 
+def _flatten_tool_result(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(str(b.get("text", "")))
+        return " ".join(parts)
+    return str(content) if content else ""
+
+
+def _trace_decision_card(trace: "RequestTrace") -> dict[str, Any]:
+    """Subset of the trace useful for the UI as a decision card."""
+    return {
+        "model": trace.model,
+        "decision_tier": trace.decision_tier or trace.tier,
+        "served_quality": trace.served_quality,
+        "capability_lane": trace.capability_lane,
+        "raw_confidence": trace.raw_confidence,
+        "latency_us": trace.latency_us,
+        "estimated_cost": trace.estimated_cost,
+        "route_reasoning": trace.route_reasoning,
+        "feature_tags": list(trace.feature_tags or []),
+        "constraint_tags": list(trace.constraint_tags or []),
+        "hint_tags": list(trace.hint_tags or []),
+        "transport": trace.transport,
+        "transport_reason": trace.transport_reason,
+        "attempts_payload": list(trace.attempts_payload or []),
+        "fallback_reason": trace.fallback_reason,
+    }
+
+
+def _assemble_conversation(
+    traces: "TraceStore", session_id: str
+) -> dict[str, Any] | None:
+    # 1. Pull all hot rows for this session_id.
+    matching = [r for r in traces._records if r.session_id == session_id]
+    if not matching:
+        return None
+    matching.sort(key=lambda r: r.timestamp)
+
+    # 2. Pull cold fields per turn.
+    cold_by_id: dict[str, dict[str, Any]] = {}
+    for t in matching:
+        cold = traces.load_content(t.request_id)
+        if cold is not None:
+            cold_by_id[t.request_id] = cold
+
+    has_any_content = any(
+        (c.get("request_messages") or c.get("response_text"))
+        for c in cold_by_id.values()
+    )
+
+    # 3. Compact-break detection from msg_hashes.
+    breaks: list[int] = []
+    for k in range(1, len(matching)):
+        prev = list(matching[k - 1].msg_hashes or [])
+        curr = list(matching[k].msg_hashes or [])
+        if not prev or not curr:
+            continue
+        if curr[: len(prev)] != prev:
+            breaks.append(k)
+
+    if not has_any_content:
+        # Surface turn-level decisions only (no message bodies).
+        decisions = [
+            {
+                "role": "assistant",
+                "text": "",
+                "tool_calls": [],
+                "ts": t.timestamp,
+                "request_id": t.request_id,
+                "decision": _trace_decision_card(t),
+            }
+            for t in matching
+        ]
+        return {
+            "session_id": session_id,
+            "turn_count": len(matching),
+            "content_available": False,
+            "compact_breaks": breaks,
+            "messages": decisions,
+        }
+
+    # 4. Build backbone from the LAST turn's request_messages.
+    last_turn = matching[-1]
+    last_cold = cold_by_id.get(last_turn.request_id, {})
+    backbone = list(last_cold.get("request_messages") or [])
+
+    # 5. Walk backbone, expand into chat messages with decisions.
+    #
+    # Alignment: each captured turn's response goes into the NEXT turn's
+    # backbone as an assistant message — except the LAST captured turn's
+    # response, which is standalone (appended in step 6). So:
+    #   backbone_assistants_count + 1 captured-or-skipped turns total
+    #   the LAST (matching_count - 1) backbone assistants align with
+    #     matching[0..matching_count-2]
+    #   any earlier backbone assistants are PRE-CAPTURE (no decision)
+    backbone_assistants_count = sum(
+        1 for m in backbone
+        if isinstance(m, dict) and m.get("role") == "assistant"
+    )
+    align_offset = max(0, backbone_assistants_count - (len(matching) - 1))
+
+    out_messages: list[dict[str, Any]] = []
+    assistant_idx = 0
+    for m in backbone:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user":
+            # May carry tool_results inside content blocks.
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        out_messages.append({
+                            "role": "tool_result",
+                            "tool_use_id": b.get("tool_use_id", ""),
+                            "text": _flatten_tool_result(b.get("content", "")),
+                            "from_request_id": last_turn.request_id,
+                        })
+                # Surface any plain user text alongside tool_results.
+                text = " ".join(
+                    str(b.get("text", ""))
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+                if text:
+                    out_messages.append({
+                        "role": "user",
+                        "text": text,
+                        "ts": None,
+                        "from_request_id": last_turn.request_id,
+                    })
+            else:
+                out_messages.append({
+                    "role": "user",
+                    "text": str(content),
+                    "ts": None,
+                    "from_request_id": last_turn.request_id,
+                })
+        elif role == "assistant":
+            text = ""
+            calls: list[dict[str, Any]] = []
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "text":
+                            text += str(b.get("text", ""))
+                        elif b.get("type") == "tool_use":
+                            calls.append({
+                                "id": b.get("id", ""),
+                                "name": b.get("name", ""),
+                                "input": b.get("input", {}),
+                            })
+            else:
+                text = str(content)
+
+            mapped_idx = assistant_idx - align_offset
+            if 0 <= mapped_idx < len(matching) - 1:
+                decision_trace = matching[mapped_idx]
+                entry = {
+                    "role": "assistant",
+                    "text": text,
+                    "tool_calls": calls,
+                    "ts": decision_trace.timestamp,
+                    "request_id": decision_trace.request_id,
+                    "decision": _trace_decision_card(decision_trace),
+                }
+            else:
+                # Pre-capture assistant — no decision card available.
+                entry = {
+                    "role": "assistant",
+                    "text": text,
+                    "tool_calls": calls,
+                    "ts": None,
+                    "request_id": None,
+                    "decision": None,
+                }
+            out_messages.append(entry)
+            assistant_idx += 1
+        elif role == "tool":
+            out_messages.append({
+                "role": "tool_result",
+                "tool_use_id": m.get("tool_call_id", ""),
+                "text": str(content),
+                "from_request_id": last_turn.request_id,
+            })
+        # role == "system": skip (system prompt is not a conversation turn for UI)
+
+    # 6. Append the LAST turn's response (assistant_N — not yet in the backbone).
+    final = matching[-1]
+    out_messages.append({
+        "role": "assistant",
+        "text": last_cold.get("response_text", "") or "",
+        "tool_calls": list(last_cold.get("response_tool_calls") or []),
+        "ts": final.timestamp,
+        "request_id": final.request_id,
+        "decision": _trace_decision_card(final),
+    })
+
+    return {
+        "session_id": session_id,
+        "turn_count": len(matching),
+        "content_available": True,
+        "compact_breaks": breaks,
+        "messages": out_messages,
+    }
+
+
 def create_app(
     upstream: str | None = DEFAULT_UPSTREAM,
     spend_control: SpendControl | None = None,
@@ -3005,6 +3374,19 @@ def create_app(
             return JSONResponse({"error": "Trace not found", "request_id": request_id}, status_code=404)
         return JSONResponse(trace)
 
+    async def handle_session_conversation(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"]).strip()
+        out = _assemble_conversation(_traces, session_id)
+        if out is None:
+            return JSONResponse(
+                {"error": "Session not found", "session_id": session_id},
+                status_code=404,
+            )
+        return JSONResponse(out)
+
     async def handle_v2_metrics(request: Request) -> JSONResponse:
         """GET /v1/v2-metrics — v2 routing metrics snapshot."""
         from uncommon_route.v2_lifecycle import get_metrics, is_signal_b_promoted
@@ -3362,6 +3744,7 @@ def create_app(
                     error_code=exc.infeasibility.code.value,
                     error_stage="routing",
                     error_message=exc.infeasibility.message,
+                    **_extract_session_v2_inputs(request, source_body or body),
                 ))
                 return _routing_infeasible_response(
                     exc,
@@ -3577,6 +3960,7 @@ def create_app(
                     error_code="spend_limit_exceeded",
                     error_stage="guardrail",
                     error_message=check.reason or "Spending limit exceeded",
+                    **_extract_session_v2_inputs(request, source_body or body),
                 ))
                 return _spend_error(check, api_format=api_format, headers=debug_headers)
 
@@ -4084,6 +4468,8 @@ def create_app(
             error_code: str = "",
             error_stage: str = "",
             error_message: str = "",
+            response_content: bytes | None = None,
+            stream_chunks: list[bytes] | None = None,
         ) -> None:
             method_value = route_method if is_virtual else "passthrough"
             confidence_value = confidence if is_virtual else 1.0
@@ -4156,6 +4542,14 @@ def create_app(
                     error_stage=error_stage,
                     error_message=error_message,
                 ))
+
+            transport_for_capture = transport_decision.selected_transport
+            def _capture_for_record(b, content, chunks):
+                if content is not None:
+                    return _capture_non_streaming(b, content, transport_for_capture)
+                if chunks is not None:
+                    return _capture_streaming(b, chunks, transport_for_capture)
+                return {}
 
             _traces.record(RequestTrace(
                 timestamp=timestamp_value,
@@ -4230,6 +4624,8 @@ def create_app(
                 error_code=error_code,
                 error_stage=error_stage,
                 error_message=error_message,
+                **_extract_session_v2_inputs(request, source_body or body),
+                **_capture_for_record(source_body or body, response_content, stream_chunks),
             ))
 
         def _record_response_error(response: Response, *, streaming: bool) -> None:
@@ -4251,7 +4647,11 @@ def create_app(
 
         try:
             if is_streaming:
-                async def _record_stream_success(stream_usage: UsageMetrics | None) -> None:
+                async def _record_stream_success(
+                    stream_usage: UsageMetrics | None,
+                    *,
+                    stream_chunks: list[bytes] | None = None,
+                ) -> None:
                     stream_actual_cost: float | None = None
                     stream_ttft_ms: float | None = None
                     stream_tps: float | None = None
@@ -4300,6 +4700,7 @@ def create_app(
                             actual_cost=stream_actual_cost,
                             usage_metrics=stream_usage,
                             streaming=True,
+                            stream_chunks=stream_chunks,
                         )
                     else:
                         _record_route_trace(
@@ -4307,6 +4708,7 @@ def create_app(
                             actual_cost=stream_actual_cost,
                             usage_metrics=stream_usage,
                             streaming=True,
+                            stream_chunks=stream_chunks,
                         )
 
                 async def _record_stream_failure() -> None:
@@ -4432,7 +4834,8 @@ def create_app(
                                 for ev in converter.finish():
                                     yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                stream_chunks=stream_chunks,
                             )
                         except Exception:
                             await _record_stream_failure()
@@ -4468,7 +4871,8 @@ def create_app(
                             for ev in converter.finish():
                                 yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                stream_chunks=stream_chunks,
                             )
                         except Exception:
                             await _record_stream_failure()
@@ -4493,7 +4897,8 @@ def create_app(
                             stream_chunks.append(chunk)
                             yield chunk
                         await _record_stream_success(
-                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                            stream_chunks=stream_chunks,
                         )
                     except Exception:
                         await _record_stream_failure()
@@ -4659,6 +5064,7 @@ def create_app(
                     error_code=upstream_error_code,
                     error_stage=upstream_error_stage,
                     error_message=upstream_error_message,
+                    response_content=resp.content,
                 )
                 # ─── v2 telemetry Stage 2: complete record with outcome ───
                 try:
@@ -4686,6 +5092,7 @@ def create_app(
                     error_code=passthrough_error_code,
                     error_stage=passthrough_error_stage,
                     error_message=passthrough_error_message,
+                    response_content=resp.content,
                 )
 
             return _build_proxy_response(
@@ -4806,7 +5213,9 @@ def create_app(
             default_model=VIRTUAL_MODEL_IDS[_routing_store.default_mode()],
         )
         response_id = f"resp_{uuid.uuid4().hex[:24]}"
-        upstream_resp = await _handle_chat_core(body, request, endpoint_name="responses")
+        upstream_resp = await _handle_chat_core(
+            body, request, endpoint_name="responses", source_body=raw,
+        )
 
         if upstream_resp.status_code != 200:
             return upstream_resp
@@ -4901,6 +5310,11 @@ def create_app(
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
         Route("/v1/traces", handle_traces, methods=["GET"]),
         Route("/v1/traces/{request_id:str}", handle_trace_detail, methods=["GET"]),
+        Route(
+            "/v1/sessions/{session_id:str}/conversation",
+            handle_session_conversation,
+            methods=["GET"],
+        ),
         Route("/v1/route-preview", handle_route_preview, methods=["POST"]),
         Route("/v1/v2-metrics", handle_v2_metrics, methods=["GET"]),
     ]

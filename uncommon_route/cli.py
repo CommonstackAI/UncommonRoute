@@ -70,6 +70,7 @@ Commands:
   stats [sub]                       Routing analytics (summary|history|reset)
   explain <prompt>                  Show v2 signal breakdown for a prompt
   telemetry [sub]                   Anonymous data sharing (status|enable|disable|show-sent|flush)
+  traces purge                      Delete all stored trace JSONL files
   --version                         Show version
 
 Route options:
@@ -1685,6 +1686,24 @@ def _cmd_explain(args: list[str]) -> None:
     print()
 
 
+def _cmd_traces_purge() -> int:
+    from uncommon_route.traces import FileTraceStorage
+    from uncommon_route.paths import data_dir as _data_dir
+
+    storage = FileTraceStorage(base_dir=_data_dir() / "traces")
+    storage.purge()
+    print("traces purged")
+    return 0
+
+
+def _cmd_traces(args: list[str]) -> None:
+    if not args or args[0] == "purge":
+        _cmd_traces_purge()
+        return
+    print(f"Unknown traces subcommand: {args[0]}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -1721,6 +1740,7 @@ def main() -> None:
         "feedback": _cmd_feedback,
         "explain": _cmd_explain,
         "telemetry": _cmd_telemetry,
+        "traces": _cmd_traces,
     }
 
     handler = commands.get(cmd)

@@ -23,3 +23,15 @@ class TestDeriveSessionId:
     def test_deterministic(self) -> None:
         messages = [{"role": "user", "content": "test prompt"}]
         assert derive_session_id(messages) == derive_session_id(messages)
+
+
+class TestDeriveSessionIdRegression:
+    """Lock the legacy derivation byte-identical so anyone using session_id as a
+    cache key sees no behavior change."""
+
+    def test_specific_known_input_known_output(self) -> None:
+        # SHA-256("hello").hexdigest()[:8] == "2cf24dba"
+        # If you change derive_session_id, this test must be updated only with
+        # a deliberate decision documented in the changelog.
+        messages = [{"role": "user", "content": "hello"}]
+        assert derive_session_id(messages) == "2cf24dba"

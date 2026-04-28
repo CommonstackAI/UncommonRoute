@@ -959,6 +959,52 @@ _NONZERO_EXIT_STATUS_RE = re.compile(
     r"\b(?:exit(?:ed)?(?:\s+with)?\s+(?:status|code)|exit\s+status|return\s+code)\s*[:=]?\s*[1-9]\d*\b",
     re.IGNORECASE,
 )
+_XML_RETURN_CODE_RE = re.compile(r"<returncode>\s*(-?\d+)\s*</returncode>", re.IGNORECASE)
+_DEPENDENCY_RECOVERY_RE = re.compile(
+    r"\b(?:modulenotfounderror|importerror)\b[^\n]*(?:no module named|module named|cannot import)",
+    re.IGNORECASE,
+)
+
+_ENVIRONMENT_RECOVERY_MARKERS = (
+    "no module named",
+    "module not found",
+    "could not find a version",
+    "no matching distribution",
+    "successfully installed",
+    "successfully uninstalled",
+    "editable installation",
+    "source checkout",
+    "build_ext",
+    "site-packages/numpy",
+    "module 'numpy' has no attribute",
+)
+
+_ENVIRONMENT_COMMAND_MARKERS = (
+    "pip install",
+    "uv pip",
+    "poetry install",
+    "pip-sync",
+    "python setup.py",
+    "build_ext",
+)
+_ROUTINE_SUCCESS_COMMAND_MARKERS = (
+    "git status",
+    "git diff --stat",
+    "git rev-parse",
+    "pwd",
+    "mkdir",
+    "touch ",
+    "cat >",
+    "tee ",
+)
+_SUCCESSFUL_TEST_SUMMARY_RE = re.compile(
+    r"\b(?:\d+\s+passed|ran\s+\d+\s+tests?.*\bok\b|test suites?:.*passed|tests?:.*passed|ok\s+[\w./-]+)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_GENERIC_ROUTINE_SUCCESS_RE = re.compile(
+    r"^\s*(?:done|ok|success|successful|completed)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _contains_risk_marker(text: str, markers: tuple[str, ...]) -> bool:
@@ -966,8 +1012,22 @@ def _contains_risk_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _has_nonzero_xml_returncode(text: str) -> bool:
+    match = _XML_RETURN_CODE_RE.search(text or "")
+    if match is None:
+        return False
+    try:
+        return int(match.group(1)) != 0
+    except ValueError:
+        return False
+
+
 def _contains_tool_failure_signal(text: str) -> bool:
-    if _NONZERO_FAILURE_SUMMARY_RE.search(text) or _NONZERO_EXIT_STATUS_RE.search(text):
+    if (
+        _has_nonzero_xml_returncode(text)
+        or _NONZERO_FAILURE_SUMMARY_RE.search(text)
+        or _NONZERO_EXIT_STATUS_RE.search(text)
+    ):
         return True
     if not _contains_risk_marker(text, _HIGH_RISK_TOOL_MARKERS):
         return False
@@ -998,6 +1058,36 @@ def _contains_tool_failure_signal(text: str) -> bool:
     return True
 
 
+def _contains_environment_recovery_signal(text: str, command: str = "") -> bool:
+    haystack = f"{command}\n{text}".lower()
+    return (
+        bool(_DEPENDENCY_RECOVERY_RE.search(text or ""))
+        or _contains_risk_marker(haystack, _ENVIRONMENT_COMMAND_MARKERS)
+        or _contains_risk_marker(haystack, _ENVIRONMENT_RECOVERY_MARKERS)
+    )
+
+
+def _tool_result_is_routine_success(text: str, is_error: bool, command: str) -> bool:
+    if is_error or _contains_tool_failure_signal(text):
+        return False
+    return (
+        bool(_SUCCESSFUL_TEST_SUMMARY_RE.search(text or ""))
+        or bool(_GENERIC_ROUTINE_SUCCESS_RE.search(text or ""))
+        or _contains_risk_marker(command, _ROUTINE_SUCCESS_COMMAND_MARKERS)
+    )
+
+
+def _tool_result_is_short_success_observation(text: str, is_error: bool, command: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or len(stripped) > 800:
+        return False
+    if _contains_environment_recovery_signal(text, command):
+        return False
+    if _tool_result_is_routine_success(text, is_error, command):
+        return False
+    return not is_error and not _contains_tool_failure_signal(text)
+
+
 def _risk_text(value: Any) -> str:
     """Flatten text-bearing content, including Anthropic tool_result blocks."""
     if value is None:
@@ -1016,18 +1106,83 @@ def _risk_text(value: Any) -> str:
     return str(value or "")
 
 
-def _latest_tool_result_signal(messages: list[Any]) -> tuple[str, bool]:
-    for msg in reversed(messages):
+def _tool_call_command(tool_call: dict[str, Any]) -> str:
+    fn = tool_call.get("function") or {}
+    if not isinstance(fn, dict):
+        return ""
+    raw_args = fn.get("arguments")
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return raw_args
+        if isinstance(parsed, dict) and isinstance(parsed.get("command"), str):
+            return str(parsed["command"])
+    return ""
+
+
+def _command_for_tool_result(
+    messages: list[Any],
+    *,
+    before_index: int,
+    tool_call_id: str,
+) -> str:
+    if not tool_call_id:
+        return ""
+    for prior in reversed(messages[:before_index]):
+        if not isinstance(prior, dict):
+            continue
+        extra = prior.get("extra") or {}
+        if isinstance(extra, dict):
+            for action in extra.get("actions") or ():
+                if (
+                    isinstance(action, dict)
+                    and action.get("tool_call_id") == tool_call_id
+                    and isinstance(action.get("command"), str)
+                ):
+                    return str(action["command"])
+        for tc in prior.get("tool_calls") or ():
+            if isinstance(tc, dict) and tc.get("id") == tool_call_id:
+                command = _tool_call_command(tc)
+                if command:
+                    return command
+    return ""
+
+
+def _latest_tool_result_context(messages: list[Any]) -> tuple[str, bool, str]:
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
         if not isinstance(msg, dict):
             continue
         if msg.get("role") == "tool":
-            return _risk_text(msg.get("content")), False
+            text = _risk_text(msg.get("content"))
+            command = _command_for_tool_result(
+                messages,
+                before_index=index,
+                tool_call_id=str(msg.get("tool_call_id") or ""),
+            )
+            return text, bool(msg.get("is_error")) or _has_nonzero_xml_returncode(text), command
         content = msg.get("content")
         if isinstance(content, list):
             for block in reversed(content):
                 if isinstance(block, dict) and block.get("type") == "tool_result":
-                    return _risk_text(block.get("content")), bool(block.get("is_error"))
-    return "", False
+                    text = _risk_text(block.get("content"))
+                    command = _command_for_tool_result(
+                        messages,
+                        before_index=index,
+                        tool_call_id=str(block.get("tool_use_id") or ""),
+                    )
+                    return (
+                        text,
+                        bool(block.get("is_error")) or _has_nonzero_xml_returncode(text),
+                        command,
+                    )
+    return "", False, ""
+
+
+def _latest_tool_result_signal(messages: list[Any]) -> tuple[str, bool]:
+    text, is_error, _command = _latest_tool_result_context(messages)
+    return text, is_error
 
 
 def _last_non_system_message(messages: list[Any]) -> dict[str, Any] | None:
@@ -1040,10 +1195,23 @@ def _last_non_system_message(messages: list[Any]) -> dict[str, Any] | None:
 def _current_step_tool_result_signal(messages: list[Any], step_type: str) -> tuple[str, bool]:
     if step_type != "tool-result-followup":
         return "", False
-    last_message = _last_non_system_message(messages)
-    if last_message is None:
-        return "", False
-    return _latest_tool_result_signal([last_message])
+    text, is_error, _command = _latest_tool_result_context(messages)
+    return text, is_error
+
+
+def _current_step_tool_result_context(
+    messages: list[Any],
+    step_type: str,
+) -> tuple[str, bool, str]:
+    if step_type != "tool-result-followup":
+        return "", False, ""
+    return _latest_tool_result_context(messages)
+
+
+def _tool_result_is_environment_recovery(text: str, is_error: bool, command: str) -> bool:
+    if _contains_environment_recovery_signal(text, command):
+        return True
+    return False
 
 
 _REASONING_DISABLED_VALUES = {"", "none", "off", "false", "disabled", "disable"}
@@ -1115,7 +1283,7 @@ def _estimate_step_risk(
     needs_tool_calling: bool,
     wants_structured_output: bool,
 ) -> str:
-    tool_result_text, tool_result_is_error = _current_step_tool_result_signal(messages, step_type)
+    tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(messages, step_type)
     previous_tool_result_text, previous_tool_result_is_error = _latest_tool_result_signal(messages)
     prompt_text = str(prompt or "")
     prompt_has_high_risk_marker = _contains_risk_marker(prompt_text, _HIGH_RISK_PROMPT_MARKERS)
@@ -1126,21 +1294,18 @@ def _estimate_step_risk(
     if step_type == "tool-result-followup":
         if tool_result_is_error:
             return "high"
-        if len(tool_result_text) > 3000:
-            return "high"
         if _contains_tool_failure_signal(tool_result_text):
             return "high"
-        if tool_result_text and len(tool_result_text) <= 800:
+        if _tool_result_is_routine_success(tool_result_text, tool_result_is_error, tool_command):
             return "low"
-        if prompt_has_high_risk_marker:
-            return "high"
+        if _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command):
+            return "normal"
         return "normal"
 
     retrying_previous_tool = (
         _contains_risk_marker(prompt_text, _RETRY_PROMPT_MARKERS)
         and (
             previous_tool_result_is_error
-            or len(previous_tool_result_text) > 3000
             or _contains_tool_failure_signal(previous_tool_result_text)
         )
     )
@@ -1152,6 +1317,27 @@ def _estimate_step_risk(
     if not needs_tool_calling and len(prompt_text) <= 80:
         return "low"
     return "normal"
+
+
+def _agent_state_pressure(messages: list[Any], step_risk: str) -> tuple[int, float]:
+    """Continuous pressure signal for long or failure-heavy agent trajectories."""
+    tool_steps = 0
+    failure_steps = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("tool_calls"):
+            tool_steps += 1
+        tool_text, tool_is_error = _latest_tool_result_signal([msg])
+        if msg.get("role") == "tool" or tool_text:
+            tool_steps += 1
+            if tool_is_error or _contains_tool_failure_signal(tool_text):
+                failure_steps += 1
+
+    step_component = min(0.45, max(0, tool_steps) / 24.0)
+    failure_component = min(0.35, failure_steps / 6.0)
+    risk_component = 0.20 if str(step_risk or "").lower() == "high" else 0.0
+    return tool_steps, min(1.0, step_component + failure_component + risk_component)
 
 
 def _extract_routing_features(
@@ -1198,14 +1384,45 @@ def _extract_routing_features(
         needs_tool_calling=needs_tool_calling,
         wants_structured_output=wants_structured_output,
     )
-    tier_floor = (
+    tier_floor = Tier.MEDIUM if step_risk == "high" else None
+    tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(
+        messages,
+        step_type,
+    )
+    environment_recovery = (
+        step_type == "tool-result-followup"
+        and _tool_result_is_environment_recovery(
+            tool_result_text,
+            tool_result_is_error,
+            tool_command,
+        )
+    )
+    routine_success = (
+        step_type == "tool-result-followup"
+        and _tool_result_is_routine_success(tool_result_text, tool_result_is_error, tool_command)
+    )
+    short_success_observation = (
+        step_type == "tool-result-followup"
+        and _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command)
+    )
+    tier_cap = (
         Tier.MEDIUM
-        if step_risk == "high" or (step_type == "tool-selection" and step_risk != "low")
+        if step_risk == "low" or environment_recovery or routine_success or short_success_observation
         else None
     )
-    tier_cap = Tier.MEDIUM if step_risk == "low" else None
+    tier_cap_reason = ""
+    if tier_cap is not None:
+        if environment_recovery:
+            tier_cap_reason = "environment-recovery"
+        elif routine_success:
+            tier_cap_reason = "routine-success"
+        elif short_success_observation:
+            tier_cap_reason = "short-observation"
+        else:
+            tier_cap_reason = "low-risk"
     prefers_reasoning, reasoning_tier_floor = _reasoning_preference(body)
     tier_floor = _max_tier(tier_floor, reasoning_tier_floor)
+    agent_step_count, agent_pressure = _agent_state_pressure(messages, step_risk)
 
     return RoutingFeatures(
         step_type=step_type,
@@ -1223,7 +1440,11 @@ def _extract_routing_features(
         requested_max_output_tokens=max(1, int(max_output_tokens)),
         tier_floor=tier_floor,
         tier_cap=tier_cap,
+        tier_cap_reason=tier_cap_reason,
         session_present=bool(session_id),
+        agent_step_count=agent_step_count,
+        agent_pressure=agent_pressure,
+        capability_lane=None,
     )
 
 
@@ -1949,6 +2170,12 @@ def _serialize_candidate_scores(candidate_scores: list[Any]) -> list[dict[str, o
             "total": round(score.total, 6),
             "predicted_cost": round(score.predicted_cost, 8),
             "editorial": round(score.editorial, 6),
+            "quality_prior_raw": round(score.quality_prior_raw, 6),
+            "quality_prior_source": score.quality_prior_source,
+            "quality_prior_match_type": score.quality_prior_match_type,
+            "quality_prior_matched_model": score.quality_prior_matched_model,
+            "quality_prior_confidence": round(score.quality_prior_confidence, 6),
+            "quality_prior_samples": score.quality_prior_samples,
             "cost": round(score.cost, 6),
             "latency": round(score.latency, 6),
             "reliability": round(score.reliability, 6),
@@ -1999,6 +2226,7 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "requested_max_output_tokens": features.requested_max_output_tokens,
         "tier_floor": features.tier_floor.value if features.tier_floor is not None else None,
         "tier_cap": features.tier_cap.value if features.tier_cap is not None else None,
+        "tier_cap_reason": features.tier_cap_reason,
         "session_present": features.session_present,
         "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
         "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
@@ -2282,6 +2510,7 @@ def create_app(
             logger.warning("Benchmark quality fetch failed: %s", exc)
 
     _rediscovery_task = None
+    _benchmark_refresh_task = None
 
     async def _rediscovery_loop() -> None:
         """Periodically re-discover upstream models to track changes."""
@@ -2296,6 +2525,26 @@ def create_app(
                     logger.info("Rediscovery: %d models from %s", count, _mapper.provider)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Rediscovery failed: %s", exc)
+
+    async def _benchmark_refresh_loop() -> None:
+        """Refresh external benchmark priors off the request path.
+
+        Providers still enforce their own TTLs, so this loop is cheap when
+        cached data is fresh and avoids blocking live routing on network calls.
+        """
+        import asyncio
+        interval = float(os.environ.get("UNCOMMON_ROUTE_BENCHMARK_REFRESH_INTERVAL", "3600"))
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                from uncommon_route.benchmark import get_benchmark_cache
+                count = await get_benchmark_cache().refresh()
+                if count > 0:
+                    logger.info("Benchmark refresh: %d models updated", count)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Benchmark refresh failed: %s", exc)
 
     def _selector_state(
         *,
@@ -4864,14 +5113,17 @@ def create_app(
     async def _lifespan(app: Starlette) -> _LifespanGen[None, None]:
         import asyncio
         await _on_startup()
-        nonlocal _rediscovery_task
+        nonlocal _rediscovery_task, _benchmark_refresh_task
         if upstream:
             _rediscovery_task = asyncio.create_task(_rediscovery_loop())
+            _benchmark_refresh_task = asyncio.create_task(_benchmark_refresh_loop())
         try:
             yield
         finally:
             if _rediscovery_task is not None:
                 _rediscovery_task.cancel()
+            if _benchmark_refresh_task is not None:
+                _benchmark_refresh_task.cancel()
             # ─── v2 lifecycle shutdown ───
             try:
                 from uncommon_route.v2_lifecycle import on_shutdown as v2_shutdown

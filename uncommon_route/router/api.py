@@ -59,6 +59,168 @@ _PUBLIC_TIER_COMPLEXITY = {
     Tier.MEDIUM: 0.40,
     Tier.COMPLEX: 0.68,
 }
+_EXPLICIT_HIGH_COMPLEXITY_MARKERS = (
+    "byzantine",
+    "consensus algorithm",
+    "distributed consensus",
+    "formal correctness",
+    "formal proof",
+    "correctness proof",
+    "cryptographic protocol",
+    "zero-knowledge",
+    "compiler",
+    "type system",
+    "kernel",
+)
+_TOOL_FAILURE_MARKERS = (
+    "traceback",
+    "exception",
+    "assertionerror",
+    "syntaxerror",
+    "importerror",
+    "modulenotfounderror",
+    "failed",
+    "error:",
+    "command not found",
+    "no such file",
+)
+def _message_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text") or ""))
+                elif item.get("type") == "tool_result":
+                    parts.append(_message_text(item.get("content")))
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return "\n".join(
+            _message_text(value.get(key))
+            for key in ("content", "text", "output", "error")
+            if value.get(key) is not None
+        )
+    return str(value)
+
+
+def _message_has_tool_result(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(
+            isinstance(item, dict) and item.get("type") == "tool_result"
+            for item in value
+        )
+    return False
+
+
+def _latest_tool_result_message(
+    messages: list[dict[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    if not messages:
+        return None, ""
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if message.get("role") == "tool" or _message_has_tool_result(content):
+            return message, _message_text(content)
+    return None, ""
+
+
+def _tool_result_is_error(message: dict[str, Any] | None, text: str) -> bool:
+    if not message:
+        return False
+    if bool(message.get("is_error")):
+        return True
+    lowered = text.lower()
+    if "<returncode>" in lowered and "<returncode>0</returncode>" not in lowered:
+        return True
+    return any(marker in lowered for marker in _TOOL_FAILURE_MARKERS)
+
+
+def _agent_state_pressure(messages: list[dict[str, Any]] | None, step_risk: str) -> tuple[int, float]:
+    """Estimate how much the current agent trajectory needs stronger review.
+
+    This is deliberately continuous and model-agnostic. It does not say "use
+    Opus after N steps"; it says long tool trajectories and accumulated tool
+    failures should reduce the force of cheap/routine caps.
+    """
+    if not messages:
+        return 0, 0.0
+
+    tool_steps = 0
+    failure_steps = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        has_tool_call = bool(message.get("tool_calls"))
+        is_tool_result = message.get("role") == "tool" or _message_has_tool_result(message.get("content"))
+        if has_tool_call:
+            tool_steps += 1
+        if is_tool_result:
+            tool_steps += 1
+            text = _message_text(message.get("content"))
+            if _tool_result_is_error(message, text):
+                failure_steps += 1
+
+    step_component = min(0.45, max(0, tool_steps) / 24.0)
+    failure_component = min(0.35, failure_steps / 6.0)
+    risk_component = 0.20 if str(step_risk or "").lower() == "high" else 0.0
+    pressure = min(1.0, step_component + failure_component + risk_component)
+    return tool_steps, pressure
+
+
+def _infer_routing_features_from_messages(
+    messages: list[dict[str, Any]] | None,
+    *,
+    max_output_tokens: int,
+) -> RoutingFeatures:
+    tool_message, tool_text = _latest_tool_result_message(messages)
+    has_tool_results = tool_message is not None
+    last_message = messages[-1] if messages else None
+    last_is_tool_result = bool(
+        isinstance(last_message, dict)
+        and (
+            last_message.get("role") == "tool"
+            or _message_has_tool_result(last_message.get("content"))
+        )
+    )
+    step_type = (
+        "tool-result-followup"
+        if last_is_tool_result
+        else ("general_agent" if has_tool_results else "general")
+    )
+
+    step_risk = "normal"
+    if step_type == "tool-result-followup":
+        if _tool_result_is_error(tool_message, tool_text):
+            step_risk = "high"
+        elif tool_text and len(tool_text) <= 800:
+            step_risk = "low"
+
+    agent_step_count, agent_pressure = _agent_state_pressure(messages, step_risk)
+
+    return RoutingFeatures(
+        step_type=step_type,
+        has_tool_results=has_tool_results,
+        step_risk=step_risk,
+        is_agentic=has_tool_results,
+        is_coding=has_tool_results,
+        prefers_reasoning=False,
+        requested_max_output_tokens=max(1, int(max_output_tokens)),
+        tier_floor=Tier.MEDIUM if step_risk == "high" else None,
+        tier_cap=Tier.MEDIUM if step_risk == "low" else None,
+        tier_cap_reason="low-risk" if step_risk == "low" else "",
+        agent_step_count=agent_step_count,
+        agent_pressure=agent_pressure,
+    )
 
 
 def _apply_tier_bounds(
@@ -83,6 +245,59 @@ def _apply_tier_bounds(
     return bounded, notes
 
 
+def _soften_tier_cap_for_agent_state(
+    v2: V2ClassifyResult,
+    features: RoutingFeatures,
+    tier_cap: Tier | None,
+) -> tuple[Tier | None, str | None]:
+    if tier_cap is None:
+        return tier_cap, None
+
+    predicted_tier = _derive_tier(v2.complexity)
+    if _TIER_ORDER[predicted_tier] <= _TIER_ORDER[tier_cap]:
+        return tier_cap, None
+
+    embedding_support = (
+        not v2.vote_c.abstained
+        and (v2.vote_c.tier_id or 0) >= 2
+        and v2.vote_c.confidence >= 0.45
+    )
+    pressure_support = features.agent_pressure >= 0.55 and v2.tier_id >= 2
+    high_risk_support = features.step_risk == "high" and v2.tier_id >= 2
+    cap_reason = str(features.tier_cap_reason or "").strip().lower()
+
+    if cap_reason == "environment-or-routine":
+        if str(features.step_risk or "").strip().lower() == "low":
+            return tier_cap, f"tier-cap-preserved({cap_reason}:low-risk-step)"
+        routine_pressure_support = (
+            features.agent_pressure >= 0.65
+            and v2.tier_id >= 3
+            and (embedding_support or v2.confidence >= 0.60)
+        )
+        if not routine_pressure_support:
+            return tier_cap, f"tier-cap-preserved({cap_reason})"
+    elif cap_reason in {
+        "low-risk",
+        "environment-recovery",
+        "routine-success",
+        "short-observation",
+        "recoverable-tool-error",
+    }:
+        return tier_cap, f"tier-cap-preserved({cap_reason})"
+
+    if embedding_support or pressure_support or high_risk_support:
+        reasons: list[str] = []
+        if embedding_support:
+            reasons.append("embedding")
+        if pressure_support:
+            reasons.append(f"agent-pressure={features.agent_pressure:.2f}")
+        if high_risk_support:
+            reasons.append("risk=high")
+        return None, "tier-cap-softened(" + ",".join(reasons) + ")"
+
+    return tier_cap, None
+
+
 def _should_activate_signal_b(row: dict[str, Any], vote_b: TierVote | None = None) -> bool:
     """Enable Signal B on longer conversations where it improves pass rate.
 
@@ -104,6 +319,70 @@ def _should_activate_signal_b(row: dict[str, Any], vote_b: TierVote | None = Non
     if vote_b is None or vote_b.abstained:
         return False
     return vote_b.confidence >= 0.95 and (vote_b.tier_id or 0) >= 1
+
+
+def _strongest_non_structural_tier(vote_a: TierVote, vote_c: TierVote) -> int | None:
+    """Return the strongest sufficiently confident non-structural support."""
+    supported: list[int] = []
+    if not vote_a.abstained and vote_a.tier_id is not None and vote_a.confidence >= 0.65:
+        supported.append(vote_a.tier_id)
+    if not vote_c.abstained and vote_c.tier_id is not None:
+        # For short standalone tasks, Signal C is the only semantic signal that
+        # can corroborate Signal B's structural "this is hard" read. Require
+        # strong confidence for mid-tier support, but allow moderate confidence
+        # when the embedding classifier says the task is highest-tier; the cap
+        # below still limits this to public COMPLEX, not tier_id=3.
+        min_confidence = 0.55 if vote_c.tier_id >= 3 else 0.70
+        if vote_c.confidence >= min_confidence:
+            supported.append(vote_c.tier_id)
+    return max(supported) if supported else None
+
+
+def _has_explicit_high_complexity_text(row: dict[str, Any]) -> bool:
+    text_parts: list[str] = []
+    for message in row.get("messages", []):
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text_parts.append(content)
+    text = "\n".join(text_parts).lower()
+    return any(marker in text for marker in _EXPLICIT_HIGH_COMPLEXITY_MARKERS)
+
+
+def _cap_uncorroborated_structural_high(
+    row: dict[str, Any],
+    vote_a: TierVote,
+    vote_b: TierVote,
+    vote_c: TierVote,
+) -> tuple[TierVote, bool, int | None]:
+    """Prevent short-prompt structure alone from forcing the highest v2 tier.
+
+    Signal B is a useful safety floor, but on standalone agent prompts it can
+    over-read task scaffolding ("plan, use tools, edit files") as highest-tier
+    complexity. Require Signal A or C to corroborate before allowing B to vote
+    at tier 3 on short no-tool context.
+    """
+    if vote_b.abstained or vote_b.tier_id is None:
+        return vote_b, False, None
+    if vote_b.tier_id < 3 or vote_b.confidence < 0.95:
+        return vote_b, False, None
+
+    messages = row.get("messages", [])
+    tool_msg_count = sum(1 for m in messages if m.get("role") == "tool" or m.get("tool_calls"))
+    if tool_msg_count > 0 or len(messages) > 3:
+        return vote_b, False, None
+
+    support_tier = _strongest_non_structural_tier(vote_a, vote_c)
+    explicit_high_complexity = _has_explicit_high_complexity_text(row)
+    if support_tier is not None and support_tier >= 3:
+        return vote_b, False, None
+    capped_tier = (
+        2
+        if (support_tier is not None and support_tier >= 2) or explicit_high_complexity
+        else 1
+    )
+    if vote_b.tier_id <= capped_tier:
+        return vote_b, False, None
+    return TierVote(capped_tier, vote_b.confidence), True, capped_tier
 
 
 @dataclass(frozen=True)
@@ -229,6 +508,12 @@ def _v2_classify(
     vote_a = _v2_sig_a.predict(row) if _v2_sig_a else TierVote(tier_id=1, confidence=0.4)
     vote_b = _v2_sig_b.predict(row) if _v2_sig_b else TierVote(tier_id=None, confidence=0.0)
     vote_c = _v2_sig_c.predict(row) if _v2_sig_c else TierVote(tier_id=None, confidence=0.0)
+    effective_vote_b, structural_high_capped, structural_cap_tier = _cap_uncorroborated_structural_high(
+        row,
+        vote_a,
+        vote_b,
+        vote_c,
+    )
 
     # Cache query embedding for potential index growth
     query_embedding = None
@@ -253,7 +538,7 @@ def _v2_classify(
         # unavailable. Lifecycle learning is additive, not required for routing.
         signal_b_promoted = False
         tracker_weights = None
-    use_signal_b = _should_activate_signal_b(row, vote_b) or signal_b_promoted
+    use_signal_b = _should_activate_signal_b(row, effective_vote_b) or signal_b_promoted
 
     # Get learned weights from tracker (falls back to defaults if not initialized)
 
@@ -261,8 +546,8 @@ def _v2_classify(
     if use_signal_b:
         active_votes = [vote_a]
         active_weights = [tracker_weights[0] if tracker_weights and len(tracker_weights) >= 3 else 0.50]
-        if not vote_b.abstained:
-            active_votes.append(vote_b)
+        if not effective_vote_b.abstained:
+            active_votes.append(effective_vote_b)
             active_weights.append(tracker_weights[1] if tracker_weights and len(tracker_weights) >= 3 else 0.10)
         if not vote_c.abstained:
             active_votes.append(vote_c)
@@ -282,25 +567,39 @@ def _v2_classify(
     result = ensemble.decide(active_votes)
 
     tier_id = result.tier_id if result.tier_id is not None else 1
+    weak_metadata_only_cap_applied = False
+    if (
+        not use_signal_b
+        and vote_c.abstained
+        and vote_a.confidence <= 0.35
+        and tier_id > 1
+    ):
+        # In deep tool-heavy trajectories Signal B is intentionally shadowed
+        # because it tends to over-escalate on stale conversation structure.
+        # If Signal C is unavailable too, the only active vote is Signal A's
+        # weak metadata prior. Do not let that weak prior route routine steps
+        # to premium models.
+        tier_id = 1
+        weak_metadata_only_cap_applied = True
     structural_floor_applied = False
     if (
         tool_msg_count == 0
         and len(row.get("messages", [])) <= 3
-        and not vote_b.abstained
-        and vote_b.confidence >= (0.70 if has_system_prompt else 0.95)
-        and (vote_b.tier_id or 0) >= 1
-        and tier_id < vote_b.tier_id
+        and not effective_vote_b.abstained
+        and effective_vote_b.confidence >= (0.70 if has_system_prompt else 0.95)
+        and (effective_vote_b.tier_id or 0) >= 1
+        and tier_id < effective_vote_b.tier_id
     ):
-        tier_id = vote_b.tier_id
+        tier_id = effective_vote_b.tier_id
         structural_floor_applied = True
     structural_medium_floor_applied = False
     if (
         not structural_floor_applied
         and tool_msg_count == 0
         and len(row.get("messages", [])) <= 3
-        and not vote_b.abstained
-        and vote_b.confidence >= 0.70
-        and (vote_b.tier_id or 0) >= 1
+        and not effective_vote_b.abstained
+        and effective_vote_b.confidence >= 0.70
+        and (effective_vote_b.tier_id or 0) >= 1
         and tier_id < 1
     ):
         # Short standalone implementation/design prompts are often capped to
@@ -321,6 +620,10 @@ def _v2_classify(
         signals_parts.append("v2:structural-floor")
     if structural_medium_floor_applied:
         signals_parts.append("v2:structural-medium-floor")
+    if structural_high_capped:
+        signals_parts.append(f"v2:structural-high-cap={structural_cap_tier}")
+    if weak_metadata_only_cap_applied:
+        signals_parts.append("v2:weak-metadata-only-cap")
     signals_text = tuple(signals_parts)
 
     return V2ClassifyResult(
@@ -363,7 +666,10 @@ def route(
     """Route a prompt to the best model using v2 multi-signal ensemble."""
     cfg = config or DEFAULT_CONFIG
     constraints = routing_constraints or RoutingConstraints()
-    features = routing_features or RoutingFeatures()
+    features = routing_features or _infer_routing_features_from_messages(
+        messages,
+        max_output_tokens=max_output_tokens,
+    )
     requirements = features.request_requirements() if routing_features else (request_requirements or RequestRequirements())
     hints = features.workload_hints() if routing_features else (workload_hints or WorkloadHints())
     mode = routing_mode if isinstance(routing_mode, RoutingMode) else RoutingMode(routing_mode)
@@ -386,6 +692,11 @@ def route(
 
     effective_tier_floor = features.tier_floor or tier_floor
     effective_tier_cap = features.tier_cap or tier_cap
+    effective_tier_cap, cap_softened_note = _soften_tier_cap_for_agent_state(
+        v2,
+        features,
+        effective_tier_cap,
+    )
     bounded_complexity, bound_notes = _apply_tier_bounds(
         v2.complexity,
         tier_floor=effective_tier_floor,
@@ -405,6 +716,8 @@ def route(
         streaming=features.streaming,
     )
     reasoning_parts = list(v2.signals_text)
+    if cap_softened_note:
+        reasoning_parts.append(cap_softened_note)
     reasoning_parts.extend(bound_notes)
     reasoning = ", ".join(reasoning_parts)
 
@@ -464,16 +777,6 @@ def route(
 
 def ensure_seed_index_deployed() -> None:
     """Copy seed index from package data to user data dir if not already present."""
-    from uncommon_route.paths import data_dir
-    from pathlib import Path
-    import shutil
+    from uncommon_route.v2_assets import ensure_v2_assets_deployed
 
-    user_splits = data_dir() / "v2_splits"
-    pkg_splits = Path(__file__).resolve().parent.parent / "data" / "v2_splits"
-
-    for fname in ("seed_embeddings.npy", "seed_labels.json"):
-        user_file = user_splits / fname
-        pkg_file = pkg_splits / fname
-        if not user_file.exists() and pkg_file.exists():
-            user_splits.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(pkg_file, user_file)
+    ensure_v2_assets_deployed()

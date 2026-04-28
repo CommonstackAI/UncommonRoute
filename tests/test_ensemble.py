@@ -47,6 +47,15 @@ def test_result_has_method():
     assert result.method in ("direct", "conservative")
 
 
+def test_single_low_confidence_vote_does_not_become_certain():
+    votes = [TierVote(tier_id=3, confidence=0.30)]
+    ens = Ensemble(weights=[1.0])
+    result = ens.decide(votes)
+    assert result.confidence == 0.30
+    assert result.raw_confidence == 0.30
+    assert result.method == "conservative"
+
+
 def test_conservative_fallback_caps_at_tier_3():
     """When best_tier=3 but confidence is low, conservative path should cap at 3 (not 4)."""
     # tier 3 wins the vote but with only ~52% confidence → below conservative threshold

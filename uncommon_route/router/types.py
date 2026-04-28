@@ -119,7 +119,10 @@ class RoutingFeatures:
     requested_max_output_tokens: int | None = None
     tier_floor: Tier | None = None
     tier_cap: Tier | None = None
+    tier_cap_reason: str = ""
     session_present: bool = False
+    agent_step_count: int = 0
+    agent_pressure: float = 0.0
     capability_lane: CapabilityLane | None = None
     previous_served_quality: ServedQuality | None = None
     continuity_quality_floor: ServedQuality | None = None
@@ -160,6 +163,12 @@ class RoutingFeatures:
             labels.append("reasoning")
         if self.session_present:
             labels.append("session")
+        if self.tier_cap is not None and self.tier_cap_reason:
+            labels.append(f"cap:{self.tier_cap_reason}")
+        if self.agent_step_count > 0:
+            labels.append(f"agent-steps:{min(99, self.agent_step_count)}")
+        if self.agent_pressure >= 0.35:
+            labels.append(f"agent-pressure:{min(1.0, max(0.0, self.agent_pressure)):.2f}")
         if self.capability_lane is not None:
             labels.append(f"lane:{self.capability_lane.value}")
         if self.previous_served_quality is not None:
@@ -202,6 +211,12 @@ class CandidateScore:
     predicted_quality: float = 0.5
     effective_cost_multiplier: float = 1.0
     editorial: float = 0.0
+    quality_prior_raw: float = 0.5
+    quality_prior_source: str = ""
+    quality_prior_match_type: str = ""
+    quality_prior_matched_model: str = ""
+    quality_prior_confidence: float = 0.0
+    quality_prior_samples: int = 0
     cost: float = 0.0
     latency: float = 0.0
     reliability: float = 0.0

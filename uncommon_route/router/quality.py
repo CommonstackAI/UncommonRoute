@@ -207,14 +207,59 @@ def scoring_served_quality_target(
     tier: Tier,
     target: ServedQuality,
     floor: ServedQuality,
+    *,
+    complexity: float | None = None,
+    confidence: float | None = None,
+    step_risk: str = "normal",
+    is_agentic: bool = False,
+    is_coding: bool = False,
+    has_tool_results: bool = False,
+    session_present: bool = False,
+    agent_step_count: int = 0,
+    agent_pressure: float = 0.0,
 ) -> ServedQuality:
     """Return the quality level used for score alignment.
 
-    AUTO+COMPLEX should mean "balanced or better, prefer quality when it is
-    worth the cost", not "always give premium models a scoring bonus".
-    BEST keeps the stricter premium target.
+    AUTO+COMPLEX should mean "balanced or better, prefer quality when the
+    classifier is confident the current step truly needs it", not "every
+    traceback or agent step should become premium-only". BEST keeps the
+    stricter premium target.
     """
+    if quality_rank(floor) > quality_rank(target):
+        return floor
+
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
+
+    if (
+        mode is RoutingMode.AUTO
+        and normalized_step_risk == "low"
+        and tier in {Tier.SIMPLE, Tier.MEDIUM}
+        and agent_pressure < 0.55
+    ):
+        return floor
+
     if mode is RoutingMode.AUTO and tier is Tier.COMPLEX:
+        initial_complex_planning = (
+            target is ServedQuality.PREMIUM
+            and complexity is not None
+            and confidence is not None
+            and complexity >= 0.86
+            and confidence >= 0.30
+            and (is_agentic or is_coding)
+            and not has_tool_results
+            and not session_present
+            and agent_step_count == 0
+            and normalized_step_risk != "low"
+        )
+        if initial_complex_planning or (
+            target is ServedQuality.PREMIUM
+            and complexity is not None
+            and confidence is not None
+            and complexity >= 0.86
+            and confidence >= 0.55
+            and normalized_step_risk == "high"
+        ):
+            return target
         return floor
     return target
 
@@ -250,19 +295,27 @@ def apply_quality_guards(
     capabilities: dict[str, ModelCapabilities],
     continuity_floor: ServedQuality | None = None,
     step_risk: str = "normal",
+    agent_pressure: float = 0.0,
 ) -> QualityGuardResult:
     quality_by_model = {
         model: model_served_quality(model, lane, capabilities.get(model))
         for model in candidates
     }
     target = target_served_quality(mode, tier)
-    floor = minimum_served_quality(mode, tier)
     normalized_step_risk = str(step_risk or "normal").strip().lower()
-    risk_floor = (
-        ServedQuality.BALANCED
-        if normalized_step_risk == "high"
-        else None
-    )
+    floor = minimum_served_quality(mode, tier)
+    if (
+        mode is RoutingMode.AUTO
+        and normalized_step_risk == "low"
+    ):
+        # The public tier describes the whole request, but served-quality is a
+        # per-step guard. A routine/successful agent step should not exclude
+        # economy candidates just because the surrounding issue is complex.
+        floor = ServedQuality.ECONOMY
+    if normalized_step_risk == "high":
+        risk_floor = ServedQuality.BALANCED
+    else:
+        risk_floor = None
     hard_continuity_floor = continuity_floor if mode is RoutingMode.BEST else None
     effective_floor = stronger_quality(
         stronger_quality(floor, risk_floor),
@@ -279,14 +332,17 @@ def apply_quality_guards(
     ]
     if normalized_step_risk != "normal":
         notes.append(f"step-risk={normalized_step_risk}")
-    if risk_floor is not None:
+    if agent_pressure >= 0.35:
+        notes.append(f"agent-pressure={agent_pressure:.2f}")
+    if risk_floor is not None and normalized_step_risk == "high":
         notes.append(f"step-risk-floor={risk_floor.value}")
+    elif risk_floor is not None:
+        notes.append(f"agent-pressure-floor={risk_floor.value}")
     if continuity_floor is not None and hard_continuity_floor is None:
         notes.append(f"continuity-soft={continuity_floor.value}")
-    prefer_floor_pool = (
-        mode is RoutingMode.AUTO
-        and normalized_step_risk != "high"
-    )
+    # AUTO should route on model suitability, not collapse a high-risk complex
+    # step into an Opus-only pool before scoring can compare price/quality.
+    prefer_floor_pool = mode is RoutingMode.AUTO
 
     preferred = [
         model for model in candidates

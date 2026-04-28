@@ -30,7 +30,9 @@ def init_signals(index_dir=None):
     # Auto-discover seed index if not explicitly provided
     if not index_dir:
         try:
+            from uncommon_route.v2_assets import ensure_v2_assets_deployed
             from uncommon_route.paths import data_dir
+            ensure_v2_assets_deployed()
             candidate = data_dir() / "v2_splits"
             if (candidate / "seed_embeddings.npy").exists():
                 index_dir = str(candidate)

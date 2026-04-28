@@ -43,6 +43,8 @@ class Ensemble:
             raise ValueError(f"Expected {len(self._weights)} votes, got {len(votes)}")
         tier_scores = [0.0, 0.0, 0.0, 0.0]
         total_weight = 0.0
+        confidence_weighted_sum = 0.0
+        confidence_nominal_weight = 0.0
 
         for vote, weight in zip(votes, self._weights):
             if vote.tier_id is None:
@@ -52,6 +54,8 @@ class Ensemble:
             w = vote.confidence * vote.confidence * weight
             tier_scores[vote.tier_id] += w
             total_weight += w
+            confidence_weighted_sum += vote.confidence * weight
+            confidence_nominal_weight += weight
 
         if total_weight == 0:
             return EnsembleResult(
@@ -61,7 +65,12 @@ class Ensemble:
 
         normalized = [s / total_weight for s in tier_scores]
         best_tier = max(range(4), key=lambda i: normalized[i])
-        raw_confidence = normalized[best_tier]
+        signal_confidence = (
+            confidence_weighted_sum / confidence_nominal_weight
+            if confidence_nominal_weight > 0
+            else 0.0
+        )
+        raw_confidence = normalized[best_tier] * signal_confidence
 
         # Apply calibration if available
         confidence = raw_confidence

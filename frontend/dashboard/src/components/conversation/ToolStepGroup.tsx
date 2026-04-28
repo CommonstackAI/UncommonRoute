@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ToolStep } from "./groupMessages";
 import DecisionBadge from "./DecisionBadge";
-import MessageBubble from "./MessageBubble";
+import MessageBubble, { type ToolCallLookup } from "./MessageBubble";
 
 function aggregateToolNames(steps: ToolStep[]): Record<string, number> {
   const acc: Record<string, number> = {};
@@ -26,7 +26,13 @@ function distinctModels(steps: ToolStep[]): { captured: number; preCapture: numb
   return { captured: captured.size, preCapture };
 }
 
-export default function ToolStepGroup({ steps }: { steps: ToolStep[] }) {
+export default function ToolStepGroup({
+  steps,
+  toolCalls,
+}: {
+  steps: ToolStep[];
+  toolCalls?: ToolCallLookup;
+}) {
   const [open, setOpen] = useState(false);
   const tools = aggregateToolNames(steps);
   const toolSummary = Object.entries(tools)
@@ -81,7 +87,7 @@ export default function ToolStepGroup({ steps }: { steps: ToolStep[] }) {
               {step.results.length > 0 ? (
                 <div className="space-y-1">
                   {step.results.map((r, k) => (
-                    <MessageBubble key={k} message={r} />
+                    <MessageBubble key={k} message={r} toolCalls={toolCalls} />
                   ))}
                 </div>
               ) : null}

@@ -1,9 +1,69 @@
-import { useState } from "react";
-import type { ConversationMessage } from "../../api";
+import { useState, type ReactNode } from "react";
+import type { ConversationMessage, ConversationToolCall } from "../../api";
 import DecisionBadge from "./DecisionBadge";
 import MarkdownContent from "./MarkdownContent";
 
+export type ToolCallLookup = Record<string, ConversationToolCall>;
+
+function formatToolInput(input: ConversationToolCall["input"]): string {
+  if (input == null) return "";
+  if (typeof input === "string") return input;
+  try {
+    const entries = Object.entries(input);
+    if (entries.length === 0) return "";
+    return entries
+      .map(([k, v]) => {
+        const s = typeof v === "string" ? v : JSON.stringify(v);
+        return `${k}: ${s}`;
+      })
+      .join(", ");
+  } catch {
+    return JSON.stringify(input);
+  }
+}
+
 const SYSTEM_REMINDER_PATTERN = /^\s*(<(system-reminder|command-name|local-command-stdout|command-message|command-args)\b[^>]*>)/i;
+
+const LONG_TEXT_LINE_THRESHOLD = 18;
+const LONG_TEXT_CHAR_THRESHOLD = 1400;
+
+function isLongText(text: string): boolean {
+  if (!text) return false;
+  if (text.length > LONG_TEXT_CHAR_THRESHOLD) return true;
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) lines++;
+    if (lines > LONG_TEXT_LINE_THRESHOLD) return true;
+  }
+  return false;
+}
+
+function CollapsibleContent({ text, children }: { text: string; children: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!isLongText(text)) return <>{children}</>;
+  return (
+    <div>
+      <div
+        className={
+          expanded
+            ? ""
+            : "relative max-h-[260px] overflow-hidden"
+        }
+      >
+        {children}
+        {!expanded ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-n-surface to-transparent" />
+        ) : null}
+      </div>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-n-secondary hover:text-n-primary"
+      >
+        {expanded ? "show less" : "show more"}
+      </button>
+    </div>
+  );
+}
 
 function formatRelativeTs(ts?: number | null): string {
   if (ts == null) return "";
@@ -14,14 +74,20 @@ function formatRelativeTs(ts?: number | null): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-export default function MessageBubble({ message }: { message: ConversationMessage }) {
+export default function MessageBubble({
+  message,
+  toolCalls,
+}: {
+  message: ConversationMessage;
+  toolCalls?: ToolCallLookup;
+}) {
   if (message.role === "user") {
     return <UserBubble message={message} />;
   }
   if (message.role === "assistant") {
     return <AssistantBubble message={message} />;
   }
-  return <ToolResultBubble message={message} />;
+  return <ToolResultBubble message={message} toolCalls={toolCalls} />;
 }
 
 function UserBubble({ message }: { message: ConversationMessage }) {
@@ -59,8 +125,12 @@ function UserBubble({ message }: { message: ConversationMessage }) {
         </pre>
       ) : null}
       {displayText.trim() ? (
-        <div className="mt-2 whitespace-pre-wrap text-[14px] leading-relaxed text-n-primary">
-          {displayText}
+        <div className="mt-2">
+          <CollapsibleContent text={displayText}>
+            <div className="whitespace-pre-wrap text-[14px] leading-relaxed text-n-primary">
+              {displayText}
+            </div>
+          </CollapsibleContent>
         </div>
       ) : null}
     </div>
@@ -92,24 +162,44 @@ function AssistantBubble({ message }: { message: ConversationMessage }) {
       </div>
       {message.text ? (
         <div className="mt-2">
-          <MarkdownContent text={message.text} />
+          <CollapsibleContent text={message.text}>
+            <MarkdownContent text={message.text} />
+          </CollapsibleContent>
         </div>
       ) : null}
     </div>
   );
 }
 
-function ToolResultBubble({ message }: { message: ConversationMessage }) {
+function ToolResultBubble({
+  message,
+  toolCalls,
+}: {
+  message: ConversationMessage;
+  toolCalls?: ToolCallLookup;
+}) {
   const [expanded, setExpanded] = useState(false);
   const lines = (message.text || "").split("\n");
   const isLong = lines.length > 5 || (message.text || "").length > 1000;
   const preview = isLong && !expanded ? lines.slice(0, 5).join("\n") : message.text;
+  const call = message.tool_use_id ? toolCalls?.[message.tool_use_id] : undefined;
+  const inputStr = call ? formatToolInput(call.input) : "";
   return (
     <div className="rounded-compact border border-n-border bg-n-raised px-3 py-2">
       <div className="flex items-baseline justify-between gap-3">
-        <div className="label">TOOL RESULT</div>
+        <div className="flex min-w-0 items-baseline gap-2">
+          <div className="label">TOOL RESULT</div>
+          {call ? (
+            <span className="truncate font-mono text-[11px] text-n-primary">
+              <span className="text-n-display">{call.name}</span>
+              <span className="text-n-secondary">(</span>
+              <span className="text-n-secondary">{inputStr}</span>
+              <span className="text-n-secondary">)</span>
+            </span>
+          ) : null}
+        </div>
         {message.tool_use_id ? (
-          <div className="font-mono text-[10px] text-n-disabled">
+          <div className="shrink-0 font-mono text-[10px] text-n-disabled">
             {message.tool_use_id.slice(-8)}
           </div>
         ) : null}

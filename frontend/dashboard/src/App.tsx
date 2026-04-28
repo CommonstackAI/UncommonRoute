@@ -25,8 +25,9 @@ import Connections from "./components/Connections";
 import Routing from "./components/Routing";
 import Playground from "./components/Playground";
 import Explainer from "./components/Explainer";
+import ExplainerNew from "./components/ExplainerNew";
 
-type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain";
+type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain" | "explain_new";
 
 export default function App() {
   const [page, setPage] = useState<Page>("home");
@@ -90,6 +91,7 @@ export default function App() {
           {page === "home" && <Home stats={stats} health={health} />}
           {page === "playground" && <Playground />}
           {page === "explain" && <Explainer />}
+          {page === "explain_new" && <ExplainerNew />}
           {page === "routing" && <Routing onRefresh={refresh} />}
           {page === "activity" && <Activity stats={stats} />}
           {page === "models" && <Models mapping={mapping} />}

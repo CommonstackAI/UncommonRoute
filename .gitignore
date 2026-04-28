@@ -37,6 +37,9 @@ htmlcov/
 # Node (openclaw-plugin)
 openclaw-plugin/node_modules/
 
+# Frontend dashboard build cache
+frontend/dashboard/*.tsbuildinfo
+
 # Spend control local data
 spending.json
 

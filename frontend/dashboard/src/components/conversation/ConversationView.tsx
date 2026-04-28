@@ -1,8 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchConversation, type Conversation } from "../../api";
-import { group } from "./groupMessages";
-import MessageBubble from "./MessageBubble";
-import ToolStepGroup from "./ToolStepGroup";
+import TerminalView from "./TerminalView";
 import TurnListView, { type Session } from "./TurnListView";
 
 export default function ConversationView({
@@ -15,12 +13,15 @@ export default function ConversationView({
   const [data, setData] = useState<Conversation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setData(null);
+    pendingScrollRef.current = true;
 
     const load = async () => {
       const payload = await fetchConversation(sessionId);
@@ -42,6 +43,21 @@ export default function ConversationView({
     };
   }, [sessionId]);
 
+  useEffect(() => {
+    if (!pendingScrollRef.current) return;
+    if (loading) return;
+    if (!data && !fallbackSession) return;
+    pendingScrollRef.current = false;
+    requestAnimationFrame(() => {
+      const el = containerRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const target = window.scrollY + rect.bottom - window.innerHeight + 16;
+        window.scrollTo({ top: Math.max(0, target), behavior: "auto" });
+      }
+    });
+  }, [data, loading, fallbackSession]);
+
   if (loading && !data) {
     return (
       <div className="space-y-3">
@@ -62,7 +78,11 @@ export default function ConversationView({
 
   if (!data.content_available) {
     if (fallbackSession) {
-      return <TurnListView session={fallbackSession} />;
+      return (
+        <div ref={containerRef}>
+          <TurnListView session={fallbackSession} />
+        </div>
+      );
     }
     return (
       <div className="font-mono text-[11px] text-n-disabled">
@@ -71,28 +91,9 @@ export default function ConversationView({
     );
   }
 
-  const items = group({ messages: data.messages, compact_breaks: data.compact_breaks });
-
   return (
-    <div className="space-y-4">
-      {items.map((it, i) => {
-        if (it.type === "compact_break") {
-          return (
-            <div
-              key={`break-${i}`}
-              className="flex items-center gap-3 px-1 py-1 font-mono text-[11px] uppercase tracking-[0.08em] text-n-disabled"
-            >
-              <span className="h-px flex-1 bg-n-border" />
-              <span>⟪HISTORY COMPACTED⟫</span>
-              <span className="h-px flex-1 bg-n-border" />
-            </div>
-          );
-        }
-        if (it.type === "tool_group") {
-          return <ToolStepGroup key={`group-${i}`} steps={it.steps} />;
-        }
-        return <MessageBubble key={`msg-${i}`} message={it.message} />;
-      })}
+    <div ref={containerRef}>
+      <TerminalView data={data} />
     </div>
   );
 }

@@ -55,17 +55,18 @@ export default function ExplainerNew() {
 
   return (
     <div className="animate-fadeIn">
-      <div className="mb-8">
-        <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN NEW</h1>
-        <p className="mt-2 text-[14px] text-n-secondary">
-          Group requests by conversation. Each session shows its turns and assistant decisions inline.
-        </p>
-      </div>
-
-      {error ? <div className="mb-4 font-mono text-[12px] text-n-accent">{error}</div> : null}
-
-      <div className="grid grid-cols-12 gap-8">
-        <div className="col-span-4 max-h-[760px] overflow-y-auto rounded-card border border-n-border bg-n-surface">
+      <div className="grid grid-cols-12 items-start gap-8">
+        <div className="col-span-4 sticky top-8 self-start flex max-h-[calc(100vh-4rem)] flex-col">
+          <div className="mb-4 shrink-0">
+            <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN</h1>
+            <p className="mt-2 text-[13px] text-n-secondary">
+              Routing decisions grouped by session.
+            </p>
+          </div>
+          {error ? (
+            <div className="mb-3 shrink-0 font-mono text-[12px] text-n-accent">{error}</div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-card border border-n-border bg-n-surface">
           <div className="flex items-center justify-between border-b border-n-border px-5 py-4">
             <div className="label">SESSIONS</div>
             <div className="font-mono text-[11px] text-n-secondary">
@@ -115,6 +116,7 @@ export default function ExplainerNew() {
                 </button>
               );
             })}
+          </div>
           </div>
         </div>
 

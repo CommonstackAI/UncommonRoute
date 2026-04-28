@@ -1,4 +1,5 @@
 import type { DecisionCard, TraceAttempt } from "../../api";
+import RouteReasoning from "./RouteReasoning";
 
 const TIER_NAMES: Record<string, string> = {
   SIMPLE: "LOW",
@@ -66,10 +67,7 @@ export default function DecisionDetail({ decision }: { decision: DecisionCard })
       </div>
 
       <div>
-        <div className="label mb-1">ROUTE REASONING</div>
-        <div className="text-[12px] text-n-primary">
-          {decision.route_reasoning || "—"}
-        </div>
+        <RouteReasoning text={decision.route_reasoning || ""} />
         {decision.fallback_reason ? (
           <div className="mt-1 font-mono text-[11px] text-n-warning">
             Fallback: {decision.fallback_reason}

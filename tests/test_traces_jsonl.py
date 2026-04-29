@@ -278,7 +278,7 @@ def test_extract_session_v2_inputs_uses_responses_previous_id() -> None:
 def test_capture_off_returns_empty_dict(monkeypatch) -> None:
     from uncommon_route.proxy import _capture_non_streaming
 
-    monkeypatch.delenv("UNCOMMON_ROUTE_CAPTURE_CONTENT", raising=False)
+    monkeypatch.setenv("UNCOMMON_ROUTE_CAPTURE_CONTENT", "0")
     out = _capture_non_streaming(
         {"messages": [{"role": "user", "content": "hi"}]},
         b'{"content":[{"type":"text","text":"hi back"}]}',

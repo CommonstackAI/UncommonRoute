@@ -601,10 +601,10 @@ def _extract_assistant_text(content: bytes) -> str:
 
 
 def _capture_enabled() -> bool:
-    return os.environ.get("UNCOMMON_ROUTE_CAPTURE_CONTENT", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
+    return os.environ.get("UNCOMMON_ROUTE_CAPTURE_CONTENT", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
     }
 
 

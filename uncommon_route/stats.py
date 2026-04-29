@@ -84,6 +84,7 @@ class RouteRecord:
     sidechannel_estimated_cost: float = 0.0
     sidechannel_actual_cost: float | None = None
     session_id: str | None = None
+    turn_id: str = ""
     step_type: str = "general"
     fallback_reason: str = ""
     streaming: bool = False
@@ -328,53 +329,7 @@ class RouteStats:
     def recent(self, limit: int = 30) -> list[dict[str, Any]]:
         """Most recent routed requests that carry a request_id (for feedback)."""
         records = [r for r in reversed(self._records) if r.request_id]
-        return [
-            {
-                "request_id": r.request_id,
-                "timestamp": r.timestamp,
-                "mode": r.mode,
-                "model": r.model,
-                "tier": _normalize_tier_label(r.tier),
-                "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
-                "served_quality": _normalize_served_quality(r.served_quality),
-                "served_quality_target": _normalize_served_quality(r.served_quality_target),
-                "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
-                "capability_lane": str(r.capability_lane or "").strip().lower(),
-                "method": r.method,
-                "cost": _effective_cost(r),
-                "savings": r.savings,
-                "raw_confidence": r.raw_confidence,
-                "confidence_source": r.confidence_source,
-                "transport": r.transport,
-                "cache_mode": r.cache_mode,
-                "cache_family": r.cache_family,
-                "cache_breakpoints": r.cache_breakpoints,
-                "cache_hit_ratio": r.cache_hit_ratio,
-                "cache_read_input_tokens": r.cache_read_input_tokens,
-                "input_tokens_before": r.input_tokens_before,
-                "input_tokens_after": r.input_tokens_after,
-                "artifacts_created": r.artifacts_created,
-                "prompt_preview": r.prompt_preview,
-                "complexity": getattr(r, "complexity", 0.33),
-                "route_reasoning": r.route_reasoning,
-                "constraint_tags": list(r.constraint_tags or []),
-                "hint_tags": list(r.hint_tags or []),
-                "feature_tags": list(r.feature_tags or []),
-                "answer_depth": r.answer_depth,
-                "status_code": r.status_code,
-                "error_code": r.error_code,
-                "error_stage": r.error_stage,
-                "error_message": r.error_message,
-                "feedback_signal": r.feedback_signal,
-                "feedback_ok": r.feedback_ok,
-                "feedback_action": r.feedback_action,
-                "feedback_from_tier": r.feedback_from_tier,
-                "feedback_to_tier": r.feedback_to_tier,
-                "feedback_reason": r.feedback_reason,
-                "feedback_submitted_at": r.feedback_submitted_at,
-            }
-            for r in records[:limit]
-        ]
+        return [record_to_recent_dict(r) for r in records[:limit]]
 
     def summary(self) -> StatsSummary:
         if not self._records:
@@ -601,6 +556,7 @@ class RouteStats:
                 sidechannel_estimated_cost=r.get("sidechannel_estimated_cost", 0.0),
                 sidechannel_actual_cost=r.get("sidechannel_actual_cost"),
                 session_id=r.get("session_id"),
+                turn_id=r.get("turn_id", ""),
                 step_type=r.get("step_type", "general"),
                 fallback_reason=r.get("fallback_reason", ""),
                 streaming=r.get("streaming", False),
@@ -628,6 +584,55 @@ class RouteStats:
                 feedback_submitted_at=r.get("feedback_submitted_at", 0.0),
             ))
         self._cleanup()
+
+
+def record_to_recent_dict(r: RouteRecord) -> dict[str, Any]:
+    """Serialize a RouteRecord into the shape returned by /v1/stats/recent."""
+    return {
+        "request_id": r.request_id,
+        "turn_id": r.turn_id,
+        "timestamp": r.timestamp,
+        "mode": r.mode,
+        "model": r.model,
+        "tier": _normalize_tier_label(r.tier),
+        "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
+        "served_quality": _normalize_served_quality(r.served_quality),
+        "served_quality_target": _normalize_served_quality(r.served_quality_target),
+        "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
+        "capability_lane": str(r.capability_lane or "").strip().lower(),
+        "method": r.method,
+        "cost": _effective_cost(r),
+        "savings": r.savings,
+        "raw_confidence": r.raw_confidence,
+        "confidence_source": r.confidence_source,
+        "transport": r.transport,
+        "cache_mode": r.cache_mode,
+        "cache_family": r.cache_family,
+        "cache_breakpoints": r.cache_breakpoints,
+        "cache_hit_ratio": r.cache_hit_ratio,
+        "cache_read_input_tokens": r.cache_read_input_tokens,
+        "input_tokens_before": r.input_tokens_before,
+        "input_tokens_after": r.input_tokens_after,
+        "artifacts_created": r.artifacts_created,
+        "prompt_preview": r.prompt_preview,
+        "complexity": getattr(r, "complexity", 0.33),
+        "route_reasoning": r.route_reasoning,
+        "constraint_tags": list(r.constraint_tags or []),
+        "hint_tags": list(r.hint_tags or []),
+        "feature_tags": list(r.feature_tags or []),
+        "answer_depth": r.answer_depth,
+        "status_code": r.status_code,
+        "error_code": r.error_code,
+        "error_stage": r.error_stage,
+        "error_message": r.error_message,
+        "feedback_signal": r.feedback_signal,
+        "feedback_ok": r.feedback_ok,
+        "feedback_action": r.feedback_action,
+        "feedback_from_tier": r.feedback_from_tier,
+        "feedback_to_tier": r.feedback_to_tier,
+        "feedback_reason": r.feedback_reason,
+        "feedback_submitted_at": r.feedback_submitted_at,
+    }
 
 
 def _record_payload(r: RouteRecord) -> dict[str, Any]:
@@ -677,6 +682,7 @@ def _record_payload(r: RouteRecord) -> dict[str, Any]:
         "sidechannel_estimated_cost": r.sidechannel_estimated_cost,
         "sidechannel_actual_cost": r.sidechannel_actual_cost,
         "session_id": r.session_id,
+        "turn_id": r.turn_id,
         "step_type": r.step_type,
         "fallback_reason": r.fallback_reason,
         "streaming": r.streaming,

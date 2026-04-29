@@ -91,8 +91,9 @@ from uncommon_route.normalize import (
     normalize_messages_to_hashes,
 )
 from uncommon_route.spend_control import SpendControl
-from uncommon_route.stats import RouteRecord, RouteStats
+from uncommon_route.stats import RouteRecord, RouteStats, record_to_recent_dict
 from uncommon_route.traces import RequestTrace, TraceStore, prompt_hash as trace_prompt_hash
+from uncommon_route.events import get_bus
 from uncommon_route.feedback import FeedbackCollector
 from uncommon_route.model_experience import ModelExperienceStore
 from uncommon_route.paths import data_dir
@@ -3308,6 +3309,17 @@ def create_app(
                 to_tier=result.to_tier,
                 reason=result.reason,
             )
+            get_bus().publish({
+                "type": "feedback_updated",
+                "request_id": request_id,
+                "feedback_signal": signal,
+                "feedback_ok": result.ok,
+                "feedback_action": result.action,
+                "feedback_from_tier": result.from_tier,
+                "feedback_to_tier": result.to_tier,
+                "feedback_reason": result.reason,
+                "feedback_submitted_at": time.time(),
+            })
             _traces.record_feedback(
                 request_id,
                 signal=signal,
@@ -3351,6 +3363,40 @@ def create_app(
             if len(visible_records) >= limit:
                 break
         return JSONResponse(visible_records)
+
+    async def handle_events_stream(request: Request) -> Response:
+        """GET /v1/events/stream — Server-Sent Events for live dashboard updates."""
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+
+        bus = get_bus()
+        queue = await bus.subscribe()
+
+        async def _gen() -> AsyncGenerator[bytes, None]:
+            yield b": connected\n\n"
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        payload = json.dumps(event, default=str)
+                        yield f"data: {payload}\n\n".encode("utf-8")
+                    except asyncio.TimeoutError:
+                        yield b": keepalive\n\n"
+            finally:
+                await bus.unsubscribe(queue)
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     async def handle_traces(request: Request) -> JSONResponse:
         denied = _admin_auth_failure(request)
@@ -3524,6 +3570,11 @@ def create_app(
         attempts_payload: list[dict[str, Any]] = []
         session_id: str | None = None
         request_id = uuid.uuid4().hex[:12]
+        get_bus().publish({
+            "type": "request_started",
+            "request_id": request_id,
+            "timestamp": time.time(),
+        })
         debug_headers: dict[str, str] = {}
         prompt_preview = ""
         prompt_hash_value = ""
@@ -3567,6 +3618,7 @@ def create_app(
         prompt_preview = (_pv + "...") if len(prompt) > 80 else _pv
         prompt_hash_value = trace_prompt_hash(prompt)
         session_id = _resolve_session_id(request, body)
+        turn_id = f"{session_id or '_'}:{prompt_hash_value}" if prompt_hash_value else ""
         step_type, tool_names = _classify_step(body)
         _set_header(debug_headers, "x-uncommon-route-request-id", request_id)
 
@@ -3678,7 +3730,7 @@ def create_app(
                     else capability_lane_value
                 )
                 timestamp_value = time.time()
-                _stats.record(RouteRecord(
+                infeasible_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -3703,6 +3755,7 @@ def create_app(
                     latency_us=route_latency_us,
                     transport=transport_decision.selected_transport,
                     session_id=session_id,
+                    turn_id=turn_id,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
                     route_reasoning=route_reasoning,
@@ -3711,7 +3764,12 @@ def create_app(
                     error_code=exc.infeasibility.code.value,
                     error_stage="routing",
                     error_message=exc.infeasibility.message,
-                ))
+                )
+                _stats.record(infeasible_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(infeasible_record),
+                })
                 _traces.record(RequestTrace(
                     timestamp=timestamp_value,
                     request_id=request_id,
@@ -3759,6 +3817,16 @@ def create_app(
             selected_model = decision.model
             tier_value = decision.tier.value
             decision_tier = tier_value
+            get_bus().publish({
+                "type": "request_routed",
+                "request_id": request_id,
+                "turn_id": turn_id,
+                "tier": tier_value,
+                "model": selected_model,
+                "method": "pool",
+                "transport": transport_decision.selected_transport,
+                "prompt_preview": prompt_preview,
+            })
             served_quality_value = decision.served_quality.value
             served_quality_target_value = decision.served_quality_target.value
             served_quality_floor_value = (
@@ -3867,7 +3935,7 @@ def create_app(
             check = await _spend_reservation.reserve(request_id, estimated_cost)
             if not check.allowed:
                 timestamp_value = time.time()
-                _stats.record(RouteRecord(
+                spend_blocked_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -3892,6 +3960,7 @@ def create_app(
                     latency_us=(time.perf_counter_ns() - route_start) / 1000,
                     transport=transport_decision.selected_transport,
                     session_id=session_id,
+                    turn_id=turn_id,
                     step_type=step_type,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
@@ -3907,7 +3976,12 @@ def create_app(
                     error_code="spend_limit_exceeded",
                     error_stage="guardrail",
                     error_message=check.reason or "Spending limit exceeded",
-                ))
+                )
+                _stats.record(spend_blocked_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(spend_blocked_record),
+                })
                 _traces.record(RequestTrace(
                     timestamp=timestamp_value,
                     request_id=request_id,
@@ -4477,7 +4551,7 @@ def create_app(
             timestamp_value = time.time()
 
             if is_virtual or status_code == 200:
-                _stats.record(RouteRecord(
+                completed_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -4523,6 +4597,7 @@ def create_app(
                     sidechannel_estimated_cost=sidechannel_estimated_cost,
                     sidechannel_actual_cost=sidechannel_actual_cost,
                     session_id=session_id,
+                    turn_id=turn_id,
                     step_type=step_type,
                     fallback_reason=fallback_reason,
                     streaming=streaming,
@@ -4541,7 +4616,12 @@ def create_app(
                     error_code=error_code,
                     error_stage=error_stage,
                     error_message=error_message,
-                ))
+                )
+                _stats.record(completed_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(completed_record),
+                })
 
             transport_for_capture = transport_decision.selected_transport
             def _capture_for_record(b, content, chunks):
@@ -4645,6 +4725,13 @@ def create_app(
                 error_message=derived_error_message,
             )
 
+        # Tracks whether the streaming path has completed a record() call.
+        # Needed because Starlette cancels the response generator when the
+        # client disconnects, raising CancelledError that bypasses
+        # `except Exception` and would otherwise leave the row stuck in
+        # routed state on the dashboard.
+        stream_record_state = {"done": False}
+
         try:
             if is_streaming:
                 async def _record_stream_success(
@@ -4710,6 +4797,7 @@ def create_app(
                             streaming=True,
                             stream_chunks=stream_chunks,
                         )
+                    stream_record_state["done"] = True
 
                 async def _record_stream_failure() -> None:
                     await _spend_reservation.release(request_id)
@@ -4736,6 +4824,26 @@ def create_app(
                             error_stage="stream",
                             error_message="Streaming response interrupted",
                         )
+                    stream_record_state["done"] = True
+
+                async def _record_stream_aborted(
+                    stream_chunks: list[bytes] | None = None,
+                ) -> None:
+                    if stream_record_state["done"]:
+                        return
+                    try:
+                        await _spend_reservation.release(request_id)
+                    except Exception:
+                        pass
+                    _record_route_trace(
+                        status_code=499,
+                        streaming=True,
+                        error_code="client_disconnected",
+                        error_stage="stream",
+                        error_message="Client closed connection before stream finalized",
+                        stream_chunks=stream_chunks,
+                    )
+                    stream_record_state["done"] = True
 
                 async def _open_stream_attempt(attempt_payload: dict[str, Any]) -> httpx.Response:
                     client = _get_client()
@@ -4841,6 +4949,7 @@ def create_app(
                             await _record_stream_failure()
                             raise
                         finally:
+                            await _record_stream_aborted(stream_chunks=stream_chunks)
                             await stream_resp.aclose()
 
                     return StreamingResponse(
@@ -4878,6 +4987,7 @@ def create_app(
                             await _record_stream_failure()
                             raise
                         finally:
+                            await _record_stream_aborted(stream_chunks=stream_chunks)
                             await stream_resp.aclose()
 
                     return StreamingResponse(
@@ -4904,6 +5014,7 @@ def create_app(
                         await _record_stream_failure()
                         raise
                     finally:
+                        await _record_stream_aborted(stream_chunks=stream_chunks)
                         await stream_resp.aclose()
 
                 return StreamingResponse(
@@ -5308,6 +5419,7 @@ def create_app(
         Route("/v1/artifacts/{artifact_id:str}", handle_artifact, methods=["GET"]),
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
+        Route("/v1/events/stream", handle_events_stream, methods=["GET"]),
         Route("/v1/traces", handle_traces, methods=["GET"]),
         Route("/v1/traces/{request_id:str}", handle_trace_detail, methods=["GET"]),
         Route(

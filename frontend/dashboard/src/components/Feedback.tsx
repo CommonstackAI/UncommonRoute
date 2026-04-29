@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  fetchRecent,
   submitFeedback,
   type RecentRequest,
   type FeedbackResult,
 } from "../api";
+import { useLiveData } from "../state/LiveDataContext";
 
 const TIER_COLOR: Record<string, string> = {
   SIMPLE: "text-n-success",
@@ -48,30 +48,28 @@ function feedbackTone(result: FeedbackResult): string {
 }
 
 export default function Feedback() {
-  const [requests, setRequests] = useState<RecentRequest[]>([]);
+  const { recent } = useLiveData();
+  const requests = useMemo(
+    () =>
+      recent.filter(
+        (r): r is RecentRequest & { state: typeof r.state } =>
+          Boolean(r.tier) && r.state === "completed",
+      ) as unknown as RecentRequest[],
+    [recent],
+  );
   const [submitted, setSubmitted] = useState<Record<string, FeedbackResult>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    const data = await fetchRecent();
-    if (data) {
-      setRequests(data);
-      setSubmitted((prev) => {
-        const next = { ...prev };
-        for (const request of data) {
-          const persisted = storedFeedback(request);
-          if (persisted) next[request.request_id] = persisted;
-        }
-        return next;
-      });
-    }
-  }, []);
-
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
+    setSubmitted((prev) => {
+      const next = { ...prev };
+      for (const request of requests) {
+        const persisted = storedFeedback(request);
+        if (persisted) next[request.request_id] = persisted;
+      }
+      return next;
+    });
+  }, [requests]);
 
   async function handle(requestId: string, signal: "ok" | "weak" | "strong") {
     setBusy(requestId);
@@ -79,7 +77,6 @@ export default function Feedback() {
     if (result && result.action !== "expired") {
       setSubmitted((prev) => ({ ...prev, [requestId]: result }));
     }
-    await refresh();
     setBusy(null);
   }
 

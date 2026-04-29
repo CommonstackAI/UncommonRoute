@@ -9,8 +9,14 @@ import { fetchTraces } from "../api";
 import type { TraceRecord } from "../api";
 import ConversationView from "./conversation/ConversationView";
 import { groupSessions, relativeTime, type Session } from "./conversation/TurnListView";
+import { useLiveData } from "../state/LiveDataContext";
 
 export default function ExplainerNew() {
+  const { recent: liveRecent } = useLiveData();
+  const completedCount = useMemo(
+    () => liveRecent.filter((r) => r.state === "completed").length,
+    [liveRecent],
+  );
   const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,12 +35,10 @@ export default function ExplainerNew() {
       setTraces(payload.items);
     };
     load();
-    const id = window.setInterval(load, 5000);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
     };
-  }, []);
+  }, [completedCount]);
 
   const sessions = useMemo<Session[]>(() => groupSessions(traces), [traces]);
 

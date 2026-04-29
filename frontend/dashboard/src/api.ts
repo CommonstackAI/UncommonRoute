@@ -342,6 +342,7 @@ export async function resetRoutingConfig(): Promise<RoutingConfigState | null> {
 
 export interface RecentRequest {
   request_id: string;
+  turn_id: string;
   timestamp: number;
   mode: string;
   model: string;

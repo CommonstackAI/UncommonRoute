@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 
+import asyncio
+import json
+
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -15,7 +19,15 @@ from uncommon_route.router.config import routing_mode_from_model
 from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, RoutingConfigStore
 from uncommon_route.semantic import SemanticCallResult, SideChannelConfig, SideChannelTaskConfig
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
-from uncommon_route.router.types import RoutingMode
+from uncommon_route.traces import InMemoryTraceStorage, TraceStore
+from uncommon_route.router.types import (
+    CapabilityLane,
+    FallbackOption,
+    RoutingDecision,
+    RoutingMode,
+    ServedQuality,
+    Tier,
+)
 
 
 class FakeSemanticCompressor:
@@ -68,6 +80,33 @@ class TestPromptExtraction:
         assert prompt == "List the top-level directories in the current repository."
         assert system_prompt == "top-level system"
         assert max_tokens == 128
+
+    def test_extract_prompt_treats_null_max_tokens_as_default(self) -> None:
+        prompt, system_prompt, max_tokens = _extract_prompt({
+            "max_tokens": None,
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+
+        assert prompt == "hi"
+        assert system_prompt is None
+        assert max_tokens == 4096
+
+    def test_extract_prompt_supports_max_completion_tokens_for_routing_budget(self) -> None:
+        _prompt, _system_prompt, max_tokens = _extract_prompt({
+            "max_completion_tokens": 123,
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+
+        assert max_tokens == 123
+
+    def test_extract_prompt_uses_completion_tokens_when_max_tokens_is_null(self) -> None:
+        _prompt, _system_prompt, max_tokens = _extract_prompt({
+            "max_tokens": None,
+            "max_completion_tokens": 123,
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+
+        assert max_tokens == 123
 
     def test_extract_prompt_strips_wrapper_prefix_from_string_message(self) -> None:
         prompt, _system_prompt, _max_tokens = _extract_prompt({
@@ -681,6 +720,118 @@ class TestSelectorEndpoint:
         assert data["step_type"] == "tool-selection"
         assert data["served_tier"] == "MEDIUM"
 
+    def test_route_preview_uses_live_selector_router(self, client: TestClient) -> None:
+        resp = client.post("/v1/route-preview", json={
+            "prompt": "Create a Python CLI that fetches weather and add tests.",
+            "risk_tolerance": 0.5,
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["virtual"] is True
+        assert data["mode"] == "auto"
+        assert data["served_model"]
+        assert data["candidate_scores"]
+        assert data["candidate_scores"][0]["model"] == data["served_model"]
+        assert data["cost_estimate"] == data["estimated_cost"]
+        assert data["cost_baseline"] == data["baseline_cost"]
+        assert data["tier_name"] in {"low", "mid", "high"}
+        assert data["signals"][0]["name"] == "router"
+
+    def test_route_preview_risk_tolerance_maps_to_real_modes(self, client: TestClient) -> None:
+        conservative = client.post("/v1/route-preview", json={
+            "prompt": "Design a distributed database.",
+            "risk_tolerance": 0.1,
+        })
+        aggressive = client.post("/v1/route-preview", json={
+            "prompt": "Design a distributed database.",
+            "risk_tolerance": 0.9,
+        })
+
+        assert conservative.status_code == 200
+        assert aggressive.status_code == 200
+        assert conservative.json()["mode"] == "best"
+        assert aggressive.json()["mode"] == "fast"
+
+    def test_route_preview_does_not_record_lifecycle(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "uncommon_route.v2_lifecycle.on_route_complete",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        resp = client.post("/v1/route-preview", json={
+            "prompt": "Preview only; do not train on this.",
+            "risk_tolerance": 0.5,
+        })
+
+        assert resp.status_code == 200
+        assert calls == []
+
+
+class TestFallbackAttribution:
+    def test_failed_fallback_response_is_attributed_to_fallback_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            return RoutingDecision(
+                model="primary/model",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="test route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+                fallback_chain=[
+                    FallbackOption("primary/model", 0.001, 100),
+                    FallbackOption("fallback/model", 0.001, 100),
+                ],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            calls.append(str(body.get("model")))
+            if len(calls) == 1:
+                return httpx.Response(404, json={"error": {"message": "model not found"}})
+            return httpx.Response(500, json={"error": {"message": "internal server error"}})
+
+        traces = TraceStore(storage=InMemoryTraceStorage())
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 500
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert trace["model"] == "fallback/model"
+            assert trace["method"] == "fallback"
+            assert trace["fallback_reason"]
+            assert trace["attempts_payload"][0]["selected_model"] == "primary/model"
+            assert trace["attempts_payload"][1]["selected_model"] == "fallback/model"
+        finally:
+            asyncio.run(async_client.aclose())
+
 
 class TestRoutingConfigEndpoint:
     def test_get_routing_config_returns_modes(self, client: TestClient) -> None:
@@ -860,6 +1011,31 @@ class TestChatCompletions:
         assert resp.status_code == 502
         assert "x-uncommon-route-transport" in resp.headers
         assert "x-uncommon-route-cache-mode" in resp.headers
+
+    def test_spend_blocked_route_still_associates_lifecycle_request_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spend_control = SpendControl(storage=InMemorySpendControlStorage())
+        spend_control.set_limit("per_request", 0.000000001)
+        app = create_app(
+            upstream="http://127.0.0.1:1/fake",
+            spend_control=spend_control,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        associated: list[str] = []
+        monkeypatch.setattr(
+            "uncommon_route.v2_lifecycle.associate_request_id",
+            associated.append,
+        )
+
+        resp = client.post("/v1/chat/completions", json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "design a distributed database with five constraints"}],
+        })
+
+        assert resp.status_code == 429
+        assert associated == [resp.headers["x-uncommon-route-request-id"]]
 
     def test_fast_mode_tool_request_avoids_non_tool_model(self, client: TestClient) -> None:
         resp = client.post("/v1/chat/completions", json={

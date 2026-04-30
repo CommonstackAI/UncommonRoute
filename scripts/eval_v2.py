@@ -17,13 +17,36 @@ import math
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT / "LLMRouterBench"))
-sys.path.insert(0, str(ROOT / "UncommonRoute"))
+# Make UncommonRoute importable when run from a checkout without `pip install -e .`.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-from main.eval.runner import evaluate_question_bank_rows, build_eval_summary
-from main.eval.sampling import load_all_question_bank_rows, rows_per_benchmark
-from main.eval.predictors import FunctionPredictor
+# CommonRouterBench (PyPI: CommonRouterBench, import: main) is required.
+# Prefer the installed package; fall back to a sibling checkout (repo dev layout).
+try:
+    from main.eval.runner import evaluate_question_bank_rows, build_eval_summary  # noqa: F401
+    from main.eval.sampling import load_all_question_bank_rows, rows_per_benchmark  # noqa: F401
+    from main.eval.predictors import FunctionPredictor  # noqa: F401
+except ModuleNotFoundError:
+    _sibling_candidates = [
+        ROOT.parent / "LLMRouterBench",
+        ROOT.parent / "CommonRouterBench",
+    ]
+    for _c in _sibling_candidates:
+        if (_c / "main" / "__init__.py").exists():
+            sys.path.insert(0, str(_c))
+            break
+    else:
+        print(
+            "ERROR: CommonRouterBench not found.\n"
+            "  Install it: pip install CommonRouterBench\n"
+            "  Or check out https://github.com/CommonstackAI/CommonRouterBench as a sibling directory.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from main.eval.runner import evaluate_question_bank_rows, build_eval_summary  # noqa: F401
+    from main.eval.sampling import load_all_question_bank_rows, rows_per_benchmark  # noqa: F401
+    from main.eval.predictors import FunctionPredictor  # noqa: F401
 
 from uncommon_route.signals.metadata import MetadataSignal
 from uncommon_route.signals.embedding import EmbeddingSignal

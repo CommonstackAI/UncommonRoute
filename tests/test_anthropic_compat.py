@@ -21,6 +21,7 @@ from uncommon_route.anthropic_compat import (
 from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import create_app
+from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
 from uncommon_route.router.types import (
     CapabilityLane,
     ModelCapabilities,
@@ -32,7 +33,7 @@ from uncommon_route.router.types import (
     Tier,
 )
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
-from uncommon_route.traces import InMemoryTraceStorage, TraceStore
+from uncommon_route.traces import InMemoryTraceStorage, RequestTrace, TraceStore
 
 
 # =========================================================================
@@ -617,6 +618,74 @@ class TestStreamConverter:
         msg_delta = next(e for e in parsed if e["_event"] == "message_delta")
         assert msg_delta["delta"]["stop_reason"] == "tool_use"
 
+    def test_tool_call_stream_without_initial_id_starts_valid_tool_block(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        chunks = [
+            _make_oai_sse({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"name": "search", "arguments": '{"q":'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "function": {"arguments": '"test"}'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+
+        all_events: list[bytes] = []
+        for c in chunks:
+            all_events.extend(converter.feed(c))
+        all_events.extend(converter.finish())
+
+        parsed = _parse_anthropic_events(all_events)
+        first_delta = next(e for e in parsed if e["_event"] == "content_block_delta")
+        first_block_start = next(e for e in parsed if e["_event"] == "content_block_start")
+
+        assert first_block_start["content_block"]["type"] == "tool_use"
+        assert first_block_start["content_block"]["id"]
+        assert first_block_start["content_block"]["name"] == "search"
+        assert first_delta["index"] == first_block_start["index"] == 0
+
+        json_deltas = [
+            e for e in parsed
+            if e["_event"] == "content_block_delta" and e["delta"].get("type") == "input_json_delta"
+        ]
+        joined = "".join(d["delta"]["partial_json"] for d in json_deltas)
+        assert json.loads(joined) == {"q": "test"}
+
+    def test_tool_call_stream_keeps_same_block_when_id_arrives_late(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        chunks = [
+            _make_oai_sse({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"name": "search", "arguments": '{"q":'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "function": {"arguments": '"test"}'},
+            }]}, "finish_reason": None}]}),
+            _make_oai_sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+
+        all_events: list[bytes] = []
+        for c in chunks:
+            all_events.extend(converter.feed(c))
+        all_events.extend(converter.finish())
+
+        parsed = _parse_anthropic_events(all_events)
+        block_starts = [e for e in parsed if e["_event"] == "content_block_start"]
+        block_stops = [e for e in parsed if e["_event"] == "content_block_stop"]
+
+        assert len(block_starts) == 1
+        assert len(block_stops) == 1
+        assert block_starts[0]["content_block"]["type"] == "tool_use"
+
     def test_done_signal(self) -> None:
         converter = OpenAIToAnthropicStreamConverter(model="m")
 
@@ -685,12 +754,38 @@ class TestAnthropicToOpenAIStreamConverter:
 
 @pytest.fixture
 def messages_client() -> TestClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_fixture",
+                "type": "message",
+                "role": "assistant",
+                "model": body.get("model", "fixture-model"),
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+            headers={"content-type": "application/json"},
+        )
+
     spend_control = SpendControl(storage=InMemorySpendControlStorage())
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    old_get_client = __import__("uncommon_route.proxy", fromlist=["_get_client"])._get_client
+    __import__("uncommon_route.proxy", fromlist=["_get_client"])._get_client = lambda: async_client
     app = create_app(
         upstream="http://127.0.0.1:1/fake",
         spend_control=spend_control,
+        connections_store=ConnectionsStore(storage=InMemoryConnectionsStorage()),
     )
-    return TestClient(app, raise_server_exceptions=False)
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        yield client
+    finally:
+        __import__("uncommon_route.proxy", fromlist=["_get_client"])._get_client = old_get_client
+        asyncio.run(async_client.aclose())
 
 
 def _build_seed_mapper(*model_ids: str) -> ModelMapper:
@@ -1214,6 +1309,351 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
+    def test_virtual_messages_with_thinking_blocks_use_compatible_pool_without_locking_previous_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+        routed: dict[str, object] = {}
+
+        def fake_route(*args, **kwargs):
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="minimax/minimax-m2.7",
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.BALANCED,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.93,
+                method="pool",
+                reasoning="forced minimax route for thinking continuity",
+                cost_estimate=0.005,
+                baseline_cost=0.02,
+                savings=0.75,
+                raw_confidence=0.93,
+                complexity=0.9,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_sticky_thinking",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "minimax/minimax-m2.7",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="minimax/minimax-m2.7",
+            status_code=200,
+            api_format="anthropic",
+            endpoint="messages",
+            is_virtual=True,
+            session_id="sticky-session",
+            step_type="tool-result-followup",
+            transport="anthropic-messages",
+            served_quality="balanced",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            mapper = _build_seed_mapper(
+                "minimax/minimax-m2.7",
+                "anthropic/claude-opus-4-5",
+            )
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "messages": [
+                        {"role": "user", "content": "Plan it"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "thinking",
+                                    "thinking": "Need to inspect requirements first.",
+                                    "signature": "sig_123",
+                                },
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_01",
+                                    "name": "mkdir",
+                                    "input": {"path": "weather-cli"},
+                                },
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01",
+                                "content": [{"type": "text", "text": "done"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={
+                    "x-session-id": "sticky-session",
+                    "anthropic-beta": "interleaved-thinking-2025-05-14",
+                },
+            )
+
+            assert resp.status_code == 200
+            assert set(routed["available_models"]) == {
+                "minimax/minimax-m2.7",
+                "anthropic/claude-opus-4-5",
+            }
+            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=compatible-pool;previous=minimax/minimax-m2.7" in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_virtual_messages_with_thinking_enabled_filters_unsupported_models(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+
+        def fake_route(*args, **kwargs):
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-sonnet-4-6",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.BALANCED,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.84,
+                method="pool",
+                reasoning="forced sonnet route for thinking support",
+                cost_estimate=0.004,
+                baseline_cost=0.02,
+                savings=0.80,
+                raw_confidence=0.84,
+                complexity=0.4,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_thinking_supported",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+            mapper = _build_seed_mapper(
+                "anthropic/claude-haiku-4-5",
+                "anthropic/claude-sonnet-4-6",
+                "minimax/minimax-m2.1",
+                "minimax/minimax-m2.7",
+            )
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "thinking": {"type": "adaptive", "display": "summarized"},
+                    "messages": [{"role": "user", "content": "Plan it"}],
+                },
+            )
+
+            assert resp.status_code == 200
+            assert set(routed["available_models"]) == {
+                "anthropic/claude-sonnet-4-6",
+                "minimax/minimax-m2.7",
+            }
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=compatible-pool(2/4)" in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_virtual_messages_with_thinking_blocks_continue_when_previous_model_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        called = {"route": False, "upstream": False}
+        routed: dict[str, object] = {}
+
+        def fake_route(*args, **kwargs):
+            called["route"] = True
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-opus-4-5",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.81,
+                method="pool",
+                reasoning="rerouted despite previous thinking model being unavailable",
+                cost_estimate=0.004,
+                baseline_cost=0.02,
+                savings=0.80,
+                raw_confidence=0.81,
+                complexity=0.4,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called["upstream"] = True
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_thinking_rerouted",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "anthropic/claude-opus-4-5",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="minimax/minimax-m2.7",
+            status_code=200,
+            api_format="anthropic",
+            endpoint="messages",
+            is_virtual=True,
+            session_id="sticky-session",
+            step_type="tool-result-followup",
+            transport="anthropic-messages",
+            served_quality="balanced",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            mapper = _build_seed_mapper("anthropic/claude-opus-4-5")
+            app = create_app(
+                upstream="https://api.commonstack.ai/v1",
+                model_mapper=mapper,
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "messages": [
+                        {"role": "user", "content": "Plan it"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "thinking",
+                                    "thinking": "Need to inspect requirements first.",
+                                    "signature": "sig_123",
+                                },
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_01",
+                                    "name": "mkdir",
+                                    "input": {"path": "weather-cli"},
+                                },
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01",
+                                "content": [{"type": "text", "text": "done"}],
+                            }],
+                        },
+                    ],
+                },
+                headers={
+                    "x-session-id": "sticky-session",
+                    "anthropic-beta": "interleaved-thinking-2025-05-14",
+                },
+            )
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == ["anthropic/claude-opus-4-5"]
+            assert called["route"] is True
+            assert called["upstream"] is True
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=compatible-pool;previous-unavailable=minimax/minimax-m2.7" in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
     def test_messages_use_minimax_anthropic_endpoint_for_direct_provider(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1507,6 +1947,87 @@ class TestNativeAnthropicTransportForChatCompletions:
             asyncio.run(async_client.aclose())
 
 
+class TestGeminiCacheBypass:
+    def test_anthropic_cache_hints_are_stripped_for_gemini_openai_transport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_gemini",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "google/gemini-2.5-pro",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(upstream="https://api.commonstack.ai/v1")
+            client = TestClient(app, raise_server_exceptions=False)
+
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "google/gemini-2.5-pro",
+                    "max_tokens": 64,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": "You are a weather assistant.",
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                        },
+                    ],
+                    "tools": [{
+                        "name": "get_weather",
+                        "description": "Get current weather",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                    }],
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "What is the weather in Tokyo?",
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                        }],
+                    }],
+                },
+                headers={"anthropic-version": "2023-06-01", "x-api-key": "not-needed"},
+            )
+
+            assert resp.status_code == 200
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][0]["content"] == "You are a weather assistant."
+            assert body["messages"][1]["content"] == "What is the weather in Tokyo?"
+            assert "cache_control" not in body["tools"][0]
+            assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
 class TestAuthPriority:
     """Per-request auth takes precedence over process launch key."""
 
@@ -1556,6 +2077,58 @@ class TestAuthPriority:
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "request-key-999"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_client_header_used_when_no_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_auth_client",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "some-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async def fake_discover(self, api_key: str | None = None) -> int:
+            return 0
+
+        monkeypatch.delenv("UNCOMMON_ROUTE_API_KEY", raising=False)
+        monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.model_map.ModelMapper.discover", fake_discover)
+
+        try:
+            app = create_app(
+                upstream="http://127.0.0.1:1/fake",
+                connections_store=ConnectionsStore(storage=InMemoryConnectionsStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "some-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"Authorization": "Bearer client-key"},
+            )
+            assert resp.status_code == 200
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["authorization"] == "Bearer client-key"
         finally:
             asyncio.run(async_client.aclose())
 

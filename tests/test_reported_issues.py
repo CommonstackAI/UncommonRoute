@@ -413,6 +413,97 @@ def test_issue6_anthropic_model_resolution():
     # Gateway mode should keep the full provider/model prefix
 
 
+def test_issue6_legacy_model_ids_resolve_to_live_successors():
+    """Legacy internal ids should map onto current upstream successors."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+    from uncommon_route.router.types import ModelCapabilities, ModelPricing
+
+    live_models = [
+        "x-ai/grok-4-1-fast-non-reasoning",
+        "x-ai/grok-4.1-fast-reasoning",
+        "x-ai/grok-code-fast-1",
+        "google/gemini-3.1-pro-preview",
+        "openai/gpt-4.1",
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5.4-mini-2026-03-17",
+        "openai/gpt-5.4-2026-03-05",
+    ]
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in live_models:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4-1-fast-non-reasoning"
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast-reasoning"
+    assert mapper.resolve("xai/grok-4-1-fast-non-reasoning") == "x-ai/grok-4-1-fast-non-reasoning"
+    assert mapper.resolve("xai/grok-code-fast-1") == "x-ai/grok-code-fast-1"
+    assert mapper.resolve("google/gemini-3-pro-preview") == "google/gemini-3.1-pro-preview"
+    assert mapper.resolve("google/gemini-3.1-pro") == "google/gemini-3.1-pro-preview"
+    assert mapper.resolve("openai/gpt-4o") == "openai/gpt-4.1"
+    assert mapper.resolve("openai/gpt-5.2-codex") == "openai/gpt-5.3-codex"
+    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert mapper.resolve("openai/o3") == "openai/gpt-5.4-2026-03-05"
+    assert mapper.resolve("openai/o4-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert not any(
+        model in mapper.unresolved_models()
+        for model in (
+            "xai/grok-4-0709",
+            "xai/grok-4-1-fast-reasoning",
+            "xai/grok-4-1-fast-non-reasoning",
+            "xai/grok-code-fast-1",
+            "google/gemini-3-pro-preview",
+            "google/gemini-3.1-pro",
+            "openai/gpt-4o",
+            "openai/gpt-5.2-codex",
+            "openai/o1-mini",
+            "openai/o3",
+            "openai/o4-mini",
+        )
+    )
+
+
+def test_issue6_image_generation_models_do_not_enter_chat_routing_pool():
+    """Image-generation catalog entries should not become chat candidates."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper, is_routable_chat_model
+    from uncommon_route.router.types import ModelCapabilities, ModelPricing
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in [
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3.1-flash-image-preview",
+        "google/gemini-3.1-pro-preview",
+        "minimax/minimax-m2.7",
+    ]:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=True),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert not is_routable_chat_model("google/gemini-3-pro-image-preview")
+    assert mapper.resolve("google/gemini-3-pro-preview") == "google/gemini-3.1-pro-preview"
+    assert "google/gemini-3-pro-image-preview" in mapper.available_models
+    assert "google/gemini-3-pro-image-preview" not in mapper.routable_models
+    assert "google/gemini-3.1-flash-image-preview" not in mapper.routable_models
+    assert "google/gemini-3.1-pro-preview" in mapper.routable_models
+
+
 # ─── Summary: combined issue reproduction ───
 
 def test_combined_claude_code_session_simulation():

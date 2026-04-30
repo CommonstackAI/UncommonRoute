@@ -17,8 +17,11 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -40,6 +43,24 @@ class ModelBenchmarkEntry:
     categories: dict[str, float] = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
     fetched_at: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class QualityEstimate:
+    """Evidence-aware benchmark prior.
+
+    ``score`` is the value used by routing. It is shrunk toward neutral when
+    the source is a fuzzy/family match, has very few samples, or is stale.
+    ``raw_score`` keeps the original leaderboard value for diagnostics.
+    """
+
+    score: float
+    raw_score: float
+    source: str = "none"
+    matched_model: str = ""
+    match_type: str = "none"
+    sample_count: int = 0
+    confidence: float = 0.0
 
 
 class BenchmarkProvider(ABC):
@@ -234,6 +255,7 @@ class BenchmarkCache:
     _providers: list[BenchmarkProvider] = field(default_factory=list)
     _source_weights: dict[str, float] = field(default_factory=dict)
     _last_refresh: float = 0.0
+    _refresh_thread: threading.Thread | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self._providers:
@@ -282,64 +304,176 @@ class BenchmarkCache:
             self._build_index()
         return total
 
+    def needs_refresh(self, *, now: float | None = None) -> bool:
+        """Return whether any configured source is missing or past its TTL."""
+        now = time.time() if now is None else float(now)
+        for provider in self._providers:
+            source_data = self._sources.get(provider.source_name, {})
+            if not source_data:
+                if isinstance(provider, LocalFileProvider) and not provider._path.exists():
+                    continue
+                return True
+            newest = max((e.fetched_at for e in source_data.values()), default=0.0)
+            if now - newest >= provider.refresh_interval_s:
+                return True
+        return False
+
+    def refresh_if_stale(self, *, background: bool = True, force: bool = False) -> bool:
+        """Refresh stale benchmark data without blocking normal routing.
+
+        Routing should never depend on a live network request, but benchmark
+        priors should not silently become static constants either.  The default
+        path kicks off a daemon refresh and keeps serving the current cache for
+        this request; later requests see fresher data if the refresh succeeds.
+        """
+        if not force and not self.needs_refresh():
+            return False
+
+        setting = os.environ.get("UNCOMMON_ROUTE_BENCHMARK_AUTO_REFRESH", "1").strip().lower()
+        if setting in {"0", "false", "no", "off"} and not force:
+            return False
+
+        if not background:
+            asyncio.run(self.refresh(force=force))
+            return True
+
+        thread = self._refresh_thread
+        if thread is not None and thread.is_alive():
+            return False
+
+        def _runner() -> None:
+            try:
+                asyncio.run(self.refresh(force=force))
+            except Exception as exc:
+                logger.warning("Benchmark background refresh failed: %s", exc)
+
+        self._refresh_thread = threading.Thread(
+            target=_runner,
+            name="uncommon-route-benchmark-refresh",
+            daemon=True,
+        )
+        self._refresh_thread.start()
+        return True
+
     def get_quality(self, model_id: str, category: str = "") -> float:
+        return self.get_quality_estimate(model_id, category).score
+
+    def get_quality_estimate(self, model_id: str, category: str = "") -> QualityEstimate:
         """Get the best available quality score for a model.
 
         Checks all sources via exact match, fuzzy match, and model-family
-        match.  Returns the highest quality found across all matching
-        strategies, weighted by source reliability.
+        match.  Weak evidence is shrunk toward 0.5 so stale or fuzzy external
+        benchmark data cannot dominate routing.
         """
-        scores: list[tuple[float, float]] = []
+        scores: list[tuple[float, float, float, str, str, ModelBenchmarkEntry]] = []
+        has_exact_match = False
 
         for source_name, entries in self._sources.items():
             entry = entries.get(model_id)
+            match_type = "exact"
+            matched_model = model_id
+            if entry is not None:
+                has_exact_match = True
             if entry is None:
-                entry = self._fuzzy_match(model_id, entries)
+                match = self._fuzzy_match(model_id, entries)
+                if match is not None:
+                    matched_model, entry = match
+                    match_type = "fuzzy"
             if entry is not None and entry.fetched_at and entry.overall > 0:
                 weight = self._source_weights.get(source_name, 0.3)
-                if category and category in entry.categories:
-                    cat_score = entry.categories[category]
-                    if cat_score > 0:
-                        scores.append((cat_score, weight))
-                elif entry.overall > 0:
-                    has_real_data = bool(entry.raw) or bool(entry.categories)
-                    scores.append((entry.overall, weight * (1.0 if has_real_data else 0.3)))
+                value = entry.categories.get(category, 0.0) if category else entry.overall
+                if value > 0:
+                    scores.append((
+                        value,
+                        weight,
+                        self._match_confidence(match_type, entry),
+                        f"{match_type}:{source_name}",
+                        matched_model,
+                        entry,
+                    ))
 
-        family = self._extract_model_family(model_id)
-        family_candidates = self._family_index.get(family, [])
-        for src, mid, _ in family_candidates:
-            if mid == model_id:
-                continue
-            source_entries = self._sources.get(src)
-            if source_entries is None:
-                continue
-            entry = source_entries.get(mid)
-            if entry is not None and entry.fetched_at and entry.overall > 0:
-                weight = self._source_weights.get(src, 0.3) * 0.85
-                if category and category in entry.categories:
-                    cat_score = entry.categories[category]
-                    if cat_score > 0:
-                        scores.append((cat_score, weight))
-                else:
-                    has_real_data = bool(entry.raw) or bool(entry.categories)
-                    scores.append((entry.overall, weight * (1.0 if has_real_data else 0.3)))
+        if not has_exact_match:
+            family = self._extract_model_family(model_id)
+            family_candidates = self._family_index.get(family, [])
+            for src, mid, _ in family_candidates:
+                if mid == model_id:
+                    continue
+                source_entries = self._sources.get(src)
+                if source_entries is None:
+                    continue
+                entry = source_entries.get(mid)
+                if entry is not None and entry.fetched_at and entry.overall > 0:
+                    weight = self._source_weights.get(src, 0.3) * 0.85
+                    value = entry.categories.get(category, 0.0) if category else entry.overall
+                    if value > 0:
+                        scores.append((
+                            value,
+                            weight,
+                            self._match_confidence("family", entry),
+                            f"family:{src}",
+                            mid,
+                            entry,
+                        ))
 
         if scores:
-            total_weight = sum(w for _, w in scores)
-            return sum(s * w for s, w in scores) / total_weight if total_weight > 0 else 0.5
+            total_weight = sum(w for _, w, _, _, _, _ in scores)
+            if total_weight <= 0:
+                return QualityEstimate(score=0.5, raw_score=0.5)
+            adjusted_scores = [
+                self._shrink_score(score, confidence=weight)
+                for score, _, weight, _, _, _ in scores
+            ]
+            score = sum(
+                adjusted * weight
+                for adjusted, (_, weight, _, _, _, _) in zip(adjusted_scores, scores)
+            ) / total_weight
+            best_raw, _, best_confidence, best_source, best_model, best_entry = max(
+                scores,
+                key=lambda item: item[2],
+            )
+            return QualityEstimate(
+                score=score,
+                raw_score=best_raw,
+                source=best_source,
+                matched_model=best_model,
+                match_type=best_source.split(":", 1)[0],
+                sample_count=self._sample_count(best_entry),
+                confidence=best_confidence,
+            )
 
         seed = _PINCHBENCH_SEED.get(model_id)
         if seed is not None:
-            return seed
+            return QualityEstimate(
+                score=seed,
+                raw_score=seed,
+                source="seed",
+                matched_model=model_id,
+                match_type="exact",
+                confidence=0.8,
+            )
 
         seed = self._fuzzy_seed_match(model_id)
         if seed is not None:
-            return seed
+            return QualityEstimate(
+                score=self._shrink_score(seed, confidence=0.4),
+                raw_score=seed,
+                source="seed",
+                matched_model=model_id,
+                match_type="fuzzy",
+                confidence=0.4,
+            )
 
-        return 0.5
+        return QualityEstimate(score=0.5, raw_score=0.5)
 
     def get_all_qualities(self, models: list[str], category: str = "") -> dict[str, float]:
         return {m: self.get_quality(m, category) for m in models}
+
+    def get_all_quality_estimates(
+        self,
+        models: list[str],
+        category: str = "",
+    ) -> dict[str, QualityEstimate]:
+        return {m: self.get_quality_estimate(m, category) for m in models}
 
     def model_count(self) -> int:
         seen: set[str] = set()
@@ -384,7 +518,40 @@ class BenchmarkCache:
                     (source_name, model_id, entry.overall)
                 )
 
-    def _fuzzy_match(self, model_id: str, entries: dict[str, ModelBenchmarkEntry]) -> ModelBenchmarkEntry | None:
+    @staticmethod
+    def _sample_count(entry: ModelBenchmarkEntry) -> int:
+        raw_runs = entry.raw.get("runs") if isinstance(entry.raw, dict) else None
+        try:
+            return max(0, int(raw_runs or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _match_confidence(cls, match_type: str, entry: ModelBenchmarkEntry) -> float:
+        runs = cls._sample_count(entry)
+        sample_confidence = min(1.0, (runs / 10.0) ** 0.5) if runs > 0 else 0.35
+        if match_type == "exact":
+            match_confidence = 1.0
+        elif match_type == "fuzzy":
+            match_confidence = 0.85
+        else:
+            match_confidence = 0.80
+        age_days = max(0.0, (time.time() - float(entry.fetched_at or 0.0)) / 86_400.0)
+        if age_days <= 7:
+            freshness = 1.0
+        elif age_days <= 30:
+            freshness = 0.75
+        else:
+            freshness = 0.45
+        return max(0.0, min(1.0, sample_confidence * match_confidence * freshness))
+
+    @staticmethod
+    def _shrink_score(score: float, *, confidence: float) -> float:
+        bounded_score = max(0.0, min(1.0, float(score)))
+        bounded_confidence = max(0.0, min(1.0, float(confidence)))
+        return 0.5 + ((bounded_score - 0.5) * bounded_confidence)
+
+    def _fuzzy_match(self, model_id: str, entries: dict[str, ModelBenchmarkEntry]) -> tuple[str, ModelBenchmarkEntry] | None:
         normalized = model_id.lower().replace(".", "-").replace("_", "-")
         core = model_id.split("/", 1)[-1].lower() if "/" in model_id else model_id.lower()
 
@@ -394,27 +561,15 @@ class BenchmarkCache:
                 _, canonical_id = hit
                 entry = entries.get(canonical_id)
                 if entry is not None:
-                    return entry
+                    return canonical_id, entry
 
         for key, entry in entries.items():
             if key.lower().replace(".", "-").replace("_", "-") == normalized:
-                return entry
+                return key, entry
         for key, entry in entries.items():
             key_core = key.split("/", 1)[-1].lower() if "/" in key else key.lower()
             if core == key_core:
-                return entry
-
-        family = self._extract_model_family(model_id)
-        candidates = self._family_index.get(family, [])
-        best_entry: ModelBenchmarkEntry | None = None
-        best_score = -1.0
-        for src, mid, score in candidates:
-            entry = entries.get(mid)
-            if entry is not None and entry.overall > best_score:
-                best_score = entry.overall
-                best_entry = entry
-        if best_entry is not None:
-            return best_entry
+                return key, entry
         return None
 
     def _fuzzy_seed_match(self, model_id: str) -> float | None:
@@ -430,11 +585,11 @@ class BenchmarkCache:
         return None
 
     def _load_seed_as_source(self) -> None:
-        """Load seed benchmark data as a high-confidence source.
+        """Load package seed benchmark data as cold-start evidence.
 
-        Seed data is curated from official benchmark websites and provides
-        reliable quality scores.  It serves as a strong prior that API data
-        refines rather than replaces.
+        Seed data keeps first-run routing from being blind, but it has no live
+        sample count.  ``get_quality_estimate`` therefore shrinks it toward
+        neutral until fresher cached or local data is available.
         """
         if not _PINCHBENCH_SEED:
             return
@@ -494,4 +649,5 @@ def get_benchmark_cache() -> BenchmarkCache:
     global _ACTIVE_CACHE
     if _ACTIVE_CACHE is None:
         _ACTIVE_CACHE = BenchmarkCache()
+    _ACTIVE_CACHE.refresh_if_stale(background=True)
     return _ACTIVE_CACHE

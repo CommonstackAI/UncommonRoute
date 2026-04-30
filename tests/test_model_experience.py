@@ -19,7 +19,7 @@ from uncommon_route.model_experience import (
     InMemoryModelExperienceStorage,
     ModelExperienceStore,
 )
-from uncommon_route.model_map import infer_capabilities
+from uncommon_route.model_map import _parse_upstream_pricing, infer_capabilities
 from uncommon_route.router.config import get_selection_weights
 from uncommon_route.router.selector import select_from_pool
 
@@ -59,6 +59,53 @@ def test_infer_capabilities_marks_only_zero_priced_models_as_free() -> None:
         has_explicit_pricing=False,
     )
     assert unknown_cost.free is False
+
+
+def test_infer_capabilities_marks_gpt5_family_as_reasoning() -> None:
+    capabilities = infer_capabilities(
+        "openai/gpt-5.2",
+        ModelPricing(1.75, 14.0),
+        has_explicit_pricing=True,
+    )
+
+    assert capabilities.reasoning is True
+
+
+def test_infer_capabilities_does_not_mark_image_generation_as_tool_chat() -> None:
+    capabilities = infer_capabilities(
+        "google/gemini-3-pro-image-preview",
+        ModelPricing(2.0, 12.0),
+        has_explicit_pricing=True,
+    )
+
+    assert capabilities.vision is True
+    assert capabilities.tool_calling is False
+
+
+def test_invalid_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({"prompt": "not-a-number", "completion": "0"})
+    capabilities = infer_capabilities(
+        "provider/ambiguous-model",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert capabilities.free is False
+
+
+def test_incomplete_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({"prompt": "0"})
+    capabilities = infer_capabilities(
+        "provider/incomplete-model",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert capabilities.free is False
 
 
 def test_model_experience_updates_from_observation_and_feedback() -> None:
@@ -226,6 +273,131 @@ def test_route_adapts_to_model_experience() -> None:
         selector._rng.setstate(rng_state)
 
 
+def test_select_from_pool_uses_local_feedback_prior_strength(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "alpha/model": 0.90,
+                "beta/model": 0.70,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+
+    store = ModelExperienceStore(storage=InMemoryModelExperienceStorage(), alpha=0.25)
+    for _ in range(5):
+        store.record_feedback("alpha/model", RoutingMode.AUTO, Tier.SIMPLE, "weak")
+
+    common_kwargs = dict(
+        complexity=0.15,
+        mode=RoutingMode.AUTO,
+        confidence=0.8,
+        reasoning_text="test",
+        available_models=["alpha/model", "beta/model"],
+        estimated_input_tokens=100,
+        max_output_tokens=100,
+        prompt="hello",
+        pricing={
+            "alpha/model": ModelPricing(1.0, 1.0),
+            "beta/model": ModelPricing(1.0, 1.0),
+        },
+        capabilities={
+            "alpha/model": infer_capabilities("alpha/model", ModelPricing(1.0, 1.0), has_explicit_pricing=True),
+            "beta/model": infer_capabilities("beta/model", ModelPricing(1.0, 1.0), has_explicit_pricing=True),
+        },
+        requirements=RequestRequirements(),
+        selection_weights=SelectionWeights(
+            editorial=0.0,
+            cost=0.0,
+            latency=0.0,
+            reliability=0.0,
+            feedback=0.0,
+            cache_affinity=0.0,
+            byok=0.0,
+            free_bias=0.0,
+            local_bias=0.0,
+            reasoning_bias=0.0,
+            quality_alignment=0.0,
+            continuity=0.0,
+        ),
+        model_experience=store,
+    )
+
+    high_prior = select_from_pool(
+        **common_kwargs,
+        bandit_config=BanditConfig(enabled=False, prior_n=20.0),
+    )
+    low_prior = select_from_pool(
+        **common_kwargs,
+        bandit_config=BanditConfig(enabled=False, prior_n=5.0),
+    )
+
+    assert high_prior.model == "alpha/model"
+    assert low_prior.model == "beta/model"
+
+    high_alpha = next(score for score in high_prior.candidate_scores if score.model == "alpha/model")
+    low_alpha = next(score for score in low_prior.candidate_scores if score.model == "alpha/model")
+    assert high_alpha.predicted_quality > 0.70
+    assert low_alpha.predicted_quality < 0.70
+
+
+def test_select_from_pool_respects_bandit_enabled_tiers(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "alpha/model": 0.90,
+                "beta/model": 0.80,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    pricing = {
+        "alpha/model": ModelPricing(1.0, 1.0),
+        "beta/model": ModelPricing(1.0, 1.0),
+    }
+    capabilities = {
+        model: infer_capabilities(model, model_pricing, has_explicit_pricing=True)
+        for model, model_pricing in pricing.items()
+    }
+
+    decision = select_from_pool(
+        complexity=0.90,
+        mode=RoutingMode.AUTO,
+        confidence=0.9,
+        reasoning_text="test",
+        available_models=list(pricing),
+        estimated_input_tokens=1_000,
+        max_output_tokens=100,
+        prompt="Design a distributed system.",
+        pricing=pricing,
+        capabilities=capabilities,
+        requirements=RequestRequirements(),
+        selection_weights=SelectionWeights(
+            editorial=0.0,
+            cost=0.0,
+            latency=0.0,
+            reliability=0.0,
+            feedback=0.0,
+            cache_affinity=0.0,
+            byok=0.0,
+            free_bias=0.0,
+            local_bias=0.0,
+            reasoning_bias=0.0,
+            quality_alignment=0.0,
+            continuity=0.0,
+        ),
+        bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.SIMPLE,)),
+    )
+
+    alpha = next(score for score in decision.candidate_scores if score.model == "alpha/model")
+    beta = next(score for score in decision.candidate_scores if score.model == "beta/model")
+    assert decision.tier is Tier.COMPLEX
+    assert alpha.predicted_quality == 0.90
+    assert beta.predicted_quality == 0.80
+
+
 def test_best_mode_uses_higher_quality_threshold() -> None:
     """BEST mode's higher threshold excludes lower-quality models."""
     pricing = {
@@ -266,6 +438,51 @@ def test_best_mode_uses_higher_quality_threshold() -> None:
     opus_best = next(s for s in best_decision.candidate_scores if "opus" in s.model)
     assert opus_best.predicted_quality == opus_auto.predicted_quality, \
         "Same model should have same predicted quality regardless of mode"
+
+
+def test_auto_mode_cost_sanity_guard_blocks_dominated_expensive_exploration(monkeypatch) -> None:
+    """AUTO exploration should not pick pricier same-quality peers with weaker priors."""
+    import uncommon_route.benchmark as benchmark
+    import uncommon_route.router.selector as selector
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "anthropic/claude-opus-4-7": 0.84,
+                "google/gemini-3.1-pro-preview": 0.88,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    draws = iter([0.99, 0.10])
+    monkeypatch.setattr(selector._rng, "betavariate", lambda _alpha, _beta: next(draws))
+
+    pricing = {
+        "anthropic/claude-opus-4-7": ModelPricing(5.0, 25.0),
+        "google/gemini-3.1-pro-preview": ModelPricing(2.0, 12.0),
+    }
+    capabilities = {
+        model: infer_capabilities(model, model_pricing, has_explicit_pricing=True)
+        for model, model_pricing in pricing.items()
+    }
+
+    decision = select_from_pool(
+        complexity=0.90,
+        mode=RoutingMode.AUTO,
+        confidence=0.9,
+        reasoning_text="test",
+        available_models=list(pricing),
+        estimated_input_tokens=4_000,
+        max_output_tokens=800,
+        prompt="Solve a hard reasoning bug.",
+        pricing=pricing,
+        capabilities=capabilities,
+        requirements=RequestRequirements(prefers_reasoning=True),
+        selection_weights=get_selection_weights(DEFAULT_CONFIG, RoutingMode.AUTO),
+        bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.COMPLEX,)),
+    )
+
+    assert decision.model == "google/gemini-3.1-pro-preview"
+    assert "cost-sanity=anthropic/claude-opus-4-7->google/gemini-3.1-pro-preview" in decision.reasoning
 
 
 def test_feedback_collector_updates_model_experience() -> None:

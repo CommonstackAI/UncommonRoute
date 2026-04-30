@@ -115,11 +115,11 @@ from uncommon_route.responses_compat import (
     openai_chat_response_to_responses,
     responses_to_openai_chat_request,
 )
+from uncommon_route.version import VERSION
 
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
-VERSION = "0.7.6"
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
 
@@ -437,7 +437,13 @@ def _extract_user_prompt_text(value: Any) -> str:
 def _extract_prompt(body: dict) -> tuple[str, str | None, int]:
     """Extract last user message, system prompt, and max_tokens from request body."""
     messages = body.get("messages", [])
-    max_tokens: int = body.get("max_tokens", 4096)
+    raw_max_tokens = body.get("max_tokens", body.get("max_completion_tokens", 4096))
+    if raw_max_tokens is None:
+        raw_max_tokens = body.get("max_completion_tokens", 4096)
+    try:
+        max_tokens = max(1, int(raw_max_tokens)) if raw_max_tokens is not None else 4096
+    except (TypeError, ValueError):
+        max_tokens = 4096
 
     prompt = ""
     system_prompt: str | None = None
@@ -900,6 +906,572 @@ def _has_vision_content(value: Any) -> bool:
     return False
 
 
+_HIGH_RISK_TOOL_MARKERS = (
+    "traceback",
+    "exception",
+    "stack trace",
+    "assertionerror",
+    "syntaxerror",
+    "typeerror",
+    "valueerror",
+    "invalid_request_error",
+    "connectionrefused",
+    "timed out",
+    "timeout",
+    "permission denied",
+    "no such file",
+    "failed",
+    "failure",
+    "fatal",
+    "panic",
+    "segmentation fault",
+    "400 bad request",
+    "500 internal",
+    "api error",
+    "error:",
+    "error trace_id",
+    "报错",
+    "错误",
+    "异常",
+    "失败",
+    "堆栈",
+    "超时",
+    "拒绝连接",
+)
+
+_HIGH_RISK_PROMPT_MARKERS = (
+    "fix",
+    "debug",
+    "root cause",
+    "regression",
+    "failing",
+    "failed test",
+    "implement",
+    "refactor",
+    "migrate",
+    "security",
+    "deploy",
+    "release",
+    "production",
+    "修复",
+    "调试",
+    "排查",
+    "定位",
+    "根因",
+    "回归",
+    "失败",
+    "实现",
+    "重构",
+    "迁移",
+    "安全",
+    "部署",
+    "发布",
+)
+
+_RETRY_PROMPT_MARKERS = (
+    "again",
+    "retry",
+    "rerun",
+    "re-run",
+    "try again",
+    "continue",
+    "继续",
+    "重试",
+    "再试",
+    "再来",
+    "重新",
+)
+
+_SUCCESSFUL_FAILURE_SUMMARY_RE = re.compile(
+    r"\b(?:0\s+(?:failed|failures?|errors?)|(?:failed|failures?|errors?)\s*[:=]\s*0|no\s+(?:failures?|errors?))\b",
+    re.IGNORECASE,
+)
+_NONZERO_FAILURE_SUMMARY_RE = re.compile(
+    r"\b(?:[1-9]\d*\s+(?:failed|failures?|errors?)|(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_FAIL_STATUS_RE = re.compile(
+    r"(?:^|\n)\s*(?:[\w./:= -]+\s*[:=]\s*)?FAIL(?:\s|$)",
+    re.IGNORECASE,
+)
+_VERIFICATION_CONTEXT_MARKERS = (
+    "final verification",
+    "verification",
+    "verify",
+    "test from",
+    "tests:",
+    "pytest",
+    "unittest",
+    "runtests",
+    "failures",
+    "assertionerror",
+    "expected",
+    "actual",
+    "lint",
+    "typecheck",
+    "type-check",
+    "mypy",
+    "tsc",
+    "eslint",
+    "ruff",
+)
+_NONZERO_EXIT_STATUS_RE = re.compile(
+    r"\b(?:exit(?:ed)?(?:\s+with)?\s+(?:status|code)|exit\s+status|return\s+code)\s*[:=]?\s*[1-9]\d*\b",
+    re.IGNORECASE,
+)
+_XML_RETURN_CODE_RE = re.compile(r"<returncode>\s*(-?\d+)\s*</returncode>", re.IGNORECASE)
+_DEPENDENCY_RECOVERY_RE = re.compile(
+    r"\b(?:modulenotfounderror|importerror)\b[^\n]*(?:no module named|module named|cannot import)",
+    re.IGNORECASE,
+)
+
+_ENVIRONMENT_RECOVERY_MARKERS = (
+    "no module named",
+    "module not found",
+    "could not find a version",
+    "no matching distribution",
+    "successfully installed",
+    "successfully uninstalled",
+    "editable installation",
+    "source checkout",
+    "build_ext",
+    "site-packages/numpy",
+    "module 'numpy' has no attribute",
+)
+
+_ENVIRONMENT_COMMAND_MARKERS = (
+    "pip install",
+    "uv pip",
+    "poetry install",
+    "pip-sync",
+    "python setup.py",
+    "build_ext",
+)
+_INVOCATION_FAILURE_MARKERS = (
+    "unittest.loader._failedtest",
+    "failedtest",
+    "failed to import test module",
+    "error importing test module",
+    "no tests ran",
+    "not found:",
+    "module has no attribute",
+)
+_ROUTINE_SUCCESS_COMMAND_MARKERS = (
+    "git status",
+    "git diff --stat",
+    "git rev-parse",
+    "pwd",
+    "mkdir",
+    "touch ",
+    "cat >",
+    "tee ",
+)
+_SUCCESSFUL_TEST_SUMMARY_RE = re.compile(
+    r"\b(?:\d+\s+passed|ran\s+\d+\s+tests?.*\bok\b|test suites?:.*passed|tests?:.*passed|ok\s+[\w./-]+)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_GENERIC_ROUTINE_SUCCESS_RE = re.compile(
+    r"^\s*(?:done|ok|success|successful|completed)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_READ_ONLY_COMMAND_RE = re.compile(
+    r"^\s*(?:"
+    r"cat|sed\b|grep\b|rg\b|find\b|ls\b|head\b|tail\b|"
+    r"git\s+(?:diff|status|show|log|rev-parse)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _contains_risk_marker(text: str, markers: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in markers)
+
+
+def _has_nonzero_xml_returncode(text: str) -> bool:
+    match = _XML_RETURN_CODE_RE.search(text or "")
+    if match is None:
+        return False
+    try:
+        return int(match.group(1)) != 0
+    except ValueError:
+        return False
+
+
+def _has_zero_xml_returncode(text: str) -> bool:
+    match = _XML_RETURN_CODE_RE.search(text or "")
+    if match is None:
+        return False
+    try:
+        return int(match.group(1)) == 0
+    except ValueError:
+        return False
+
+
+def _command_is_read_only_observation(command: str) -> bool:
+    return bool(_READ_ONLY_COMMAND_RE.search(command or ""))
+
+
+def _has_verification_context(text: str, command: str = "") -> bool:
+    haystack = f"{command}\n{text}".lower()
+    return any(marker in haystack for marker in _VERIFICATION_CONTEXT_MARKERS)
+
+
+def _contains_tool_failure_signal(text: str, command: str = "") -> bool:
+    if (
+        _has_zero_xml_returncode(text)
+        and _command_is_read_only_observation(command)
+        and not _NONZERO_FAILURE_SUMMARY_RE.search(text)
+    ):
+        summary_stripped = _SUCCESSFUL_FAILURE_SUMMARY_RE.sub(" ", text)
+        if not (
+            _has_verification_context(text, command)
+            and _EXPLICIT_FAIL_STATUS_RE.search(summary_stripped)
+        ):
+            return False
+
+    if (
+        _has_nonzero_xml_returncode(text)
+        or _NONZERO_FAILURE_SUMMARY_RE.search(text)
+        or _NONZERO_EXIT_STATUS_RE.search(text)
+    ):
+        return True
+    summary_stripped = _SUCCESSFUL_FAILURE_SUMMARY_RE.sub(" ", text)
+    if _has_verification_context(text, command) and _EXPLICIT_FAIL_STATUS_RE.search(summary_stripped):
+        return True
+    if not _contains_risk_marker(text, _HIGH_RISK_TOOL_MARKERS):
+        return False
+    lowered = text.lower()
+    if "traceback" in lowered or "exception" in lowered or "error:" in lowered:
+        return True
+    failure_words = ("failed", "failure", "失败")
+    summary_stripped = summary_stripped.lower()
+    has_remaining_failure = any(word in summary_stripped for word in failure_words)
+    if not has_remaining_failure and _SUCCESSFUL_FAILURE_SUMMARY_RE.search(text) and not any(
+        marker in lowered
+        for marker in (
+            "assertionerror",
+            "syntaxerror",
+            "typeerror",
+            "valueerror",
+            "invalid_request_error",
+            "fatal",
+            "panic",
+            "400 bad request",
+            "500 internal",
+            "报错",
+            "错误",
+            "异常",
+        )
+    ):
+        return False
+    return True
+
+
+def _contains_environment_recovery_signal(text: str, command: str = "") -> bool:
+    haystack = f"{command}\n{text}".lower()
+    return (
+        bool(_DEPENDENCY_RECOVERY_RE.search(text or ""))
+        or _contains_risk_marker(haystack, _ENVIRONMENT_COMMAND_MARKERS)
+        or _contains_risk_marker(haystack, _ENVIRONMENT_RECOVERY_MARKERS)
+    )
+
+
+def _tool_result_failure_kind(text: str, command: str = "") -> str:
+    """Classify a tool failure by what the next routing step should optimize.
+
+    Semantic failures are evidence about the patch or answer quality.
+    Environment/invocation failures are operational noise: keep them visible as
+    high-risk, but do not let them masquerade as complex reasoning failures.
+    """
+    if not text:
+        return ""
+    haystack = f"{command}\n{text}".lower()
+    if _contains_environment_recovery_signal(text, command):
+        return "environment"
+    if any(marker in haystack for marker in _INVOCATION_FAILURE_MARKERS):
+        return "invocation"
+    if _contains_tool_failure_signal(text, command):
+        if _has_verification_context(text, command) or _NONZERO_FAILURE_SUMMARY_RE.search(text):
+            return "semantic"
+        return "unknown"
+    return ""
+
+
+def _tool_result_is_routine_success(text: str, is_error: bool, command: str) -> bool:
+    if is_error or _contains_tool_failure_signal(text, command):
+        return False
+    return (
+        bool(_SUCCESSFUL_TEST_SUMMARY_RE.search(text or ""))
+        or bool(_GENERIC_ROUTINE_SUCCESS_RE.search(text or ""))
+        or _contains_risk_marker(command, _ROUTINE_SUCCESS_COMMAND_MARKERS)
+    )
+
+
+def _tool_result_is_short_success_observation(text: str, is_error: bool, command: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or len(stripped) > 800:
+        return False
+    if _contains_environment_recovery_signal(text, command):
+        return False
+    if _tool_result_is_routine_success(text, is_error, command):
+        return False
+    return not is_error and not _contains_tool_failure_signal(text, command)
+
+
+def _risk_text(value: Any) -> str:
+    """Flatten text-bearing content, including Anthropic tool_result blocks."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_risk_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in ("text", "content", "message", "error", "stderr", "stdout"):
+            if key in value:
+                parts.append(_risk_text(value.get(key)))
+        return "\n".join(part for part in parts if part)
+    return str(value or "")
+
+
+def _tool_call_command(tool_call: dict[str, Any]) -> str:
+    fn = tool_call.get("function") or {}
+    if not isinstance(fn, dict):
+        return ""
+    raw_args = fn.get("arguments")
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return raw_args
+        if isinstance(parsed, dict) and isinstance(parsed.get("command"), str):
+            return str(parsed["command"])
+    return ""
+
+
+def _command_for_tool_result(
+    messages: list[Any],
+    *,
+    before_index: int,
+    tool_call_id: str,
+) -> str:
+    if not tool_call_id:
+        return ""
+    for prior in reversed(messages[:before_index]):
+        if not isinstance(prior, dict):
+            continue
+        extra = prior.get("extra") or {}
+        if isinstance(extra, dict):
+            for action in extra.get("actions") or ():
+                if (
+                    isinstance(action, dict)
+                    and action.get("tool_call_id") == tool_call_id
+                    and isinstance(action.get("command"), str)
+                ):
+                    return str(action["command"])
+        for tc in prior.get("tool_calls") or ():
+            if isinstance(tc, dict) and tc.get("id") == tool_call_id:
+                command = _tool_call_command(tc)
+                if command:
+                    return command
+    return ""
+
+
+def _latest_tool_result_context(messages: list[Any]) -> tuple[str, bool, str]:
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            text = _risk_text(msg.get("content"))
+            command = _command_for_tool_result(
+                messages,
+                before_index=index,
+                tool_call_id=str(msg.get("tool_call_id") or ""),
+            )
+            return text, bool(msg.get("is_error")) or _has_nonzero_xml_returncode(text), command
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in reversed(content):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    text = _risk_text(block.get("content"))
+                    command = _command_for_tool_result(
+                        messages,
+                        before_index=index,
+                        tool_call_id=str(block.get("tool_use_id") or ""),
+                    )
+                    return (
+                        text,
+                        bool(block.get("is_error")) or _has_nonzero_xml_returncode(text),
+                        command,
+                    )
+    return "", False, ""
+
+
+def _latest_tool_result_signal(messages: list[Any]) -> tuple[str, bool]:
+    text, is_error, _command = _latest_tool_result_context(messages)
+    return text, is_error
+
+
+def _last_non_system_message(messages: list[Any]) -> dict[str, Any] | None:
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") != "system":
+            return msg
+    return None
+
+
+def _current_step_tool_result_signal(messages: list[Any], step_type: str) -> tuple[str, bool]:
+    if step_type != "tool-result-followup":
+        return "", False
+    text, is_error, _command = _latest_tool_result_context(messages)
+    return text, is_error
+
+
+def _current_step_tool_result_context(
+    messages: list[Any],
+    step_type: str,
+) -> tuple[str, bool, str]:
+    if step_type != "tool-result-followup":
+        return "", False, ""
+    return _latest_tool_result_context(messages)
+
+
+def _tool_result_is_environment_recovery(text: str, is_error: bool, command: str) -> bool:
+    if _contains_environment_recovery_signal(text, command):
+        return True
+    return False
+
+
+_REASONING_DISABLED_VALUES = {"", "none", "off", "false", "disabled", "disable"}
+_REASONING_FLOOR_VALUES = {"medium", "high", "xhigh", "x-high", "max"}
+_TIER_RANK = {Tier.SIMPLE: 0, Tier.MEDIUM: 1, Tier.COMPLEX: 2}
+
+
+def _max_tier(left: Tier | None, right: Tier | None) -> Tier | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left if _TIER_RANK[left] >= _TIER_RANK[right] else right
+
+
+def _reasoning_preference(body: dict[str, Any]) -> tuple[bool, Tier | None]:
+    """Detect explicit reasoning/thinking controls from OpenAI and Anthropic shaped requests."""
+    prefers_reasoning = False
+    tier_floor: Tier | None = None
+
+    def mark(value: Any, *, floor_medium: bool = False) -> None:
+        nonlocal prefers_reasoning, tier_floor
+        normalized = str(value or "").strip().lower()
+        if normalized in _REASONING_DISABLED_VALUES:
+            return
+        prefers_reasoning = True
+        if floor_medium or normalized in _REASONING_FLOOR_VALUES:
+            tier_floor = _max_tier(tier_floor, Tier.MEDIUM)
+
+    if "reasoning_effort" in body:
+        mark(body.get("reasoning_effort"))
+
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if effort is not None:
+            mark(effort)
+        elif reasoning:
+            mark("medium", floor_medium=True)
+    elif reasoning is not None:
+        mark(reasoning)
+
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        thinking_type = str(thinking.get("type") or "").strip().lower()
+        budget = thinking.get("budget_tokens")
+        budget_enabled = False
+        try:
+            budget_enabled = budget is not None and int(budget) > 0
+        except (TypeError, ValueError):
+            budget_enabled = bool(budget)
+        if thinking_type not in _REASONING_DISABLED_VALUES and (thinking_type or budget_enabled):
+            mark("medium", floor_medium=True)
+    elif thinking is not None:
+        mark(thinking, floor_medium=True)
+
+    if _contains_anthropic_thinking_blocks(body):
+        mark("medium", floor_medium=True)
+
+    return prefers_reasoning, tier_floor
+
+
+def _estimate_step_risk(
+    *,
+    messages: list[Any],
+    step_type: str,
+    tool_names: tuple[str, ...],
+    prompt: str,
+    needs_tool_calling: bool,
+    wants_structured_output: bool,
+) -> str:
+    tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(messages, step_type)
+    previous_tool_result_text, previous_tool_result_is_error = _latest_tool_result_signal(messages)
+    prompt_text = str(prompt or "")
+    prompt_has_high_risk_marker = _contains_risk_marker(prompt_text, _HIGH_RISK_PROMPT_MARKERS)
+
+    if wants_structured_output:
+        return "high"
+
+    if step_type == "tool-result-followup":
+        if tool_result_is_error:
+            return "high"
+        if _contains_tool_failure_signal(tool_result_text, tool_command):
+            return "high"
+        if _tool_result_is_routine_success(tool_result_text, tool_result_is_error, tool_command):
+            return "low"
+        if _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command):
+            return "normal"
+        return "normal"
+
+    retrying_previous_tool = (
+        _contains_risk_marker(prompt_text, _RETRY_PROMPT_MARKERS)
+        and (
+            previous_tool_result_is_error
+            or _contains_tool_failure_signal(previous_tool_result_text)
+        )
+    )
+    if retrying_previous_tool or prompt_has_high_risk_marker:
+        return "high"
+
+    if step_type == "tool-selection" and len(prompt_text) <= 40 and len(tool_names) <= 6:
+        return "low"
+    if not needs_tool_calling and len(prompt_text) <= 80:
+        return "low"
+    return "normal"
+
+
+def _agent_state_pressure(messages: list[Any], step_risk: str) -> tuple[int, float]:
+    """Continuous pressure signal for long or failure-heavy agent trajectories."""
+    tool_steps = 0
+    failure_steps = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("tool_calls"):
+            tool_steps += 1
+        tool_text, tool_is_error = _latest_tool_result_signal([msg])
+        if msg.get("role") == "tool" or tool_text:
+            tool_steps += 1
+            command = ""
+            if tool_is_error or _contains_tool_failure_signal(tool_text, command):
+                failure_steps += 1
+
+    step_component = min(0.45, max(0, tool_steps) / 24.0)
+    failure_component = min(0.35, failure_steps / 6.0)
+    risk_component = 0.20 if str(step_risk or "").lower() == "high" else 0.0
+    return tool_steps, min(1.0, step_component + failure_component + risk_component)
+
+
 def _extract_routing_features(
     body: dict,
     *,
@@ -909,7 +1481,7 @@ def _extract_routing_features(
     max_output_tokens: int = 4096,
     session_id: str | None = None,
 ) -> RoutingFeatures:
-    """Extract routing features — no keyword matching, no hardcoded overrides."""
+    """Extract routing features from the current request step."""
     messages = body.get("messages", [])
     raw_tools = body.get("tools") or body.get("customTools") or []
     normalized_tool_names = tuple(tool_names or ())
@@ -936,6 +1508,65 @@ def _extract_routing_features(
         response_format_name = response_format.strip().lower() or None
         wants_structured_output = response_format_name in {"json", "json_schema"}
 
+    step_risk = _estimate_step_risk(
+        messages=messages,
+        step_type=step_type,
+        tool_names=normalized_tool_names,
+        prompt=prompt,
+        needs_tool_calling=needs_tool_calling,
+        wants_structured_output=wants_structured_output,
+    )
+    tier_floor = Tier.MEDIUM if step_risk == "high" else None
+    tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(
+        messages,
+        step_type,
+    )
+    failure_kind = (
+        _tool_result_failure_kind(tool_result_text, tool_command)
+        if step_type == "tool-result-followup"
+        else ""
+    )
+    environment_recovery = (
+        step_type == "tool-result-followup"
+        and failure_kind == "environment"
+    )
+    invocation_recovery = (
+        step_type == "tool-result-followup"
+        and failure_kind == "invocation"
+    )
+    routine_success = (
+        step_type == "tool-result-followup"
+        and _tool_result_is_routine_success(tool_result_text, tool_result_is_error, tool_command)
+    )
+    short_success_observation = (
+        step_type == "tool-result-followup"
+        and _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command)
+    )
+    tier_cap = (
+        Tier.MEDIUM
+        if step_risk == "low"
+        or environment_recovery
+        or invocation_recovery
+        or routine_success
+        or short_success_observation
+        else None
+    )
+    tier_cap_reason = ""
+    if tier_cap is not None:
+        if environment_recovery:
+            tier_cap_reason = "environment-recovery"
+        elif invocation_recovery:
+            tier_cap_reason = "invocation-recovery"
+        elif routine_success:
+            tier_cap_reason = "routine-success"
+        elif short_success_observation:
+            tier_cap_reason = "short-observation"
+        else:
+            tier_cap_reason = "low-risk"
+    prefers_reasoning, reasoning_tier_floor = _reasoning_preference(body)
+    tier_floor = _max_tier(tier_floor, reasoning_tier_floor)
+    agent_step_count, agent_pressure = _agent_state_pressure(messages, step_risk)
+
     return RoutingFeatures(
         step_type=step_type,
         tool_names=normalized_tool_names,
@@ -945,12 +1576,20 @@ def _extract_routing_features(
         needs_vision=has_vision,
         needs_structured_output=wants_structured_output,
         response_format=response_format_name,
+        step_risk=step_risk,
         is_agentic=has_tool_results or (needs_tool_calling and step_type != "general"),
         is_coding=False,
+        prefers_reasoning=prefers_reasoning,
         requested_max_output_tokens=max(1, int(max_output_tokens)),
-        tier_floor=Tier.MEDIUM if step_type == "tool-selection" else None,
-        tier_cap=Tier.MEDIUM if step_type == "tool-selection" else None,
+        tier_floor=tier_floor,
+        tier_cap=tier_cap,
+        tier_cap_reason=tier_cap_reason,
         session_present=bool(session_id),
+        agent_step_count=agent_step_count,
+        agent_pressure=agent_pressure,
+        capability_lane=None,
+        verification_failed=failure_kind == "semantic",
+        failure_kind=failure_kind,
     )
 
 
@@ -972,18 +1611,18 @@ def extract_context_features(body: dict, step_type: str, prompt: str = "") -> di
     prior_tool_calls = 0
     for msg in messages:
         role = msg.get("role", "")
+        tool_result_text, _ = _latest_tool_result_signal([msg])
+        if tool_result_text:
+            tool_result_length = max(tool_result_length, len(tool_result_text))
         if role == "tool":
             prior_tool_calls += 1
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                tool_result_length = max(tool_result_length, len(content))
         elif role == "assistant" and msg.get("tool_calls"):
             prior_tool_calls += 1
 
     user_after_tools = 0.0
     saw_tool = False
     for msg in messages:
-        if msg.get("role") == "tool":
+        if msg.get("role") == "tool" or _latest_tool_result_signal([msg])[0]:
             saw_tool = True
         elif msg.get("role") == "user" and saw_tool:
             user_after_tools = 1.0
@@ -1164,7 +1803,51 @@ def _apply_provider_cache_plan(
         return CacheRequestPlan(family="anthropic", mode="stable-prefix")
     if family == "deepseek":
         return CacheRequestPlan(family="deepseek", mode="stable-prefix")
+    if family == "google":
+        _strip_openai_cache_hints_for_google(body)
+        return CacheRequestPlan(family="google", mode="cache-bypass")
     return CacheRequestPlan(family=family)
+
+
+def _strip_openai_cache_hints_for_google(body: dict[str, Any]) -> None:
+    """Remove Anthropic-derived cache hints that Gemini/OpenAI transport cannot accept."""
+    for tool in body.get("tools", []) or []:
+        if isinstance(tool, dict):
+            tool.pop("cache_control", None)
+
+    for message in body.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        flattened_text_parts: list[str] = []
+        normalized_parts: list[dict[str, Any]] = []
+        only_text_parts = True
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            normalized.pop("cache_control", None)
+            item_type = normalized.get("type")
+            if item_type in {"text", "input_text"}:
+                flattened_text_parts.append(str(normalized.get("text", "")))
+            else:
+                only_text_parts = False
+                normalized_parts.append(normalized)
+
+        if only_text_parts:
+            message["content"] = "\n".join(part for part in flattened_text_parts if part)
+            continue
+
+        if flattened_text_parts:
+            normalized_parts.insert(0, {
+                "type": "text",
+                "text": "\n".join(part for part in flattened_text_parts if part),
+            })
+        message["content"] = normalized_parts
 
 
 def _anthropic_messages_url(base_url: str) -> str:
@@ -1454,6 +2137,88 @@ def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
     return False
 
 
+def _anthropic_thinking_enabled(body: dict[str, Any] | None) -> bool:
+    if not isinstance(body, dict):
+        return False
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    thinking_type = str(thinking.get("type") or "").strip().lower()
+    return bool(thinking_type and thinking_type != "disabled")
+
+
+def _supports_anthropic_thinking_payload(model: str) -> bool:
+    value = str(model or "").strip().lower()
+    provider, _, core = value.partition("/")
+    if not core:
+        core = provider
+        provider = ""
+    core = re.sub(r"(\d)\.(\d)", r"\1-\2", core)
+
+    if provider == "anthropic":
+        if "haiku" in core:
+            return False
+        return (
+            "claude-opus-4" in core
+            or "claude-sonnet-4" in core
+            or "claude-3-7-sonnet" in core
+            or "claude-sonnet-3-7" in core
+        )
+    if provider == "minimax":
+        return "minimax-m2-7" in core or "minimax-m2-5" in core
+    return False
+
+
+def _filter_anthropic_thinking_context(
+    *,
+    available_models: list[str],
+    api_format: str,
+    endpoint_name: str,
+    session_id: str | None,
+    source_body: dict[str, Any] | None,
+    trace_store: TraceStore,
+) -> tuple[list[str], str]:
+    if not available_models:
+        return [], ""
+    if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
+        return list(available_models), ""
+    if not (
+        _anthropic_thinking_enabled(source_body)
+        or _contains_anthropic_thinking_blocks(source_body)
+    ):
+        return list(available_models), ""
+
+    previous_note = ""
+    previous_trace = trace_store.latest_for_session(
+        session_id,
+        step_types=("tool-selection", "tool-result-followup", "general"),
+    ) if session_id else None
+    if (
+        previous_trace is not None
+        and previous_trace.status_code < 400
+        and previous_trace.api_format == "anthropic"
+        and previous_trace.transport == "anthropic-messages"
+    ):
+        previous_model = str(previous_trace.model or "").strip()
+        if previous_model:
+            if previous_model in available_models:
+                previous_note = f";previous={previous_model}"
+            else:
+                previous_note = f";previous-unavailable={previous_model}"
+
+    compatible_models = [
+        model for model in available_models if _supports_anthropic_thinking_payload(model)
+    ]
+    if not compatible_models:
+        return list(available_models), f"thinking-context=no-compatible-pool{previous_note}"
+    if len(compatible_models) == len(available_models):
+        return list(available_models), f"thinking-context=compatible-pool{previous_note}"
+    return compatible_models, (
+        f"thinking-context=compatible-pool({len(compatible_models)}/{len(available_models)})"
+        f"{previous_note}"
+    )
+
+
 def _reuse_anthropic_source_body(
     *,
     source_body: dict[str, Any],
@@ -1550,6 +2315,12 @@ def _serialize_candidate_scores(candidate_scores: list[Any]) -> list[dict[str, o
             "total": round(score.total, 6),
             "predicted_cost": round(score.predicted_cost, 8),
             "editorial": round(score.editorial, 6),
+            "quality_prior_raw": round(score.quality_prior_raw, 6),
+            "quality_prior_source": score.quality_prior_source,
+            "quality_prior_match_type": score.quality_prior_match_type,
+            "quality_prior_matched_model": score.quality_prior_matched_model,
+            "quality_prior_confidence": round(score.quality_prior_confidence, 6),
+            "quality_prior_samples": score.quality_prior_samples,
             "cost": round(score.cost, 6),
             "latency": round(score.latency, 6),
             "reliability": round(score.reliability, 6),
@@ -1593,12 +2364,14 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "needs_vision": features.needs_vision,
         "needs_structured_output": features.needs_structured_output,
         "response_format": features.response_format,
+        "step_risk": features.step_risk,
         "is_agentic": features.is_agentic,
         "is_coding": features.is_coding,
         "prefers_reasoning": features.prefers_reasoning,
         "requested_max_output_tokens": features.requested_max_output_tokens,
         "tier_floor": features.tier_floor.value if features.tier_floor is not None else None,
         "tier_cap": features.tier_cap.value if features.tier_cap is not None else None,
+        "tier_cap_reason": features.tier_cap_reason,
         "session_present": features.session_present,
         "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
         "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
@@ -1883,6 +2656,7 @@ def create_app(
             logger.warning("Benchmark quality fetch failed: %s", exc)
 
     _rediscovery_task = None
+    _benchmark_refresh_task = None
 
     async def _rediscovery_loop() -> None:
         """Periodically re-discover upstream models to track changes."""
@@ -1897,6 +2671,26 @@ def create_app(
                     logger.info("Rediscovery: %d models from %s", count, _mapper.provider)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Rediscovery failed: %s", exc)
+
+    async def _benchmark_refresh_loop() -> None:
+        """Refresh external benchmark priors off the request path.
+
+        Providers still enforce their own TTLs, so this loop is cheap when
+        cached data is fresh and avoids blocking live routing on network calls.
+        """
+        import asyncio
+        interval = float(os.environ.get("UNCOMMON_ROUTE_BENCHMARK_REFRESH_INTERVAL", "3600"))
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                from uncommon_route.benchmark import get_benchmark_cache
+                count = await get_benchmark_cache().refresh()
+                if count > 0:
+                    logger.info("Benchmark refresh: %d models updated", count)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Benchmark refresh failed: %s", exc)
 
     def _selector_state(
         *,
@@ -1989,7 +2783,7 @@ def create_app(
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
         available_models = _circuit_breaker.filter_available(
-            _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+            _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
         )
         available_models, transport_pool_note = _filter_transport_compatible_models(
             available_models=available_models,
@@ -2018,6 +2812,7 @@ def create_app(
             available_models=available_models or None,
             model_capabilities=_routing_config.model_capabilities,
             messages=body.get("messages"),
+            record_lifecycle=False,
         )
         reasoning = decision.reasoning
         if transport_pool_note:
@@ -2049,6 +2844,7 @@ def create_app(
                 "applied_tags": list(decision.calibration_applied_tags),
             },
             "estimated_cost": round(decision.cost_estimate, 8),
+            "baseline_cost": round(decision.baseline_cost, 8),
             "savings": round(decision.savings, 6),
             "step_type": decision.routing_features.step_type,
             "requirements": {
@@ -2619,14 +3415,68 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        from uncommon_route.api_v2 import route_preview
-        result = route_preview(
-            prompt=body.get("prompt", ""),
-            risk_tolerance=body.get("risk_tolerance", 0.5),
-            system_prompt=body.get("system_prompt"),
-            step_index=body.get("step_index", 1),
-            total_steps=body.get("total_steps", 1),
+        preview_body = dict(body)
+        if not preview_body.get("model") and not preview_body.get("mode"):
+            try:
+                risk_tolerance = float(preview_body.get("risk_tolerance", 0.5))
+            except (TypeError, ValueError):
+                risk_tolerance = 0.5
+            if risk_tolerance <= 0.25:
+                preview_body["mode"] = RoutingMode.BEST.value
+            elif risk_tolerance >= 0.75:
+                preview_body["mode"] = RoutingMode.FAST.value
+
+        normalized_body, error = _normalize_selector_body(
+            preview_body,
+            default_mode=_routing_store.default_mode(),
         )
+        if normalized_body is None:
+            return JSONResponse({"error": error or "Invalid route preview payload"}, status_code=400)
+        try:
+            preview = _build_selector_preview(normalized_body, request)
+        except RoutingInfeasibleError as exc:
+            payload = _routing_infeasible_payload(exc)
+            payload["selector"] = _selector_state()
+            return JSONResponse(payload, status_code=400)
+
+        tier_name = str(preview.get("served_tier") or "MEDIUM").upper()
+        tier_index = {
+            "SIMPLE": 0,
+            "MEDIUM": 1,
+            "COMPLEX": 3,
+        }.get(tier_name, 1)
+        legacy_tier_name = {
+            "SIMPLE": "low",
+            "MEDIUM": "mid",
+            "COMPLEX": "high",
+        }.get(tier_name, "mid")
+        routing_features = preview.get("routing_features")
+        step_risk = ""
+        if isinstance(routing_features, dict):
+            step_risk = str(routing_features.get("step_risk") or "")
+        risk_tier = {"low": 0, "normal": 1, "high": 3}.get(step_risk, tier_index)
+
+        result = {
+            **preview,
+            # Compatibility fields consumed by the existing dashboard Playground.
+            "tier": tier_index,
+            "tier_name": legacy_tier_name,
+            "cost_estimate": preview.get("estimated_cost", 0.0),
+            "cost_baseline": preview.get("baseline_cost", preview.get("estimated_cost", 0.0)),
+            "signals": [
+                {
+                    "name": "router",
+                    "tier": tier_index,
+                    "confidence": preview.get("confidence", 0.0),
+                },
+                {
+                    "name": "step-risk",
+                    "tier": risk_tier,
+                    "confidence": 1.0 if step_risk else 0.0,
+                    "shadow": True,
+                },
+            ],
+        }
         return JSONResponse(result)
 
     async def _handle_chat_core(
@@ -2795,10 +3645,10 @@ def create_app(
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
-            transport_pool_note = ""
+            route_pool_notes: list[str] = []
             try:
                 route_available_models = _circuit_breaker.filter_available(
-                    _mapper.available_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+                    _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
                 )
                 route_available_models, transport_pool_note = _filter_transport_compatible_models(
                     available_models=route_available_models,
@@ -2812,6 +3662,18 @@ def create_app(
                     anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
                     providers_config=_providers,
                 )
+                if transport_pool_note:
+                    route_pool_notes.append(transport_pool_note)
+                route_available_models, thinking_lock_note = _filter_anthropic_thinking_context(
+                    available_models=route_available_models,
+                    api_format=api_format,
+                    endpoint_name=endpoint_name,
+                    session_id=session_id,
+                    source_body=source_body,
+                    trace_store=_traces,
+                )
+                if thinking_lock_note:
+                    route_pool_notes.append(thinking_lock_note)
                 decision = route(
                     prompt,
                     system_prompt,
@@ -2909,6 +3771,11 @@ def create_app(
                     api_format=api_format,
                     headers=debug_headers,
                 )
+            try:
+                from uncommon_route.v2_lifecycle import associate_request_id
+                associate_request_id(request_id)
+            except Exception:
+                pass
             selected_model = decision.model
             if _is_virtual_model_name(selected_model):
                 msg = f"Router selected a virtual model recursively: {selected_model}"
@@ -2939,8 +3806,8 @@ def create_app(
                 )
             reasoning = decision.reasoning
             route_reasoning = decision.reasoning
-            if transport_pool_note:
-                route_reasoning = f"{route_reasoning} | {transport_pool_note}"
+            if route_pool_notes:
+                route_reasoning = f"{route_reasoning} | {' | '.join(route_pool_notes)}"
                 reasoning = route_reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
@@ -3125,12 +3992,6 @@ def create_app(
                 ))
                 return _spend_error(check, api_format=api_format, headers=debug_headers)
 
-            # ─── v2: link request_id to cached signal predictions ───
-            try:
-                from uncommon_route.v2_lifecycle import associate_request_id
-                associate_request_id(request_id)
-            except Exception:
-                pass
             route_feats = extract_features(prompt, system_prompt)
             _feedback.capture(
                 request_id,
@@ -3501,7 +4362,12 @@ def create_app(
             )
             _set_header(debug_headers, "x-uncommon-route-reasoning", reasoning)
 
-        def _apply_attempt(attempt_payload: dict[str, Any], *, fallback_from: str | None = None) -> None:
+        def _apply_attempt(
+            attempt_payload: dict[str, Any],
+            *,
+            fallback_from: str | None = None,
+            record_successful_fallback: bool = True,
+        ) -> None:
             nonlocal selected_model, provider_entry, upstream_body, target_chat_url
             nonlocal transport_body, fwd_headers, transport_decision, native_anthropic_transport
             nonlocal cache_plan, resolved_model, route_method, fallback_reason
@@ -3532,15 +4398,17 @@ def create_app(
                 fallback_reason = f"{fallback_from} unavailable -> {resolved_model}"
                 reasoning = f"fallback: {fallback_reason}"
                 route_reasoning = reasoning
-                _mapper.record_alias(fallback_from, resolved_model)
-                if request_id:
+                if record_successful_fallback:
+                    _mapper.record_alias(fallback_from, resolved_model)
+                if record_successful_fallback and request_id:
                     _feedback.rebind_request(
                         request_id,
                         model=selected_model,
                         tier=tier_value,
                         mode=mode_value,
                     )
-                print(f"[route] fallback → {resolved_model}  ({fallback_from} unavailable)")
+                if record_successful_fallback:
+                    print(f"[route] fallback → {resolved_model}  ({fallback_from} unavailable)")
 
             _sync_virtual_debug_headers()
 
@@ -3939,7 +4807,19 @@ def create_app(
                                     attempt_payload["transport_body"].get("model")
                                     or attempt_payload["resolved_model"]
                                 )
+                            if index > 0:
+                                _apply_attempt(
+                                    attempt_payload,
+                                    fallback_from=fallback_source_model,
+                                    record_successful_fallback=False,
+                                )
                             continue
+                        if index > 0 and fallback_source_model is not None:
+                            _apply_attempt(
+                                attempt_payload,
+                                fallback_from=fallback_source_model,
+                                record_successful_fallback=False,
+                            )
                         return None, _build_proxy_response(
                             status_code=resp.status_code,
                             content=content,
@@ -4103,6 +4983,11 @@ def create_app(
                         _apply_attempt(fb_attempt, fallback_from=fallback_source_model)
                         break
                     resp = retry
+                    _apply_attempt(
+                        fb_attempt,
+                        fallback_from=fallback_source_model,
+                        record_successful_fallback=False,
+                    )
                     if not _should_try_fallback(retry.status_code, retry.content):
                         break
 
@@ -4405,14 +5290,17 @@ def create_app(
     async def _lifespan(app: Starlette) -> _LifespanGen[None, None]:
         import asyncio
         await _on_startup()
-        nonlocal _rediscovery_task
+        nonlocal _rediscovery_task, _benchmark_refresh_task
         if upstream:
             _rediscovery_task = asyncio.create_task(_rediscovery_loop())
+            _benchmark_refresh_task = asyncio.create_task(_benchmark_refresh_loop())
         try:
             yield
         finally:
             if _rediscovery_task is not None:
                 _rediscovery_task.cancel()
+            if _benchmark_refresh_task is not None:
+                _benchmark_refresh_task.cancel()
             # ─── v2 lifecycle shutdown ───
             try:
                 from uncommon_route.v2_lifecycle import on_shutdown as v2_shutdown

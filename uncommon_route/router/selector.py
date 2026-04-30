@@ -7,13 +7,16 @@ Supports two selection modes:
 """
 
 from __future__ import annotations
+from dataclasses import replace
 from uncommon_route.model_experience import CandidateExperience
 from uncommon_route.router.config import BASELINE_MODEL, DEFAULT_MODEL_PRICING
 from uncommon_route.router.quality import (
     apply_quality_guards,
     continuity_alignment_score,
     quality_alignment_score,
+    quality_rank,
     request_capability_lane,
+    scoring_served_quality_target,
 )
 from uncommon_route.router.structural import estimate_output_budget
 from uncommon_route.router.types import (
@@ -37,6 +40,9 @@ from uncommon_route.router.types import (
     Tier,
     TierConfig,
     WorkloadHints,
+    pressure_rescue_active,
+    pressure_rescue_premium_allowed,
+    pressure_rescue_premium_window,
 )
 
 import logging
@@ -48,6 +54,28 @@ logger = logging.getLogger("uncommon-route")
 
 _rng = random.Random()
 
+_UNKNOWN_MODEL_PRICING = ModelPricing(5.0, 25.0)
+
+
+def _pricing_for_model(model: str, pricing: dict[str, ModelPricing]) -> ModelPricing:
+    """Use conservative pricing for unknown models instead of treating them as free."""
+    return pricing.get(model) or DEFAULT_MODEL_PRICING.get(model) or _UNKNOWN_MODEL_PRICING
+
+
+def _stabilize_agent_step_selection(features: RoutingFeatures) -> bool:
+    """Disable stochastic exploration for the current agent/tool step.
+
+    This is intentionally not a hard model lock and does not make routing
+    session-level. It only removes Thompson-sampling randomness on steps where
+    the current request carries tool/protocol state.
+    """
+    return bool(
+        features.is_agentic
+        or features.has_tool_results
+        or features.needs_tool_calling
+        or features.step_type in {"tool-selection", "tool-result-followup"}
+    )
+
 
 def _calc_cost(
     model: str,
@@ -57,7 +85,7 @@ def _calc_cost(
     *,
     input_cost_multiplier: float = 1.0,
 ) -> float:
-    mp = pricing.get(model, ModelPricing(0, 0))
+    mp = _pricing_for_model(model, pricing)
     effective_multiplier = max(0.1, min(2.0, input_cost_multiplier))
     return (
         (input_tokens / 1_000_000) * mp.input_price * effective_multiplier
@@ -278,6 +306,10 @@ def select_model(
     hints = workload_hints or WorkloadHints()
     weights = selection_weights or SelectionWeights()
     effective_features = routing_features or RoutingFeatures()
+    effective_bandit = bandit_config or BanditConfig()
+    step_stable = _stabilize_agent_step_selection(effective_features)
+    if step_stable and effective_bandit.enabled:
+        effective_bandit = replace(effective_bandit, enabled=False)
     lane = request_capability_lane(effective_features)
     tc = tier_configs.get(tier, TierConfig())
     configured_candidates = [candidate for candidate in [
@@ -340,9 +372,39 @@ def select_model(
         lane=lane,
         capabilities=capabilities,
         continuity_floor=effective_features.continuity_quality_floor,
+        step_risk=effective_features.step_risk,
+        agent_pressure=effective_features.agent_pressure,
     )
     scoring_candidates = quality_guard.allowed_models
     reasoning = f"{reasoning} | {' | '.join(quality_guard.notes)}"
+    if step_stable:
+        reasoning = f"{reasoning} | step-stable=no-bandit"
+    pressure_rescue_note = _pressure_rescue_note(
+        effective_features,
+        tier=tier,
+        complexity=_tier_complexity_anchor(tier),
+        confidence=confidence,
+    )
+    if pressure_rescue_note:
+        reasoning = f"{reasoning} | {pressure_rescue_note}"
+    alignment_target = scoring_served_quality_target(
+        mode,
+        tier,
+        quality_guard.target,
+        quality_guard.floor,
+        complexity=_tier_complexity_anchor(tier),
+        confidence=confidence,
+        step_risk=effective_features.step_risk,
+        is_agentic=effective_features.is_agentic,
+        is_coding=effective_features.is_coding,
+        has_tool_results=effective_features.has_tool_results,
+        session_present=effective_features.session_present,
+        agent_step_count=effective_features.agent_step_count,
+        agent_pressure=effective_features.agent_pressure,
+        verification_failed=effective_features.verification_failed,
+    )
+    if alignment_target is not quality_guard.target:
+        reasoning = f"{reasoning} | served-quality-score-target={alignment_target.value}"
 
     # R2-Router: estimate optimal output budget from prompt + tier
     budget = estimate_output_budget(prompt, tier.value)
@@ -360,11 +422,11 @@ def select_model(
         capabilities=capabilities,
         requirements=requirements,
         weights=weights,
-        target_quality=quality_guard.target,
+        target_quality=alignment_target,
         previous_served_quality=effective_features.previous_served_quality,
         quality_by_model=quality_guard.quality_by_model,
         user_keyed_models=user_keyed_models,
-        bandit_config=bandit_config or BanditConfig(),
+        bandit_config=effective_bandit,
         model_experience=model_experience,
     )
     candidate_scores.sort(key=lambda item: item.total, reverse=True)
@@ -435,7 +497,7 @@ def select_model(
         tier=tier,
         capability_lane=lane,
         served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
-        served_quality_target=quality_guard.target,
+        served_quality_target=alignment_target,
         served_quality_floor=quality_guard.floor,
         continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,
@@ -671,6 +733,209 @@ def _quality_prior_scores(
     return {m: 0.5 for m in models}
 
 
+def _quality_prior_evidence_strength(
+    quality_estimate: object | None,
+    default_prior_n: float,
+) -> float:
+    """Return pseudo-count strength for external quality priors.
+
+    Benchmark priors are not all equal. An exact, fresh, multi-sample estimate
+    should reduce exploration variance more than a fuzzy or unknown prior,
+    while still leaving room for local outcome feedback to override it.
+    """
+    base = max(0.0, float(default_prior_n))
+    if quality_estimate is None:
+        return base
+
+    try:
+        confidence = max(0.0, min(1.0, float(getattr(quality_estimate, "confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        samples = max(0, int(getattr(quality_estimate, "sample_count", 0)))
+    except (TypeError, ValueError):
+        samples = 0
+
+    if confidence <= 0.0 or samples <= 0:
+        return base
+
+    # Diminishing returns: 40 external runs should stabilize exploration, but
+    # not dominate real local feedback forever.
+    external_strength = min(30.0, 5.0 * math.sqrt(float(samples))) * confidence
+    return max(base, base + external_strength)
+
+
+def _apply_cost_sanity_guard(
+    ranked: list[CandidateScore],
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    confidence: float,
+    features: RoutingFeatures,
+) -> tuple[list[CandidateScore], str]:
+    """Prevent AUTO/FAST exploration from preferring dominated expensive peers.
+
+    Thompson sampling intentionally explores, but it should not let a same-
+    quality, lower-prior, materially more expensive model beat a cheaper peer
+    with comparable or stronger benchmark quality. BEST is left quality-first.
+    """
+    if mode is RoutingMode.BEST or len(ranked) < 2:
+        return ranked, ""
+
+    selected = ranked[0]
+    selected_cost = max(0.0, selected.predicted_cost)
+    if selected_cost <= 0:
+        return ranked, ""
+
+    selected_quality_rank = quality_rank(selected.served_quality)
+    quality_tolerance = 0.03
+    material_savings = 0.25
+
+    alternatives = [
+        score
+        for score in ranked[1:]
+        if quality_rank(score.served_quality) >= selected_quality_rank
+        and score.editorial >= selected.editorial - quality_tolerance
+        and score.predicted_cost > 0
+        and score.predicted_cost <= selected_cost * (1.0 - material_savings)
+    ]
+    if not alternatives:
+        return ranked, ""
+
+    replacement = max(
+        alternatives,
+        key=lambda score: (
+            quality_rank(score.served_quality),
+            score.editorial,
+            -score.predicted_cost,
+            score.total,
+        ),
+    )
+    if replacement.model == selected.model:
+        return ranked, ""
+
+    reordered = [replacement]
+    reordered.extend(score for score in ranked if score.model != replacement.model)
+    note = (
+        "cost-sanity="
+        f"{selected.model}->{replacement.model}"
+        f"({selected_cost:.6f}->{replacement.predicted_cost:.6f})"
+    )
+    return reordered, note
+
+
+def _apply_premium_cost_benefit_guard(
+    ranked: list[CandidateScore],
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    complexity: float,
+    confidence: float,
+    features: RoutingFeatures,
+) -> tuple[list[CandidateScore], str]:
+    """Prefer measured near-peer balanced models over marginal premium wins.
+
+    This is deliberately model-agnostic. Premium still wins for BEST mode,
+    initial complex planning, and high-confidence hard recovery. In routine or
+    uncertain agent steps, a premium model needs a meaningful measured quality
+    advantage to justify an order-of-magnitude higher predicted cost.
+    """
+    if mode is not RoutingMode.AUTO or tier is not Tier.COMPLEX or len(ranked) < 2:
+        return ranked, ""
+
+    selected = ranked[0]
+    if quality_rank(selected.served_quality) < quality_rank(ServedQuality.PREMIUM):
+        return ranked, ""
+
+    selected_cost = max(0.0, selected.predicted_cost)
+    if selected_cost <= 0:
+        return ranked, ""
+
+    initial_complex_planning = (
+        not features.has_tool_results
+        and not features.session_present
+        and features.agent_step_count == 0
+    )
+    if initial_complex_planning:
+        return ranked, ""
+
+    high_confidence_hard_step = (
+        str(features.step_risk or "").strip().lower() == "high"
+        and confidence >= 0.85
+    )
+    if high_confidence_hard_step:
+        return ranked, ""
+    high_pressure_review_step = pressure_rescue_premium_allowed(
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        step_risk=features.step_risk,
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+        verification_failed=features.verification_failed,
+    )
+    if high_pressure_review_step:
+        return ranked, ""
+
+    max_quality_gap = 0.16
+    economical_quality_gap = 0.14
+    min_cost_ratio = 8.0
+    decisive_cost_ratio = 12.0
+    max_total_margin = max(0.025, abs(selected.total) * 0.035)
+    alternatives: list[CandidateScore] = []
+    for score in ranked[1:]:
+        if quality_rank(score.served_quality) < quality_rank(ServedQuality.BALANCED):
+            continue
+        if score.predicted_cost <= 0:
+            continue
+        if selected_cost < score.predicted_cost * min_cost_ratio:
+            continue
+        quality_gap = selected.predicted_quality - score.predicted_quality
+        if quality_gap > max_quality_gap:
+            continue
+        has_quality_basis = (
+            score.editorial >= 0.60
+            or score.quality_prior_confidence >= 0.30
+            or score.samples > 0
+        )
+        if not has_quality_basis:
+            continue
+        near_total = score.total >= selected.total - max_total_margin
+        decisive_cost_savings = (
+            selected_cost >= score.predicted_cost * decisive_cost_ratio
+            and quality_gap <= economical_quality_gap
+        )
+        if near_total or decisive_cost_savings:
+            alternatives.append(score)
+    if not alternatives:
+        return ranked, ""
+
+    replacement = max(
+        alternatives,
+        key=lambda score: (
+            score.predicted_quality,
+            score.editorial,
+            -score.predicted_cost,
+            score.total,
+        ),
+    )
+    if replacement.model == selected.model:
+        return ranked, ""
+
+    reordered = [replacement]
+    reordered.extend(score for score in ranked if score.model != replacement.model)
+    note = (
+        "premium-cost-benefit="
+        f"{selected.model}->{replacement.model}"
+        f"(q={selected.predicted_quality:.3f}->{replacement.predicted_quality:.3f},"
+        f" cost={selected_cost:.6f}->{replacement.predicted_cost:.6f})"
+    )
+    return reordered, note
+
+
 def _normalized_costs(
     models: list[str],
     pricing: dict[str, ModelPricing],
@@ -682,7 +947,7 @@ def _normalized_costs(
     """
     raw = {}
     for m in models:
-        mp = pricing.get(m, ModelPricing(0, 0))
+        mp = _pricing_for_model(m, pricing)
         raw[m] = math.log1p(mp.input_price + mp.output_price)
     if not raw:
         return {}
@@ -692,6 +957,168 @@ def _normalized_costs(
     if span <= 0:
         return {m: 0.5 for m in models}
     return {m: (raw[m] - lo) / span for m in models}
+
+
+def _pressure_rescue_note(
+    features: RoutingFeatures,
+    *,
+    tier: Tier,
+    complexity: float,
+    confidence: float,
+) -> str:
+    if not pressure_rescue_active(
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+    ):
+        return ""
+    if pressure_rescue_premium_allowed(
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        step_risk=features.step_risk,
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+        verification_failed=features.verification_failed,
+    ):
+        if features.verification_failed:
+            return "pressure-rescue=verification-review"
+        return "pressure-rescue=premium-window"
+    if pressure_rescue_premium_window(
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+    ):
+        return "pressure-rescue=step-up"
+    return "pressure-rescue=rolling-rebid"
+
+
+def _dynamic_quality_alignment_weight(
+    base_weight: float,
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    complexity: float,
+    confidence: float,
+    target: ServedQuality,
+    step_risk: str,
+    agent_pressure: float,
+) -> float:
+    """Adjust fit pressure only when target fit matters.
+
+    This is intentionally a scoring signal, not a model cap. A model outside
+    the target quality can still win when its measured quality/cost is better.
+    """
+    if mode is not RoutingMode.AUTO:
+        return base_weight
+
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
+    if target is ServedQuality.ECONOMY and (
+        tier is Tier.SIMPLE or normalized_step_risk == "low"
+    ):
+        return max(base_weight, 0.22)
+
+    if tier is not Tier.COMPLEX or target is not ServedQuality.PREMIUM:
+        return base_weight
+
+    complexity_pressure = max(0.0, min(1.0, (complexity - 0.84) / 0.16))
+    confidence_pressure = max(0.0, min(1.0, (confidence - 0.60) / 0.30))
+    rescue_pressure = max(0.0, min(1.0, (agent_pressure - 0.55) / 0.45))
+    pressure = max(min(complexity_pressure, confidence_pressure), rescue_pressure)
+    return base_weight + (0.30 * pressure)
+
+
+def _dynamic_quality_cost_weight(
+    default_weight: float,
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    complexity: float,
+    target: ServedQuality,
+    step_risk: str,
+    agent_pressure: float,
+) -> float:
+    """Lower marginal quality weight once an economy model is the right fit."""
+    if mode is not RoutingMode.AUTO:
+        return default_weight
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
+    if target is not ServedQuality.ECONOMY:
+        return default_weight
+    if agent_pressure >= 0.55 and normalized_step_risk != "low":
+        return default_weight
+    if tier is not Tier.SIMPLE and normalized_step_risk != "low":
+        return default_weight
+
+    economy_weight = 0.42 + (0.20 * max(0.0, min(1.0, complexity)))
+    return min(default_weight, economy_weight)
+
+
+def _should_sample_candidate_quality(
+    *,
+    bandit_active: bool,
+    mode: RoutingMode,
+    tier: Tier,
+    lane: CapabilityLane,
+    candidate_quality: ServedQuality,
+    candidate_cost: float,
+    cheapest_cost: float,
+    bandit_config: BanditConfig,
+    requirements: RequestRequirements,
+    features: RoutingFeatures,
+) -> bool:
+    if not bandit_active:
+        return False
+    if mode is not RoutingMode.AUTO:
+        return True
+    if tier is Tier.COMPLEX:
+        return True
+    if candidate_quality is not ServedQuality.PREMIUM:
+        return True
+
+    if cheapest_cost <= 0:
+        materially_expensive = candidate_cost > 0
+    else:
+        materially_expensive = (
+            candidate_cost > cheapest_cost * max(2.0, float(bandit_config.max_cost_ratio))
+        )
+    if not materially_expensive:
+        return True
+
+    return bool(
+        str(features.step_risk or "").strip().lower() == "high"
+        or requirements.prefers_reasoning
+        or features.prefers_reasoning
+        or lane is CapabilityLane.REASONING
+        or features.continuity_quality_floor is ServedQuality.PREMIUM
+    )
+
+
+def _should_disable_routine_auto_exploration(
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    lane: CapabilityLane,
+    requirements: RequestRequirements,
+    features: RoutingFeatures,
+) -> bool:
+    if mode is not RoutingMode.AUTO:
+        return False
+    if tier is Tier.COMPLEX:
+        return False
+    return not bool(
+        str(features.step_risk or "").strip().lower() == "high"
+        or requirements.prefers_reasoning
+        or features.prefers_reasoning
+        or lane is CapabilityLane.REASONING
+        or features.continuity_quality_floor is ServedQuality.PREMIUM
+    )
 
 
 def select_from_pool(
@@ -735,6 +1162,9 @@ def select_from_pool(
     hints = workload_hints or WorkloadHints()
     tier = _derive_tier(complexity)
     effective_features = routing_features or RoutingFeatures()
+    step_stable = _stabilize_agent_step_selection(effective_features)
+    if step_stable and bc.enabled:
+        bc = replace(bc, enabled=False)
     lane = request_capability_lane(effective_features)
 
     if not available_models:
@@ -777,13 +1207,40 @@ def select_from_pool(
         lane=lane,
         capabilities=capabilities,
         continuity_floor=effective_features.continuity_quality_floor,
+        step_risk=effective_features.step_risk,
+        agent_pressure=effective_features.agent_pressure,
     )
     candidates = quality_guard.allowed_models
+    alignment_target = scoring_served_quality_target(
+        mode,
+        tier,
+        quality_guard.target,
+        quality_guard.floor,
+        complexity=complexity,
+        confidence=confidence,
+        step_risk=effective_features.step_risk,
+        is_agentic=effective_features.is_agentic,
+        is_coding=effective_features.is_coding,
+        has_tool_results=effective_features.has_tool_results,
+        session_present=effective_features.session_present,
+        agent_step_count=effective_features.agent_step_count,
+        agent_pressure=effective_features.agent_pressure,
+        verification_failed=effective_features.verification_failed,
+    )
 
     benchmark_quality: dict[str, float] | None = None
+    benchmark_quality_estimates: dict[str, object] = {}
     try:
         from uncommon_route.benchmark import get_benchmark_cache
-        benchmark_quality = get_benchmark_cache().get_all_qualities(candidates)
+        benchmark_cache = get_benchmark_cache()
+        if hasattr(benchmark_cache, "get_all_quality_estimates"):
+            benchmark_quality_estimates = benchmark_cache.get_all_quality_estimates(candidates)
+            benchmark_quality = {
+                model: float(getattr(estimate, "score", 0.5))
+                for model, estimate in benchmark_quality_estimates.items()
+            }
+        else:
+            benchmark_quality = benchmark_cache.get_all_qualities(candidates)
     except Exception as exc:
         logger.warning("Benchmark quality unavailable: %s", exc)
     quality_priors = _quality_prior_scores(
@@ -832,8 +1289,17 @@ def select_from_pool(
             )
 
     mu = complexity
-    bandit_active = bc.enabled
-    prior_n = 20.0
+    bandit_active = bc.enabled and tier in bc.enabled_tiers
+    routine_exploration_disabled = bandit_active and _should_disable_routine_auto_exploration(
+        mode=mode,
+        tier=tier,
+        lane=lane,
+        requirements=requirements,
+        features=effective_features,
+    )
+    if routine_exploration_disabled:
+        bandit_active = False
+    prior_n = max(0.0, float(bc.prior_n))
 
     # Mode controls quality-vs-cost preference:
     #   FAST  → strongly prefer cheap (low cost_sensitivity = quality matters less)
@@ -849,7 +1315,26 @@ def select_from_pool(
         RoutingMode.BEST: 1.0,
     }
     base_q_weight = mode_quality_weight.get(mode, 0.65)
-    q_weight = base_q_weight + mu * (1.0 - base_q_weight) * 0.8
+    default_q_weight = base_q_weight + mu * (1.0 - base_q_weight) * 0.8
+    q_weight = _dynamic_quality_cost_weight(
+        default_q_weight,
+        mode=mode,
+        tier=tier,
+        complexity=complexity,
+        target=alignment_target,
+        step_risk=effective_features.step_risk,
+        agent_pressure=effective_features.agent_pressure,
+    )
+    quality_alignment_weight = _dynamic_quality_alignment_weight(
+        weights.quality_alignment,
+        mode=mode,
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        target=alignment_target,
+        step_risk=effective_features.step_risk,
+        agent_pressure=effective_features.agent_pressure,
+    )
 
     # Relative quality gate: exclude models below X% of the best available.
     mode_gate_fraction = {
@@ -861,34 +1346,53 @@ def select_from_pool(
 
     ranked: list[CandidateScore] = []
     all_predicted_qualities: dict[str, float] = {}
+    premium_exploration_blocked = 0
 
     for model in candidates:
         cap = capabilities.get(model, ModelCapabilities())
         exp = experience[model]
         benchmark_q = quality_priors.get(model, 0.5)
+        quality_estimate = benchmark_quality_estimates.get(model)
         cost_norm = actual_cost_norm.get(model, 0.5)
         reasoning_bias = 1.0 if requirements.prefers_reasoning and cap.reasoning else 0.0
         candidate_quality = quality_guard.quality_by_model.get(model, quality_guard.floor)
-        quality_alignment = quality_alignment_score(candidate_quality, quality_guard.target)
+        quality_alignment = quality_alignment_score(candidate_quality, alignment_target)
         continuity_bias = continuity_alignment_score(candidate_quality, effective_features.previous_served_quality)
         byok = 1.0 if user_keyed_models and model in user_keyed_models else 0.0
         free_bias = 1.0 if cap.free else 0.0
         local_bias = 1.0 if cap.local else 0.0
 
+        evidence_prior_n = _quality_prior_evidence_strength(quality_estimate, prior_n)
         base_quality = (
-            (prior_n * benchmark_q + exp.samples * exp.reward_mean)
-            / (prior_n + exp.samples)
+            (evidence_prior_n * benchmark_q + exp.samples * exp.reward_mean)
+            / (evidence_prior_n + exp.samples)
         )
 
         predicted_quality = base_quality
 
-        # Thompson Sampling: tighter exploration at higher difficulty
-        # so COMPLEX tasks rely more on benchmark ranking.
+        # Thompson Sampling: use external benchmark evidence as prior
+        # concentration. Complex tasks should not turn reliable priors into
+        # high-variance random draws just because they are hard.
         exploration_scale = max(3.0, 4.0 + mu * 6.0)
-        ts_alpha = max(0.5, exploration_scale * base_quality)
-        ts_beta = max(0.5, exploration_scale * (1.0 - base_quality))
-        if bandit_active:
+        ts_concentration = max(exploration_scale, evidence_prior_n + exp.samples)
+        ts_alpha = max(0.5, ts_concentration * base_quality)
+        ts_beta = max(0.5, ts_concentration * (1.0 - base_quality))
+        should_sample = _should_sample_candidate_quality(
+            bandit_active=bandit_active,
+            mode=mode,
+            tier=tier,
+            lane=lane,
+            candidate_quality=candidate_quality,
+            candidate_cost=dollar_costs[model],
+            cheapest_cost=cheapest_cost,
+            bandit_config=bc,
+            requirements=requirements,
+            features=effective_features,
+        )
+        if should_sample:
             predicted_quality = _rng.betavariate(ts_alpha, ts_beta)
+        elif bandit_active and candidate_quality is ServedQuality.PREMIUM:
+            premium_exploration_blocked += 1
         exploration_bonus = 0.0
         all_predicted_qualities[model] = predicted_quality
 
@@ -901,7 +1405,7 @@ def select_from_pool(
             + weights.free_bias * free_bias
             + weights.local_bias * local_bias
             + weights.reasoning_bias * reasoning_bias
-            + weights.quality_alignment * quality_alignment
+            + quality_alignment_weight * quality_alignment
             + weights.continuity * continuity_bias
         )
         total = (
@@ -917,6 +1421,12 @@ def select_from_pool(
             predicted_quality=predicted_quality,
             effective_cost_multiplier=exp.input_cost_multiplier,
             editorial=benchmark_q,
+            quality_prior_raw=float(getattr(quality_estimate, "raw_score", benchmark_q)),
+            quality_prior_source=str(getattr(quality_estimate, "source", "")),
+            quality_prior_match_type=str(getattr(quality_estimate, "match_type", "")),
+            quality_prior_matched_model=str(getattr(quality_estimate, "matched_model", "")),
+            quality_prior_confidence=float(getattr(quality_estimate, "confidence", 0.0)),
+            quality_prior_samples=int(getattr(quality_estimate, "sample_count", 0)),
             cost=cost_norm,
             latency=exp.latency,
             reliability=exp.reliability,
@@ -947,6 +1457,22 @@ def select_from_pool(
         ranked = gated + below
     else:
         ranked.sort(key=lambda s: s.predicted_quality, reverse=True)
+
+    ranked, cost_guard_note = _apply_cost_sanity_guard(
+        ranked,
+        mode=mode,
+        tier=tier,
+        confidence=confidence,
+        features=effective_features,
+    )
+    ranked, premium_cost_note = _apply_premium_cost_benefit_guard(
+        ranked,
+        mode=mode,
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        features=effective_features,
+    )
 
     if user_keyed_models:
         keyed = [s for s in ranked if s.model in user_keyed_models]
@@ -993,14 +1519,38 @@ def select_from_pool(
         reasoning_parts.append(f"constraints={','.join(constraint_tags)}")
     if hint_tags:
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
+    if step_stable:
+        reasoning_parts.append("step-stable=no-bandit")
+    pressure_rescue_note = _pressure_rescue_note(
+        effective_features,
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+    )
+    if pressure_rescue_note:
+        reasoning_parts.append(pressure_rescue_note)
+    if cost_guard_note:
+        reasoning_parts.append(cost_guard_note)
+    if premium_cost_note:
+        reasoning_parts.append(premium_cost_note)
+    if routine_exploration_disabled:
+        reasoning_parts.append("routine-exploration=base-prior")
+    if premium_exploration_blocked:
+        reasoning_parts.append(f"premium-exploration=base-prior({premium_exploration_blocked})")
     reasoning_parts.extend(quality_guard.notes)
+    if alignment_target is not quality_guard.target:
+        reasoning_parts.append(f"served-quality-score-target={alignment_target.value}")
+    if q_weight < default_q_weight - 0.001:
+        reasoning_parts.append(f"economy-fit=cost-aware(q={q_weight:.2f})")
+    if quality_alignment_weight > weights.quality_alignment:
+        reasoning_parts.append(f"served-quality-fit-weight={quality_alignment_weight:.2f}")
 
     return RoutingDecision(
         model=model,
         tier=tier,
         capability_lane=lane,
         served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
-        served_quality_target=quality_guard.target,
+        served_quality_target=alignment_target,
         served_quality_floor=quality_guard.floor,
         continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,

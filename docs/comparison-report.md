@@ -1,5 +1,13 @@
 # ClawRouter (原版) vs UncommonRoute — 详细对比报告
 
+> **HISTORICAL — v1 era, superseded by v2.**
+>
+> 此报告是 UncommonRoute v1 结构分类器在 3378 条手写用例上的评测，不反映当前 v2 系统的表现。
+> v2 的最新指标（78% tier accuracy / 93.4% pass rate / 82% cost savings 在 CommonRouterBench 196 条 holdout 上）见 [README.md](../README.md)。
+> v1 在真实 agent trace 上只有 43% 准确率，这是我们重建 v2 的原因。
+>
+> 保留此文档仅作为历史记录。
+
 数据集: 3378 条手写用例 | 16 种语言 | 38 个类别
 
 ## 1. 总体指标

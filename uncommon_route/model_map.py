@@ -83,6 +83,41 @@ SEED_ALIASES: dict[str, list[str]] = {
     "google/gemini-2.5-flash-lite": [
         "google/gemini-3.1-flash-lite-preview",
     ],
+    "google/gemini-3-pro-preview": [
+        "google/gemini-3.1-pro-preview",
+    ],
+    "google/gemini-3.1-pro": [
+        "google/gemini-3.1-pro-preview",
+    ],
+    "xai/grok-4-0709": [
+        "x-ai/grok-4-1-fast-non-reasoning",
+    ],
+    "xai/grok-4-1-fast-reasoning": [
+        "x-ai/grok-4.1-fast-reasoning",
+        "x-ai/grok-4-1-fast-reasoning",
+    ],
+    "xai/grok-4-1-fast-non-reasoning": [
+        "x-ai/grok-4-1-fast-non-reasoning",
+    ],
+    "xai/grok-code-fast-1": [
+        "x-ai/grok-code-fast-1",
+    ],
+    "openai/gpt-4o": [
+        "openai/gpt-4.1",
+    ],
+    "openai/gpt-5.2-codex": [
+        "openai/gpt-5.3-codex",
+    ],
+    "openai/o1-mini": [
+        "openai/gpt-5.4-mini-2026-03-17",
+    ],
+    "openai/o3": [
+        "openai/gpt-5.4-2026-03-05",
+        "openai/gpt-5",
+    ],
+    "openai/o4-mini": [
+        "openai/gpt-5.4-mini-2026-03-17",
+    ],
 }
 
 # Backward compat
@@ -96,7 +131,9 @@ KNOWN_ALIASES = SEED_ALIASES
 def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
     """Convert per-token pricing from upstream into per-1M-token ModelPricing."""
     if not raw or not isinstance(raw, dict):
-        return ModelPricing(0.0, 0.0)
+        return ModelPricing(5.0, 25.0)
+    if "prompt" not in raw or "completion" not in raw:
+        return ModelPricing(5.0, 25.0)
     try:
         input_price = float(raw.get("prompt", 0)) * 1_000_000
         output_price = float(raw.get("completion", 0)) * 1_000_000
@@ -109,15 +146,37 @@ def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
             cache_write_price=round(float(cache_write) * 1_000_000, 4) if cache_write else None,
         )
     except (ValueError, TypeError):
-        return ModelPricing(0.0, 0.0)
+        return ModelPricing(5.0, 25.0)
 
 
 # ---------------------------------------------------------------------------
 # Capability inference
 # ---------------------------------------------------------------------------
 
-_REASONING_POSITIVE = ("reason", "r1", "thinking", "think", "o1-", "o3", "o4-")
+_REASONING_POSITIVE = ("reason", "r1", "thinking", "think", "o1-", "o3", "o4-", "gpt-5")
 _REASONING_NEGATIVE = ("non-reason", "non_reason", "no-reason", "non-thinking")
+_NON_CHAT_MODEL_MARKERS = (
+    "-image",
+    "image-",
+    "-video",
+    "video-",
+    "-audio",
+    "audio-",
+    "speech",
+    "tts",
+    "embedding",
+    "embed",
+)
+
+
+def is_routable_chat_model(model_id: str) -> bool:
+    """Return False for modality-specific generation models in /v1/models.
+
+    Gateways often list image, video, audio, and embedding models beside chat
+    models. The chat router should not select those for text/tool requests.
+    """
+    core = _core(str(model_id or "").lower())
+    return not any(marker in core for marker in _NON_CHAT_MODEL_MARKERS)
 
 
 def infer_capabilities(
@@ -142,6 +201,8 @@ def infer_capabilities(
     if provider == "anthropic" and "opus" in core:
         reasoning = True
 
+    image_generation = not is_routable_chat_model(model_id) and "image" in core
+
     vision = False
     if any(p in core for p in ("-vl", "vision", "image")):
         vision = True
@@ -150,7 +211,7 @@ def infer_capabilities(
     if provider == "openai" and any(p in core for p in ("4o", "gpt-5", "gpt-4")):
         vision = True
 
-    tool_calling = True
+    tool_calling = not image_generation
 
     free = (
         has_explicit_pricing
@@ -346,6 +407,8 @@ class ModelMapper:
         best: str | None = None
 
         for upstream in self._upstream_models:
+            if is_routable_chat_model(internal) and not is_routable_chat_model(upstream):
+                continue
             up_core = _core(upstream)
             up_norm = _normalize(up_core)
             up_prov = _provider_prefix(upstream)
@@ -437,6 +500,11 @@ class ModelMapper:
     def available_models(self) -> list[str]:
         """All available upstream model IDs, sorted."""
         return sorted(self._pool.keys())
+
+    @property
+    def routable_models(self) -> list[str]:
+        """Chat-routable upstream model IDs, sorted."""
+        return [model for model in self.available_models if is_routable_chat_model(model)]
 
     def get_pricing(self, model_id: str) -> ModelPricing | None:
         """Look up pricing for a single model (internal or upstream ID)."""

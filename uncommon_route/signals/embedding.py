@@ -49,8 +49,38 @@ def _extract_last_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _extract_agent_state(messages: list[dict[str, Any]], budget_chars: int = 1600) -> str:
-    """Second embedding input: recent agent state (last 3 assistant/tool messages).
+def _tool_call_preview(tool_call: dict[str, Any], budget_chars: int = 320) -> str:
+    fn = tool_call.get("function") or {}
+    if not isinstance(fn, dict):
+        return ""
+    name = str(fn.get("name") or tool_call.get("name") or "?").strip() or "?"
+    arguments = fn.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            arg_text = arguments
+        else:
+            if isinstance(parsed, dict):
+                command = parsed.get("command")
+                if isinstance(command, str):
+                    arg_text = command
+                else:
+                    arg_text = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+            else:
+                arg_text = str(parsed)
+    elif arguments is None:
+        arg_text = ""
+    else:
+        arg_text = str(arguments)
+    arg_text = " ".join(arg_text.split())
+    if len(arg_text) > budget_chars:
+        arg_text = arg_text[:budget_chars] + "..."
+    return f"{name}({arg_text})" if arg_text else name
+
+
+def _extract_agent_state(messages: list[dict[str, Any]], budget_chars: int = 2400) -> str:
+    """Second embedding input: recent agent state.
 
     For multi-step agent trajectories the last_user text is often identical across
     steps (e.g. a swebench PR description), causing embedding collisions. The
@@ -66,11 +96,20 @@ def _extract_agent_state(messages: list[dict[str, Any]], budget_chars: int = 160
         content = _normalize_content(m.get("content", ""))
         tcs = m.get("tool_calls") or []
         if tcs:
-            names = [(tc.get("function") or {}).get("name") or tc.get("name", "?") for tc in tcs]
-            content = f"[tools: {','.join(names[:5])}] {content}"
+            previews = [
+                preview for tc in tcs[:4]
+                if isinstance(tc, dict)
+                for preview in [_tool_call_preview(tc)]
+                if preview
+            ]
+            if previews:
+                tool_text = "; ".join(previews)
+                content = f"{content}\n[tool_calls: {tool_text}]" if content else f"[tool_calls: {tool_text}]"
         if content:
-            recent.append(f"[{role}] {content[:500]}")
-        if len(recent) >= 3:
+            # Keep enough recent state to preserve intent across a short read /
+            # verify sequence, while still bounding the classifier input.
+            recent.append(f"[{role}] {content[:650]}")
+        if len(recent) >= 8:
             break
     if not recent:
         return ""
@@ -129,8 +168,8 @@ class EmbeddingSignal:
                             self._classifier = pickle.load(f)
                         logger.info("Auto-loaded embedding classifier from %s", auto_clf)
                         self._try_load_scaler(Path(index_path).parent)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to auto-load embedding classifier from %s: %s", auto_clf, e)
 
         if model_name:
             try:

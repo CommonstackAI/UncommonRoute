@@ -31,6 +31,13 @@ class RoutingMode(str, Enum):
     BEST = "best"
 
 
+PRESSURE_RESCUE_MIN_STEPS = 24
+PRESSURE_RESCUE_PREMIUM_WINDOW_STEPS = 10
+PRESSURE_RESCUE_PREMIUM_COMPLEXITY = 0.86
+PRESSURE_RESCUE_PREMIUM_CONFIDENCE = 0.30
+VERIFICATION_RESCUE_PREMIUM_COMPLEXITY = 0.68
+
+
 class RoutingFailureCode(str, Enum):
     NO_AVAILABLE_MODELS = "no_available_models"
     CAPABILITY_REQUIREMENTS_UNMET = "capability_requirements_unmet"
@@ -112,16 +119,22 @@ class RoutingFeatures:
     needs_vision: bool = False
     needs_structured_output: bool = False
     response_format: str | None = None
+    step_risk: str = "normal"
     is_agentic: bool = False
     is_coding: bool = False
     prefers_reasoning: bool = False
     requested_max_output_tokens: int | None = None
     tier_floor: Tier | None = None
     tier_cap: Tier | None = None
+    tier_cap_reason: str = ""
     session_present: bool = False
+    agent_step_count: int = 0
+    agent_pressure: float = 0.0
     capability_lane: CapabilityLane | None = None
     previous_served_quality: ServedQuality | None = None
     continuity_quality_floor: ServedQuality | None = None
+    verification_failed: bool = False
+    failure_kind: str = ""
 
     @property
     def tool_count(self) -> int:
@@ -149,19 +162,124 @@ class RoutingFeatures:
             labels.append(f"tools:{len(self.tool_names)}")
         if self.has_tool_results:
             labels.append("tool-results")
+        if self.step_risk != "normal":
+            labels.append(f"risk:{self.step_risk}")
         if self.needs_vision:
             labels.append("vision")
         if self.needs_structured_output:
             labels.append("structured-output")
+        if self.prefers_reasoning:
+            labels.append("reasoning")
         if self.session_present:
             labels.append("session")
+        if self.tier_cap is not None and self.tier_cap_reason:
+            labels.append(f"cap:{self.tier_cap_reason}")
+        if self.agent_step_count > 0:
+            labels.append(f"agent-steps:{min(99, self.agent_step_count)}")
+        if self.agent_pressure >= 0.35:
+            labels.append(f"agent-pressure:{min(1.0, max(0.0, self.agent_pressure)):.2f}")
         if self.capability_lane is not None:
             labels.append(f"lane:{self.capability_lane.value}")
         if self.previous_served_quality is not None:
             labels.append(f"prev-quality:{self.previous_served_quality.value}")
         if self.continuity_quality_floor is not None:
             labels.append(f"continuity-floor:{self.continuity_quality_floor.value}")
+        if self.verification_failed:
+            labels.append("verification-failed")
+        if self.failure_kind:
+            labels.append(f"failure:{self.failure_kind}")
         return tuple(labels)
+
+
+def pressure_rescue_active(
+    *,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+) -> bool:
+    """Whether an agent loop is stuck enough to raise the tier floor.
+
+    This is a per-step rescue signal, not session stickiness.
+    """
+    return bool(
+        agent_pressure >= 0.70
+        and agent_step_count >= PRESSURE_RESCUE_MIN_STEPS
+        and has_tool_results
+        and (is_agentic or is_coding)
+    )
+
+
+def pressure_rescue_premium_window(
+    *,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+) -> bool:
+    """Allow a bounded premium burst before cost-aware rebidding resumes."""
+    return bool(
+        pressure_rescue_active(
+            agent_pressure=agent_pressure,
+            agent_step_count=agent_step_count,
+            has_tool_results=has_tool_results,
+            is_agentic=is_agentic,
+            is_coding=is_coding,
+        )
+        and agent_step_count < PRESSURE_RESCUE_MIN_STEPS + PRESSURE_RESCUE_PREMIUM_WINDOW_STEPS
+    )
+
+
+def pressure_rescue_premium_allowed(
+    *,
+    tier: Tier,
+    complexity: float | None,
+    confidence: float | None,
+    step_risk: str,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+    verification_failed: bool = False,
+) -> bool:
+    """Whether pressure rescue may temporarily bypass premium cost rebidding."""
+    active = pressure_rescue_active(
+        agent_pressure=agent_pressure,
+        agent_step_count=agent_step_count,
+        has_tool_results=has_tool_results,
+        is_agentic=is_agentic,
+        is_coding=is_coding,
+    )
+    if (
+        verification_failed
+        and tier is Tier.COMPLEX
+        and complexity is not None
+        and confidence is not None
+        and complexity >= VERIFICATION_RESCUE_PREMIUM_COMPLEXITY
+        and confidence >= PRESSURE_RESCUE_PREMIUM_CONFIDENCE
+        and str(step_risk or "normal").strip().lower() == "high"
+        and active
+    ):
+        return True
+
+    return bool(
+        tier is Tier.COMPLEX
+        and complexity is not None
+        and confidence is not None
+        and complexity >= PRESSURE_RESCUE_PREMIUM_COMPLEXITY
+        and confidence >= PRESSURE_RESCUE_PREMIUM_CONFIDENCE
+        and str(step_risk or "normal").strip().lower() != "low"
+        and pressure_rescue_premium_window(
+            agent_pressure=agent_pressure,
+            agent_step_count=agent_step_count,
+            has_tool_results=has_tool_results,
+            is_agentic=is_agentic,
+            is_coding=is_coding,
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +315,12 @@ class CandidateScore:
     predicted_quality: float = 0.5
     effective_cost_multiplier: float = 1.0
     editorial: float = 0.0
+    quality_prior_raw: float = 0.5
+    quality_prior_source: str = ""
+    quality_prior_match_type: str = ""
+    quality_prior_matched_model: str = ""
+    quality_prior_confidence: float = 0.0
+    quality_prior_samples: int = 0
     cost: float = 0.0
     latency: float = 0.0
     reliability: float = 0.0
@@ -321,6 +445,7 @@ class BanditConfig:
     enabled: bool = True
     reward_weight: float = 0.12
     exploration_weight: float = 0.18
+    prior_n: float = 5.0
     warmup_pulls: int = 2
     min_samples_for_guardrail: int = 3
     min_reliability: float = 0.25

@@ -1,8 +1,14 @@
 import json
+import logging
 import numpy as np
 from pathlib import Path
 
-from uncommon_route.signals.embedding import EmbeddingSignal, _extract_last_user_message
+import uncommon_route.signals.embedding as embedding
+from uncommon_route.signals.embedding import (
+    EmbeddingSignal,
+    _extract_agent_state,
+    _extract_last_user_message,
+)
 
 
 def _make_seed_index(tmp_path: Path):
@@ -50,6 +56,27 @@ def test_embedding_signal_abstains_when_no_index(tmp_path):
     assert vote.abstained
 
 
+def test_embedding_signal_warns_when_auto_classifier_cannot_load(tmp_path, monkeypatch, caplog):
+    _make_seed_index(tmp_path)
+    (tmp_path / "embedding_classifier.pkl").write_bytes(b"not actually used")
+
+    def raise_missing_dependency(_file):
+        raise ModuleNotFoundError("No module named 'xgboost'")
+
+    monkeypatch.setattr(embedding.pickle, "load", raise_missing_dependency)
+
+    with caplog.at_level(logging.WARNING, logger="uncommon-route.embedding"):
+        sig = EmbeddingSignal(
+            index_path=tmp_path / "seed_embeddings.npy",
+            labels_path=tmp_path / "seed_labels.json",
+            model_name=None,
+        )
+
+    assert sig._classifier is None
+    assert "Failed to auto-load embedding classifier" in caplog.text
+    assert "xgboost" in caplog.text
+
+
 def test_extract_last_user_message():
     messages = [
         {"role": "system", "content": "You are helpful."},
@@ -63,6 +90,49 @@ def test_extract_last_user_message():
 def test_extract_last_user_message_empty():
     assert _extract_last_user_message([]) == ""
     assert _extract_last_user_message([{"role": "assistant", "content": "hi"}]) == ""
+
+
+def test_extract_agent_state_keeps_recent_intent_and_tool_arguments():
+    messages = [
+        {"role": "user", "content": "Fix the issue."},
+        {"role": "assistant", "content": "I have confirmed the root cause. Now I will implement the fix."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({
+                            "command": "sed -n '241,270p' /testbed/django/db/models/fields/json.py",
+                        }),
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "content": "<returncode>0</returncode>\n<output>class JSONExact...</output>"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({"command": "cat /testbed/tests/test_sqlite.py"}),
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "content": "<returncode>0</returncode>\n<output>DATABASES = {...}</output>"},
+    ]
+
+    state = _extract_agent_state(messages)
+
+    assert "confirmed the root cause" in state
+    assert "sed -n '241,270p' /testbed/django/db/models/fields/json.py" in state
+    assert "cat /testbed/tests/test_sqlite.py" in state
 
 
 def test_embedding_signal_abstains_on_empty_user_message(tmp_path):

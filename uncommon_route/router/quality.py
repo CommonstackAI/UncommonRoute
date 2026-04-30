@@ -11,6 +11,7 @@ from uncommon_route.router.types import (
     RoutingMode,
     ServedQuality,
     Tier,
+    pressure_rescue_premium_allowed,
 )
 
 _QUALITY_RANK = {
@@ -126,7 +127,11 @@ def model_served_quality(
         if "thinking" in core or "reason" in core:
             return ServedQuality.PREMIUM
         if provider == "openai" and _contains_any(core, ("pro", "o3", "gpt-5.4", "gpt-5.2", "gpt-5")):
-            return ServedQuality.BALANCED if "mini" in core else ServedQuality.PREMIUM
+            if "nano" in core:
+                return ServedQuality.ECONOMY
+            if "mini" in core:
+                return ServedQuality.BALANCED
+            return ServedQuality.PREMIUM
         if provider == "google" and "pro" in core:
             return ServedQuality.PREMIUM
         if caps.reasoning:
@@ -167,7 +172,7 @@ def model_served_quality(
             return ServedQuality.ECONOMY
         if _contains_any(core, ("gpt-5", "gpt-4.1", "gpt-oss", "o3", "o4")):
             return ServedQuality.BALANCED
-    if provider == "moonshotai":
+    if provider in {"moonshot", "moonshotai"}:
         if "thinking" in core:
             return ServedQuality.PREMIUM
         return ServedQuality.BALANCED
@@ -196,6 +201,84 @@ def quality_alignment_score(
     if delta == -1:
         return 0.18
     return 0.0
+
+
+def scoring_served_quality_target(
+    mode: RoutingMode,
+    tier: Tier,
+    target: ServedQuality,
+    floor: ServedQuality,
+    *,
+    complexity: float | None = None,
+    confidence: float | None = None,
+    step_risk: str = "normal",
+    is_agentic: bool = False,
+    is_coding: bool = False,
+    has_tool_results: bool = False,
+    session_present: bool = False,
+    agent_step_count: int = 0,
+    agent_pressure: float = 0.0,
+    verification_failed: bool = False,
+) -> ServedQuality:
+    """Return the quality level used for score alignment.
+
+    AUTO+COMPLEX should mean "balanced or better, prefer quality when the
+    classifier is confident the current step truly needs it", not "every
+    traceback or agent step should become premium-only". BEST keeps the
+    stricter premium target.
+    """
+    if quality_rank(floor) > quality_rank(target):
+        return floor
+
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
+
+    if (
+        mode is RoutingMode.AUTO
+        and normalized_step_risk == "low"
+        and tier in {Tier.SIMPLE, Tier.MEDIUM}
+        and agent_pressure < 0.55
+    ):
+        return floor
+
+    if mode is RoutingMode.AUTO and tier is Tier.COMPLEX:
+        initial_complex_planning = (
+            target is ServedQuality.PREMIUM
+            and complexity is not None
+            and confidence is not None
+            and complexity >= 0.86
+            and confidence >= 0.30
+            and (is_agentic or is_coding)
+            and not has_tool_results
+            and not session_present
+            and agent_step_count == 0
+            and normalized_step_risk != "low"
+        )
+        pressure_review = (
+            target is ServedQuality.PREMIUM
+            and pressure_rescue_premium_allowed(
+                tier=tier,
+                complexity=complexity,
+                confidence=confidence,
+                step_risk=normalized_step_risk,
+                agent_pressure=agent_pressure,
+                agent_step_count=agent_step_count,
+                has_tool_results=has_tool_results,
+                is_agentic=is_agentic,
+                is_coding=is_coding,
+                verification_failed=verification_failed,
+            )
+        )
+        if initial_complex_planning or (
+            target is ServedQuality.PREMIUM
+            and complexity is not None
+            and confidence is not None
+            and complexity >= 0.86
+            and confidence >= 0.55
+            and normalized_step_risk == "high"
+        ) or pressure_review:
+            return target
+        return floor
+    return target
 
 
 def continuity_alignment_score(
@@ -228,35 +311,70 @@ def apply_quality_guards(
     lane: CapabilityLane,
     capabilities: dict[str, ModelCapabilities],
     continuity_floor: ServedQuality | None = None,
+    step_risk: str = "normal",
+    agent_pressure: float = 0.0,
 ) -> QualityGuardResult:
     quality_by_model = {
         model: model_served_quality(model, lane, capabilities.get(model))
         for model in candidates
     }
     target = target_served_quality(mode, tier)
+    normalized_step_risk = str(step_risk or "normal").strip().lower()
     floor = minimum_served_quality(mode, tier)
-    effective_floor = stronger_quality(floor, continuity_floor) or floor
-    preferred_threshold = stronger_quality(target, continuity_floor) or target
+    if (
+        mode is RoutingMode.AUTO
+        and normalized_step_risk == "low"
+    ):
+        # The public tier describes the whole request, but served-quality is a
+        # per-step guard. A routine/successful agent step should not exclude
+        # economy candidates just because the surrounding issue is complex.
+        floor = ServedQuality.ECONOMY
+    if normalized_step_risk == "high":
+        risk_floor = ServedQuality.BALANCED
+    else:
+        risk_floor = None
+    hard_continuity_floor = continuity_floor if mode is RoutingMode.BEST else None
+    effective_floor = stronger_quality(
+        stronger_quality(floor, risk_floor),
+        hard_continuity_floor,
+    ) or floor
+    preferred_threshold = (
+        stronger_quality(stronger_quality(target, effective_floor), hard_continuity_floor)
+        or target
+    )
     notes: list[str] = [
         f"lane={lane.value}",
         f"served-quality-target={target.value}",
         f"served-quality-floor={effective_floor.value}",
     ]
+    if normalized_step_risk != "normal":
+        notes.append(f"step-risk={normalized_step_risk}")
+    if agent_pressure >= 0.35:
+        notes.append(f"agent-pressure={agent_pressure:.2f}")
+    if risk_floor is not None and normalized_step_risk == "high":
+        notes.append(f"step-risk-floor={risk_floor.value}")
+    elif risk_floor is not None:
+        notes.append(f"agent-pressure-floor={risk_floor.value}")
+    if continuity_floor is not None and hard_continuity_floor is None:
+        notes.append(f"continuity-soft={continuity_floor.value}")
+    # AUTO should route on model suitability, not collapse a high-risk complex
+    # step into an Opus-only pool before scoring can compare price/quality.
+    prefer_floor_pool = mode is RoutingMode.AUTO
 
     preferred = [
         model for model in candidates
         if quality_rank(quality_by_model[model]) >= quality_rank(preferred_threshold)
     ]
-    if preferred:
-        if continuity_floor is not None and quality_rank(preferred_threshold) > quality_rank(target):
-            notes.append(f"continuity-floor={continuity_floor.value}")
+    if preferred and not prefer_floor_pool:
+        if hard_continuity_floor is not None and quality_rank(preferred_threshold) > quality_rank(target):
+            notes.append(f"continuity-floor={hard_continuity_floor.value}")
         notes.append(f"served-quality>=target({len(preferred)}/{len(candidates)})")
         return QualityGuardResult(
             allowed_models=preferred,
             quality_by_model=quality_by_model,
             target=target,
             floor=effective_floor,
-            continuity_floor=continuity_floor,
+            continuity_floor=hard_continuity_floor,
             notes=tuple(notes),
         )
 
@@ -265,26 +383,28 @@ def apply_quality_guards(
         if quality_rank(quality_by_model[model]) >= quality_rank(effective_floor)
     ]
     if floor_candidates:
-        if continuity_floor is not None:
-            notes.append(f"continuity-floor-unavailable={continuity_floor.value}")
+        if hard_continuity_floor is not None:
+            notes.append(f"continuity-floor-unavailable={hard_continuity_floor.value}")
+        if prefer_floor_pool and preferred:
+            notes.append(f"served-quality-target-preferred={target.value}({len(preferred)}/{len(candidates)})")
         notes.append(f"served-quality>=floor({len(floor_candidates)}/{len(candidates)})")
         return QualityGuardResult(
             allowed_models=floor_candidates,
             quality_by_model=quality_by_model,
             target=target,
             floor=effective_floor,
-            continuity_floor=continuity_floor,
+            continuity_floor=hard_continuity_floor,
             notes=tuple(notes),
         )
 
-    if continuity_floor is not None:
-        notes.append(f"continuity-floor-unavailable={continuity_floor.value}")
+    if hard_continuity_floor is not None:
+        notes.append(f"continuity-floor-unavailable={hard_continuity_floor.value}")
     notes.append("served-quality-floor-unavailable")
     return QualityGuardResult(
         allowed_models=list(candidates),
         quality_by_model=quality_by_model,
         target=target,
         floor=effective_floor,
-        continuity_floor=continuity_floor,
+        continuity_floor=hard_continuity_floor,
         notes=tuple(notes),
     )

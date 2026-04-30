@@ -36,6 +36,13 @@ htmlcov/
 
 # Node (openclaw-plugin)
 openclaw-plugin/node_modules/
+node_modules/
+
+# Local run artifacts
+logs/
+tmp/
+test-results/
+tests/screenshots/
 
 # Spend control local data
 spending.json
@@ -43,6 +50,9 @@ spending.json
 # Benchmark results (large files, regenerate locally)
 bench/results/
 bench/data/*.generated.jsonl
+
+# Local experiment notes
+ROUTING_EXPERIMENT_REPORT.md
 
 # ─── v2: internal design docs (not user-facing) ───
 docs/uncommon-route-v2-architecture.md

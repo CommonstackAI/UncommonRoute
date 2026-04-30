@@ -955,6 +955,31 @@ _NONZERO_FAILURE_SUMMARY_RE = re.compile(
     r"\b(?:[1-9]\d*\s+(?:failed|failures?|errors?)|(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_FAIL_STATUS_RE = re.compile(
+    r"(?:^|\n)\s*(?:[\w./:= -]+\s*[:=]\s*)?FAIL(?:\s|$)",
+    re.IGNORECASE,
+)
+_VERIFICATION_CONTEXT_MARKERS = (
+    "final verification",
+    "verification",
+    "verify",
+    "test from",
+    "tests:",
+    "pytest",
+    "unittest",
+    "runtests",
+    "failures",
+    "assertionerror",
+    "expected",
+    "actual",
+    "lint",
+    "typecheck",
+    "type-check",
+    "mypy",
+    "tsc",
+    "eslint",
+    "ruff",
+)
 _NONZERO_EXIT_STATUS_RE = re.compile(
     r"\b(?:exit(?:ed)?(?:\s+with)?\s+(?:status|code)|exit\s+status|return\s+code)\s*[:=]?\s*[1-9]\d*\b",
     re.IGNORECASE,
@@ -987,6 +1012,15 @@ _ENVIRONMENT_COMMAND_MARKERS = (
     "python setup.py",
     "build_ext",
 )
+_INVOCATION_FAILURE_MARKERS = (
+    "unittest.loader._failedtest",
+    "failedtest",
+    "failed to import test module",
+    "error importing test module",
+    "no tests ran",
+    "not found:",
+    "module has no attribute",
+)
 _ROUTINE_SUCCESS_COMMAND_MARKERS = (
     "git status",
     "git diff --stat",
@@ -1003,6 +1037,13 @@ _SUCCESSFUL_TEST_SUMMARY_RE = re.compile(
 )
 _GENERIC_ROUTINE_SUCCESS_RE = re.compile(
     r"^\s*(?:done|ok|success|successful|completed)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_READ_ONLY_COMMAND_RE = re.compile(
+    r"^\s*(?:"
+    r"cat|sed\b|grep\b|rg\b|find\b|ls\b|head\b|tail\b|"
+    r"git\s+(?:diff|status|show|log|rev-parse)\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -1022,12 +1063,46 @@ def _has_nonzero_xml_returncode(text: str) -> bool:
         return False
 
 
-def _contains_tool_failure_signal(text: str) -> bool:
+def _has_zero_xml_returncode(text: str) -> bool:
+    match = _XML_RETURN_CODE_RE.search(text or "")
+    if match is None:
+        return False
+    try:
+        return int(match.group(1)) == 0
+    except ValueError:
+        return False
+
+
+def _command_is_read_only_observation(command: str) -> bool:
+    return bool(_READ_ONLY_COMMAND_RE.search(command or ""))
+
+
+def _has_verification_context(text: str, command: str = "") -> bool:
+    haystack = f"{command}\n{text}".lower()
+    return any(marker in haystack for marker in _VERIFICATION_CONTEXT_MARKERS)
+
+
+def _contains_tool_failure_signal(text: str, command: str = "") -> bool:
+    if (
+        _has_zero_xml_returncode(text)
+        and _command_is_read_only_observation(command)
+        and not _NONZERO_FAILURE_SUMMARY_RE.search(text)
+    ):
+        summary_stripped = _SUCCESSFUL_FAILURE_SUMMARY_RE.sub(" ", text)
+        if not (
+            _has_verification_context(text, command)
+            and _EXPLICIT_FAIL_STATUS_RE.search(summary_stripped)
+        ):
+            return False
+
     if (
         _has_nonzero_xml_returncode(text)
         or _NONZERO_FAILURE_SUMMARY_RE.search(text)
         or _NONZERO_EXIT_STATUS_RE.search(text)
     ):
+        return True
+    summary_stripped = _SUCCESSFUL_FAILURE_SUMMARY_RE.sub(" ", text)
+    if _has_verification_context(text, command) and _EXPLICIT_FAIL_STATUS_RE.search(summary_stripped):
         return True
     if not _contains_risk_marker(text, _HIGH_RISK_TOOL_MARKERS):
         return False
@@ -1035,7 +1110,7 @@ def _contains_tool_failure_signal(text: str) -> bool:
     if "traceback" in lowered or "exception" in lowered or "error:" in lowered:
         return True
     failure_words = ("failed", "failure", "失败")
-    summary_stripped = _SUCCESSFUL_FAILURE_SUMMARY_RE.sub(" ", text).lower()
+    summary_stripped = summary_stripped.lower()
     has_remaining_failure = any(word in summary_stripped for word in failure_words)
     if not has_remaining_failure and _SUCCESSFUL_FAILURE_SUMMARY_RE.search(text) and not any(
         marker in lowered
@@ -1067,8 +1142,29 @@ def _contains_environment_recovery_signal(text: str, command: str = "") -> bool:
     )
 
 
+def _tool_result_failure_kind(text: str, command: str = "") -> str:
+    """Classify a tool failure by what the next routing step should optimize.
+
+    Semantic failures are evidence about the patch or answer quality.
+    Environment/invocation failures are operational noise: keep them visible as
+    high-risk, but do not let them masquerade as complex reasoning failures.
+    """
+    if not text:
+        return ""
+    haystack = f"{command}\n{text}".lower()
+    if _contains_environment_recovery_signal(text, command):
+        return "environment"
+    if any(marker in haystack for marker in _INVOCATION_FAILURE_MARKERS):
+        return "invocation"
+    if _contains_tool_failure_signal(text, command):
+        if _has_verification_context(text, command) or _NONZERO_FAILURE_SUMMARY_RE.search(text):
+            return "semantic"
+        return "unknown"
+    return ""
+
+
 def _tool_result_is_routine_success(text: str, is_error: bool, command: str) -> bool:
-    if is_error or _contains_tool_failure_signal(text):
+    if is_error or _contains_tool_failure_signal(text, command):
         return False
     return (
         bool(_SUCCESSFUL_TEST_SUMMARY_RE.search(text or ""))
@@ -1085,7 +1181,7 @@ def _tool_result_is_short_success_observation(text: str, is_error: bool, command
         return False
     if _tool_result_is_routine_success(text, is_error, command):
         return False
-    return not is_error and not _contains_tool_failure_signal(text)
+    return not is_error and not _contains_tool_failure_signal(text, command)
 
 
 def _risk_text(value: Any) -> str:
@@ -1294,7 +1390,7 @@ def _estimate_step_risk(
     if step_type == "tool-result-followup":
         if tool_result_is_error:
             return "high"
-        if _contains_tool_failure_signal(tool_result_text):
+        if _contains_tool_failure_signal(tool_result_text, tool_command):
             return "high"
         if _tool_result_is_routine_success(tool_result_text, tool_result_is_error, tool_command):
             return "low"
@@ -1331,7 +1427,8 @@ def _agent_state_pressure(messages: list[Any], step_risk: str) -> tuple[int, flo
         tool_text, tool_is_error = _latest_tool_result_signal([msg])
         if msg.get("role") == "tool" or tool_text:
             tool_steps += 1
-            if tool_is_error or _contains_tool_failure_signal(tool_text):
+            command = ""
+            if tool_is_error or _contains_tool_failure_signal(tool_text, command):
                 failure_steps += 1
 
     step_component = min(0.45, max(0, tool_steps) / 24.0)
@@ -1389,13 +1486,18 @@ def _extract_routing_features(
         messages,
         step_type,
     )
+    failure_kind = (
+        _tool_result_failure_kind(tool_result_text, tool_command)
+        if step_type == "tool-result-followup"
+        else ""
+    )
     environment_recovery = (
         step_type == "tool-result-followup"
-        and _tool_result_is_environment_recovery(
-            tool_result_text,
-            tool_result_is_error,
-            tool_command,
-        )
+        and failure_kind == "environment"
+    )
+    invocation_recovery = (
+        step_type == "tool-result-followup"
+        and failure_kind == "invocation"
     )
     routine_success = (
         step_type == "tool-result-followup"
@@ -1407,13 +1509,19 @@ def _extract_routing_features(
     )
     tier_cap = (
         Tier.MEDIUM
-        if step_risk == "low" or environment_recovery or routine_success or short_success_observation
+        if step_risk == "low"
+        or environment_recovery
+        or invocation_recovery
+        or routine_success
+        or short_success_observation
         else None
     )
     tier_cap_reason = ""
     if tier_cap is not None:
         if environment_recovery:
             tier_cap_reason = "environment-recovery"
+        elif invocation_recovery:
+            tier_cap_reason = "invocation-recovery"
         elif routine_success:
             tier_cap_reason = "routine-success"
         elif short_success_observation:
@@ -1445,6 +1553,8 @@ def _extract_routing_features(
         agent_step_count=agent_step_count,
         agent_pressure=agent_pressure,
         capability_lane=None,
+        verification_failed=failure_kind == "semantic",
+        failure_kind=failure_kind,
     )
 
 

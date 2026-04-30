@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from uncommon_route.router import api
-from uncommon_route.router.types import ModelCapabilities, ModelPricing, RoutingFeatures, Tier
+from uncommon_route.router import api, selector
+from uncommon_route.router.types import (
+    CandidateScore,
+    ModelCapabilities,
+    ModelPricing,
+    RoutingFeatures,
+    RoutingMode,
+    ServedQuality,
+    Tier,
+)
 from uncommon_route.signals.base import TierVote
 
 
@@ -48,6 +56,162 @@ def test_direct_route_infers_high_risk_tool_result_features() -> None:
     assert features.step_risk == "high"
     assert features.tier_floor is Tier.MEDIUM
     assert features.tier_cap is None
+
+
+def test_direct_route_infers_plain_fail_verification_as_high_risk() -> None:
+    features = api._infer_routing_features_from_messages(
+        [
+            {"role": "user", "content": "Run the verification."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {
+                "role": "tool",
+                "content": (
+                    "<returncode>0</returncode>\n"
+                    "<output>Final verification:\n  n=66: FAIL\n  n=67: OK\n</output>"
+                ),
+            },
+        ],
+        max_output_tokens=4096,
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk == "high"
+    assert features.tier_floor is Tier.MEDIUM
+    assert features.tier_cap is None
+    assert features.verification_failed is True
+
+
+def test_direct_route_does_not_treat_plain_fail_status_as_verification_failure() -> None:
+    features = api._infer_routing_features_from_messages(
+        [
+            {"role": "user", "content": "Inspect the service status."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {
+                "role": "tool",
+                "content": "<returncode>0</returncode>\n<output>Status: FAIL\nmanual flag only</output>",
+            },
+        ],
+        max_output_tokens=4096,
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk == "low"
+    assert features.verification_failed is False
+
+
+def test_direct_route_classifies_wrong_test_label_as_invocation_failure() -> None:
+    features = api._infer_routing_features_from_messages(
+        [
+            {"role": "user", "content": "Run the target test."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {
+                "role": "tool",
+                "content": (
+                    "<returncode>1</returncode>\n"
+                    "<output>FileStoragePermissionsTests "
+                    "(unittest.loader._FailedTest.FileStoragePermissionsTests) ... ERROR\n"
+                    "AttributeError: module 'file_storage.tests' has no attribute "
+                    "'FileStoragePermissionsTests'\nFAILED (errors=1)</output>"
+                ),
+            },
+        ],
+        max_output_tokens=4096,
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk == "high"
+    assert features.tier_floor is Tier.MEDIUM
+    assert features.tier_cap is Tier.MEDIUM
+    assert features.tier_cap_reason == "invocation-recovery"
+    assert features.verification_failed is False
+    assert features.failure_kind == "invocation"
+
+
+def test_late_invocation_failure_does_not_trigger_premium_verification_rescue(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(3, 0.80)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "The test label failed to load; inspect the correct test name.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {
+                "role": "tool",
+                "content": (
+                    "<returncode>1</returncode>\n"
+                    "<output>SomeCase (unittest.loader._FailedTest.SomeCase) ... ERROR\n"
+                    "AttributeError: module 'tests.foo' has no attribute 'SomeCase'\n"
+                    "FAILED (errors=1)</output>"
+                ),
+            },
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="high",
+            tier_floor=Tier.MEDIUM,
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="invocation-recovery",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=80,
+            agent_pressure=0.90,
+            failure_kind="invocation",
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "tier-cap-preserved(invocation-recovery)" in decision.reasoning
+    assert "pressure-rescue=verification-review" not in decision.reasoning
+
+
+def test_agent_pressure_counts_tool_cycles_not_raw_tool_messages() -> None:
+    messages = [{"role": "user", "content": "Fix the issue."}]
+    for index in range(12):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "bash"}, "id": f"call_{index}"}],
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "content": "<returncode>1</returncode>\n<output>AssertionError</output>",
+            }
+        )
+
+    agent_step_count, agent_pressure = api._agent_state_pressure(messages, "high")
+
+    assert agent_step_count == 12
+    assert agent_pressure >= 0.70
+    assert not api.pressure_rescue_active(
+        agent_pressure=agent_pressure,
+        agent_step_count=agent_step_count,
+        has_tool_results=True,
+        is_agentic=True,
+        is_coding=True,
+    )
 
 
 def test_soft_structural_floor_keeps_short_implementation_out_of_economy(monkeypatch) -> None:
@@ -357,7 +521,7 @@ def test_high_pressure_routine_cap_can_soften_when_current_signals_still_complex
             tier_cap_reason="environment-or-routine",
             is_agentic=True,
             is_coding=True,
-            agent_step_count=30,
+            agent_step_count=28,
             agent_pressure=0.70,
         ),
         record_lifecycle=False,
@@ -366,3 +530,460 @@ def test_high_pressure_routine_cap_can_soften_when_current_signals_still_complex
     assert decision.tier is Tier.COMPLEX
     assert "tier-cap-softened(" in decision.reasoning
     assert "tier-cap=MEDIUM" not in decision.reasoning
+
+
+def test_high_pressure_short_observation_promotes_rescue_review_quality(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(3, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue after a short observation in a long failing repair loop.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="normal",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="short-observation",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=28,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.COMPLEX
+    assert decision.model == "anthropic/claude-opus-4.6"
+    assert "tier-cap-softened(agent-pressure=0.80)" in decision.reasoning
+    assert "served-quality-target-preferred=premium" in decision.reasoning
+    assert "pressure-rescue=premium-window" in decision.reasoning
+    assert "premium-cost-benefit=" not in decision.reasoning
+
+
+def test_high_pressure_late_agent_loop_rebids_premium_against_balanced(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(3, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue after many observations in a long failing repair loop.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="normal",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="short-observation",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=80,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "agent-pressure-floor=" not in decision.reasoning
+    assert "tier-cap-preserved(short-observation)" in decision.reasoning
+    assert "pressure-rescue=rolling-rebid" in decision.reasoning
+
+
+def test_late_premium_cost_guard_accepts_quality_near_peer_even_with_score_gap() -> None:
+    ranked = [
+        CandidateScore(
+            model="anthropic/claude-opus-4.6",
+            total=1.22,
+            predicted_cost=0.052,
+            predicted_quality=0.801,
+            editorial=0.90,
+            quality_prior_confidence=0.80,
+            served_quality=ServedQuality.PREMIUM.value,
+        ),
+        CandidateScore(
+            model="minimax/minimax-m2.7",
+            total=0.877,
+            predicted_cost=0.0025,
+            predicted_quality=0.676,
+            editorial=0.65,
+            quality_prior_confidence=0.35,
+            served_quality=ServedQuality.BALANCED.value,
+        ),
+    ]
+
+    reranked, note = selector._apply_premium_cost_benefit_guard(
+        ranked,
+        mode=RoutingMode.AUTO,
+        tier=Tier.COMPLEX,
+        complexity=0.90,
+        confidence=0.62,
+        features=RoutingFeatures(
+            step_risk="normal",
+            has_tool_results=True,
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=80,
+            agent_pressure=0.90,
+        ),
+    )
+
+    assert reranked[0].model == "minimax/minimax-m2.7"
+    assert note.startswith("premium-cost-benefit=")
+
+
+def test_low_pressure_short_observation_still_preserves_medium_cap(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(3, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue after a short observation.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="normal",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="short-observation",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=4,
+            agent_pressure=0.20,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "tier-cap-preserved(short-observation)" in decision.reasoning
+    assert "tier-cap=MEDIUM" in decision.reasoning
+
+
+def test_high_pressure_simple_step_only_promotes_one_public_tier(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(0, 0.80)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(0, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "deepseek/deepseek-v3.2": ModelPricing(0.28, 0.42),
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {model: ModelCapabilities(tool_calling=True) for model in pricing}
+
+    decision = api.route(
+        "Continue after a routine tool observation in a long repair loop.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="low",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="low-risk",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=28,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.served_quality_target is ServedQuality.BALANCED
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "agent-pressure-floor=MEDIUM(from=SIMPLE)" in decision.reasoning
+    assert "pressure-rescue=step-up" in decision.reasoning
+    assert "pressure-rescue=premium-window" not in decision.reasoning
+
+
+def test_high_pressure_medium_step_does_not_get_premium_window_without_complex_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(1, 0.80)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(1, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue after a medium-risk observation in a long repair loop.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="normal",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="short-observation",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=28,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.COMPLEX
+    assert decision.served_quality_target is ServedQuality.BALANCED
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "agent-pressure-floor=COMPLEX(from=MEDIUM)" in decision.reasoning
+    assert "pressure-rescue=step-up" in decision.reasoning
+    assert "pressure-rescue=premium-window" not in decision.reasoning
+
+
+def test_high_pressure_low_risk_late_loop_does_not_stick_to_complex(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(1, 0.95)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue after an empty tool result in a long repair loop.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output></output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="low",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="low-risk",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=120,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "agent-pressure-floor=" not in decision.reasoning
+    assert "tier-cap-preserved(low-risk)" in decision.reasoning
+    assert "pressure-rescue=rolling-rebid" in decision.reasoning
+    assert "tier-cap=MEDIUM" in decision.reasoning
+
+
+def test_high_pressure_agent_loop_rebids_after_rescue_window(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(0, 0.96)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20),
+        "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+
+    decision = api.route(
+        "Continue.",
+        messages=[
+            {"role": "user", "content": "Fix the issue."},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>partial observation</output>"},
+        ],
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-selection",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="normal",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=120,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.MEDIUM
+    assert decision.model == "minimax/minimax-m2.7"
+    assert "agent-pressure-floor=" not in decision.reasoning
+    assert "pressure-rescue=rolling-rebid" in decision.reasoning
+
+
+def test_late_explicit_verification_failure_gets_premium_correction(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "anthropic/claude-opus-4.6": 0.801,
+                "minimax/minimax-m2.7": 0.676,
+                "deepseek/deepseek-v3.2": 0.743,
+                "google/gemini-3-flash-preview": 0.680,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
+    monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(3, 0.30)))
+    monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
+    monkeypatch.setattr(api, "_v2_sig_c", _FakeSignal(TierVote(0, 0.96)))
+    monkeypatch.setattr(api, "_v2_calibrator", None)
+
+    pricing = {
+        "anthropic/claude-opus-4.6": ModelPricing(5.0, 25.0),
+        "minimax/minimax-m2.7": ModelPricing(0.3, 1.2),
+        "deepseek/deepseek-v3.2": ModelPricing(0.252, 0.378),
+        "google/gemini-3-flash-preview": ModelPricing(0.5, 3.0),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, reasoning=model.startswith("anthropic/"))
+        for model in pricing
+    }
+    messages = [
+        {"role": "user", "content": "Fix the issue."},
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "bash"}}]},
+        {
+            "role": "tool",
+            "content": (
+                "<returncode>0</returncode>\n"
+                "<output>Final verification:\n  n=66: FAIL\n  n=67: OK\n</output>"
+            ),
+        },
+    ]
+
+    decision = api.route(
+        "Final verification:\n  n=66: FAIL",
+        messages=messages,
+        available_models=list(pricing),
+        pricing=pricing,
+        model_capabilities=caps,
+        routing_features=RoutingFeatures(
+            step_type="tool-result-followup",
+            has_tool_results=True,
+            needs_tool_calling=True,
+            step_risk="low",
+            tier_cap=Tier.MEDIUM,
+            tier_cap_reason="routine-success",
+            is_agentic=True,
+            is_coding=True,
+            agent_step_count=176,
+            agent_pressure=0.80,
+        ),
+        record_lifecycle=False,
+    )
+
+    assert decision.tier is Tier.COMPLEX
+    assert decision.model == "anthropic/claude-opus-4.6"
+    assert "step-risk=high" in decision.reasoning
+    assert "pressure-rescue=verification-review" in decision.reasoning
+    assert "served-quality-score-target=economy" not in decision.reasoning
+
+
+def test_tool_result_fail_line_is_treated_as_error() -> None:
+    text = """
+    <returncode>0</returncode>
+    <output>
+    Final verification:
+    n=66: FAIL - original: "xxxxxxxx''", parsed: "xxxxxxxx'''"
+    </output>
+    """
+
+    assert api._tool_result_is_error({"role": "tool"}, text) is True

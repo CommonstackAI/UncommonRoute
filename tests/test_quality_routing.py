@@ -1227,7 +1227,7 @@ def test_auto_complex_keeps_premium_when_scoring_advantage_is_material(monkeypat
         def get_all_qualities(self, models):
             return {
                 "anthropic/claude-opus-4.6": 0.801,
-                "minimax/minimax-m2.7": 0.676,
+                "minimax/minimax-m2.7": 0.600,
             }
 
     monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
@@ -1798,6 +1798,7 @@ def test_long_tool_trajectory_records_agent_pressure() -> None:
 
 @pytest.mark.parametrize("tool_output", [
     "FAILED tests/test_router.py::test_route - AssertionError",
+    "Final verification:\n  n=66: FAIL\n  n=67: OK",
     "11 passed, 1 error in 0.42s",
     "Command failed with exit code 1",
     "Process completed with exit code 1.",
@@ -1834,6 +1835,38 @@ def test_common_failed_tool_summaries_are_high_risk(tool_output: str) -> None:
     assert features.step_risk == "high"
     assert features.tier_floor is Tier.MEDIUM
     assert features.tier_cap is None
+
+
+def test_plain_fail_status_without_validation_context_is_not_high_risk() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "Inspect service status."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>Status: FAIL\nmanual flag only</output>"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "bash"}}],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="Inspect service status.",
+        session_id="session-1",
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk == "normal"
+    assert features.tier_floor is None
 
 
 def test_empty_nonzero_pip_install_result_is_high_risk_but_medium_capped() -> None:
@@ -1979,6 +2012,114 @@ def test_missing_dependency_from_test_runner_is_medium_capped() -> None:
     assert features.tier_floor is Tier.MEDIUM
     assert features.tier_cap is Tier.MEDIUM
     assert features.tier_cap_reason == "environment-recovery"
+    assert features.verification_failed is False
+    assert features.failure_kind == "environment"
+
+
+def test_wrong_test_label_is_high_risk_but_invocation_capped() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "Run the target test."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-test",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": (
+                                '{"command": "cd /testbed && python tests/runtests.py '
+                                'file_storage.tests.FileStoragePermissionsTests"}'
+                            ),
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-test",
+                "content": (
+                    "<returncode>1</returncode>\n<output>"
+                    "FileStoragePermissionsTests (unittest.loader._FailedTest.FileStoragePermissionsTests) ... ERROR\n"
+                    "AttributeError: module 'file_storage.tests' has no attribute 'FileStoragePermissionsTests'\n"
+                    "FAILED (errors=1)</output>"
+                ),
+            },
+        ],
+        "tools": [{"type": "function", "function": {"name": "bash"}}],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="Run the target test.",
+        session_id="session-1",
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk == "high"
+    assert features.tier_floor is Tier.MEDIUM
+    assert features.tier_cap is Tier.MEDIUM
+    assert features.tier_cap_reason == "invocation-recovery"
+    assert features.verification_failed is False
+    assert features.failure_kind == "invocation"
+
+
+def test_read_only_source_output_with_failure_words_is_not_tool_failure() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "Inspect this source file."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-sed",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"command": "sed -n \\"1,80p\\" /testbed/tests/test_utils/tests.py"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-sed",
+                "content": (
+                    "<returncode>0</returncode>\n<output>"
+                    "with self.assertRaisesMessage(AssertionError, msg):\n"
+                    "    self.assertURLEqual(left, right)\n"
+                    "# The test should fail if the helper regresses.\n"
+                    "</output>"
+                ),
+            },
+        ],
+        "tools": [{"type": "function", "function": {"name": "bash"}}],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="Inspect this source file.",
+        session_id="session-1",
+    )
+
+    assert features.step_type == "tool-result-followup"
+    assert features.step_risk in {"low", "normal"}
+    assert features.tier_floor is None
+    assert features.verification_failed is False
+    assert features.failure_kind == ""
 
 
 def test_environment_recovery_cap_is_not_softened_by_agent_pressure(monkeypatch) -> None:

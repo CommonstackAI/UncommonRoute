@@ -36,6 +36,13 @@ htmlcov/
 
 # Node (openclaw-plugin)
 openclaw-plugin/node_modules/
+node_modules/
+
+# Local run artifacts
+logs/
+tmp/
+test-results/
+tests/screenshots/
 
 # Spend control local data
 spending.json

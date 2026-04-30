@@ -11,6 +11,7 @@ from uncommon_route.router.types import (
     RoutingMode,
     ServedQuality,
     Tier,
+    pressure_rescue_premium_allowed,
 )
 
 _QUALITY_RANK = {
@@ -217,6 +218,7 @@ def scoring_served_quality_target(
     session_present: bool = False,
     agent_step_count: int = 0,
     agent_pressure: float = 0.0,
+    verification_failed: bool = False,
 ) -> ServedQuality:
     """Return the quality level used for score alignment.
 
@@ -251,6 +253,21 @@ def scoring_served_quality_target(
             and agent_step_count == 0
             and normalized_step_risk != "low"
         )
+        pressure_review = (
+            target is ServedQuality.PREMIUM
+            and pressure_rescue_premium_allowed(
+                tier=tier,
+                complexity=complexity,
+                confidence=confidence,
+                step_risk=normalized_step_risk,
+                agent_pressure=agent_pressure,
+                agent_step_count=agent_step_count,
+                has_tool_results=has_tool_results,
+                is_agentic=is_agentic,
+                is_coding=is_coding,
+                verification_failed=verification_failed,
+            )
+        )
         if initial_complex_planning or (
             target is ServedQuality.PREMIUM
             and complexity is not None
@@ -258,7 +275,7 @@ def scoring_served_quality_target(
             and complexity >= 0.86
             and confidence >= 0.55
             and normalized_step_risk == "high"
-        ):
+        ) or pressure_review:
             return target
         return floor
     return target

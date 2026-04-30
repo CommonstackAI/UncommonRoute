@@ -31,6 +31,13 @@ class RoutingMode(str, Enum):
     BEST = "best"
 
 
+PRESSURE_RESCUE_MIN_STEPS = 24
+PRESSURE_RESCUE_PREMIUM_WINDOW_STEPS = 10
+PRESSURE_RESCUE_PREMIUM_COMPLEXITY = 0.86
+PRESSURE_RESCUE_PREMIUM_CONFIDENCE = 0.30
+VERIFICATION_RESCUE_PREMIUM_COMPLEXITY = 0.68
+
+
 class RoutingFailureCode(str, Enum):
     NO_AVAILABLE_MODELS = "no_available_models"
     CAPABILITY_REQUIREMENTS_UNMET = "capability_requirements_unmet"
@@ -126,6 +133,8 @@ class RoutingFeatures:
     capability_lane: CapabilityLane | None = None
     previous_served_quality: ServedQuality | None = None
     continuity_quality_floor: ServedQuality | None = None
+    verification_failed: bool = False
+    failure_kind: str = ""
 
     @property
     def tool_count(self) -> int:
@@ -175,7 +184,102 @@ class RoutingFeatures:
             labels.append(f"prev-quality:{self.previous_served_quality.value}")
         if self.continuity_quality_floor is not None:
             labels.append(f"continuity-floor:{self.continuity_quality_floor.value}")
+        if self.verification_failed:
+            labels.append("verification-failed")
+        if self.failure_kind:
+            labels.append(f"failure:{self.failure_kind}")
         return tuple(labels)
+
+
+def pressure_rescue_active(
+    *,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+) -> bool:
+    """Whether an agent loop is stuck enough to raise the tier floor.
+
+    This is a per-step rescue signal, not session stickiness.
+    """
+    return bool(
+        agent_pressure >= 0.70
+        and agent_step_count >= PRESSURE_RESCUE_MIN_STEPS
+        and has_tool_results
+        and (is_agentic or is_coding)
+    )
+
+
+def pressure_rescue_premium_window(
+    *,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+) -> bool:
+    """Allow a bounded premium burst before cost-aware rebidding resumes."""
+    return bool(
+        pressure_rescue_active(
+            agent_pressure=agent_pressure,
+            agent_step_count=agent_step_count,
+            has_tool_results=has_tool_results,
+            is_agentic=is_agentic,
+            is_coding=is_coding,
+        )
+        and agent_step_count < PRESSURE_RESCUE_MIN_STEPS + PRESSURE_RESCUE_PREMIUM_WINDOW_STEPS
+    )
+
+
+def pressure_rescue_premium_allowed(
+    *,
+    tier: Tier,
+    complexity: float | None,
+    confidence: float | None,
+    step_risk: str,
+    agent_pressure: float,
+    agent_step_count: int,
+    has_tool_results: bool,
+    is_agentic: bool,
+    is_coding: bool,
+    verification_failed: bool = False,
+) -> bool:
+    """Whether pressure rescue may temporarily bypass premium cost rebidding."""
+    active = pressure_rescue_active(
+        agent_pressure=agent_pressure,
+        agent_step_count=agent_step_count,
+        has_tool_results=has_tool_results,
+        is_agentic=is_agentic,
+        is_coding=is_coding,
+    )
+    if (
+        verification_failed
+        and tier is Tier.COMPLEX
+        and complexity is not None
+        and confidence is not None
+        and complexity >= VERIFICATION_RESCUE_PREMIUM_COMPLEXITY
+        and confidence >= PRESSURE_RESCUE_PREMIUM_CONFIDENCE
+        and str(step_risk or "normal").strip().lower() == "high"
+        and active
+    ):
+        return True
+
+    return bool(
+        tier is Tier.COMPLEX
+        and complexity is not None
+        and confidence is not None
+        and complexity >= PRESSURE_RESCUE_PREMIUM_COMPLEXITY
+        and confidence >= PRESSURE_RESCUE_PREMIUM_CONFIDENCE
+        and str(step_risk or "normal").strip().lower() != "low"
+        and pressure_rescue_premium_window(
+            agent_pressure=agent_pressure,
+            agent_step_count=agent_step_count,
+            has_tool_results=has_tool_results,
+            is_agentic=is_agentic,
+            is_coding=is_coding,
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)

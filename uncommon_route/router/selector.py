@@ -40,6 +40,9 @@ from uncommon_route.router.types import (
     Tier,
     TierConfig,
     WorkloadHints,
+    pressure_rescue_active,
+    pressure_rescue_premium_allowed,
+    pressure_rescue_premium_window,
 )
 
 import logging
@@ -376,6 +379,14 @@ def select_model(
     reasoning = f"{reasoning} | {' | '.join(quality_guard.notes)}"
     if step_stable:
         reasoning = f"{reasoning} | step-stable=no-bandit"
+    pressure_rescue_note = _pressure_rescue_note(
+        effective_features,
+        tier=tier,
+        complexity=_tier_complexity_anchor(tier),
+        confidence=confidence,
+    )
+    if pressure_rescue_note:
+        reasoning = f"{reasoning} | {pressure_rescue_note}"
     alignment_target = scoring_served_quality_target(
         mode,
         tier,
@@ -390,6 +401,7 @@ def select_model(
         session_present=effective_features.session_present,
         agent_step_count=effective_features.agent_step_count,
         agent_pressure=effective_features.agent_pressure,
+        verification_failed=effective_features.verification_failed,
     )
     if alignment_target is not quality_guard.target:
         reasoning = f"{reasoning} | served-quality-score-target={alignment_target.value}"
@@ -485,7 +497,7 @@ def select_model(
         tier=tier,
         capability_lane=lane,
         served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
-        served_quality_target=quality_guard.target,
+        served_quality_target=alignment_target,
         served_quality_floor=quality_guard.floor,
         continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,
@@ -817,6 +829,7 @@ def _apply_premium_cost_benefit_guard(
     *,
     mode: RoutingMode,
     tier: Tier,
+    complexity: float,
     confidence: float,
     features: RoutingFeatures,
 ) -> tuple[list[CandidateScore], str]:
@@ -852,24 +865,51 @@ def _apply_premium_cost_benefit_guard(
     )
     if high_confidence_hard_step:
         return ranked, ""
+    high_pressure_review_step = pressure_rescue_premium_allowed(
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        step_risk=features.step_risk,
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+        verification_failed=features.verification_failed,
+    )
+    if high_pressure_review_step:
+        return ranked, ""
 
     max_quality_gap = 0.16
+    economical_quality_gap = 0.14
     min_cost_ratio = 8.0
+    decisive_cost_ratio = 12.0
     max_total_margin = max(0.025, abs(selected.total) * 0.035)
-    alternatives = [
-        score
-        for score in ranked[1:]
-        if quality_rank(score.served_quality) >= quality_rank(ServedQuality.BALANCED)
-        and score.total >= selected.total - max_total_margin
-        and score.predicted_cost > 0
-        and selected_cost >= score.predicted_cost * min_cost_ratio
-        and score.predicted_quality >= selected.predicted_quality - max_quality_gap
-        and (
+    alternatives: list[CandidateScore] = []
+    for score in ranked[1:]:
+        if quality_rank(score.served_quality) < quality_rank(ServedQuality.BALANCED):
+            continue
+        if score.predicted_cost <= 0:
+            continue
+        if selected_cost < score.predicted_cost * min_cost_ratio:
+            continue
+        quality_gap = selected.predicted_quality - score.predicted_quality
+        if quality_gap > max_quality_gap:
+            continue
+        has_quality_basis = (
             score.editorial >= 0.60
             or score.quality_prior_confidence >= 0.30
             or score.samples > 0
         )
-    ]
+        if not has_quality_basis:
+            continue
+        near_total = score.total >= selected.total - max_total_margin
+        decisive_cost_savings = (
+            selected_cost >= score.predicted_cost * decisive_cost_ratio
+            and quality_gap <= economical_quality_gap
+        )
+        if near_total or decisive_cost_savings:
+            alternatives.append(score)
     if not alternatives:
         return ranked, ""
 
@@ -917,6 +957,47 @@ def _normalized_costs(
     if span <= 0:
         return {m: 0.5 for m in models}
     return {m: (raw[m] - lo) / span for m in models}
+
+
+def _pressure_rescue_note(
+    features: RoutingFeatures,
+    *,
+    tier: Tier,
+    complexity: float,
+    confidence: float,
+) -> str:
+    if not pressure_rescue_active(
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+    ):
+        return ""
+    if pressure_rescue_premium_allowed(
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+        step_risk=features.step_risk,
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+        verification_failed=features.verification_failed,
+    ):
+        if features.verification_failed:
+            return "pressure-rescue=verification-review"
+        return "pressure-rescue=premium-window"
+    if pressure_rescue_premium_window(
+        agent_pressure=features.agent_pressure,
+        agent_step_count=features.agent_step_count,
+        has_tool_results=features.has_tool_results,
+        is_agentic=features.is_agentic,
+        is_coding=features.is_coding,
+    ):
+        return "pressure-rescue=step-up"
+    return "pressure-rescue=rolling-rebid"
 
 
 def _dynamic_quality_alignment_weight(
@@ -1144,6 +1225,7 @@ def select_from_pool(
         session_present=effective_features.session_present,
         agent_step_count=effective_features.agent_step_count,
         agent_pressure=effective_features.agent_pressure,
+        verification_failed=effective_features.verification_failed,
     )
 
     benchmark_quality: dict[str, float] | None = None
@@ -1387,6 +1469,7 @@ def select_from_pool(
         ranked,
         mode=mode,
         tier=tier,
+        complexity=complexity,
         confidence=confidence,
         features=effective_features,
     )
@@ -1438,6 +1521,14 @@ def select_from_pool(
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
     if step_stable:
         reasoning_parts.append("step-stable=no-bandit")
+    pressure_rescue_note = _pressure_rescue_note(
+        effective_features,
+        tier=tier,
+        complexity=complexity,
+        confidence=confidence,
+    )
+    if pressure_rescue_note:
+        reasoning_parts.append(pressure_rescue_note)
     if cost_guard_note:
         reasoning_parts.append(cost_guard_note)
     if premium_cost_note:
@@ -1459,7 +1550,7 @@ def select_from_pool(
         tier=tier,
         capability_lane=lane,
         served_quality=quality_guard.quality_by_model.get(model, quality_guard.floor),
-        served_quality_target=quality_guard.target,
+        served_quality_target=alignment_target,
         served_quality_floor=quality_guard.floor,
         continuity_quality_floor=quality_guard.continuity_floor,
         mode=mode,

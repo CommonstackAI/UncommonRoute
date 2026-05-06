@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from uncommon_route.cache_support import apply_anthropic_cache_breakpoints
+import json
+
+from uncommon_route.cache_support import apply_anthropic_cache_breakpoints, parse_stream_usage_metrics
+from uncommon_route.router.types import ModelPricing
 
 
 def test_anthropic_cache_breakpoints_do_not_upgrade_after_existing_5m() -> None:
@@ -58,3 +61,30 @@ def test_anthropic_cache_breakpoints_still_use_1h_when_safe() -> None:
     assert plan.anthropic_ttl == "1h"
     assert body["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert body["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_stream_usage_falls_back_to_reasoning_content_tokens_when_usage_missing() -> None:
+    chunk = (
+        "data: "
+        + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": None,
+                    "reasoning_content": "reasoned answer text",
+                },
+                "finish_reason": None,
+            }],
+        })
+        + "\n\n"
+    ).encode()
+
+    usage = parse_stream_usage_metrics(
+        [chunk],
+        "test/model",
+        {"test/model": ModelPricing(1.0, 2.0)},
+    )
+
+    assert usage is not None
+    assert usage.output_tokens > 0
+    assert usage.total_tokens == usage.output_tokens
+    assert usage.actual_cost is not None

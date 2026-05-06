@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build
+node_modules
+frontend/dashboard/node_modules
+frontend/dashboard/dist
+*.egg-info
+.DS_Store

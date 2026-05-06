@@ -374,6 +374,32 @@ class TestOpenAIToAnthropicRequest:
         assert any(block["type"] == "tool_use" for block in out["messages"][1]["content"])
         assert out["messages"][2]["content"][0]["type"] == "tool_result"
 
+    def test_openai_request_sanitizes_invalid_tool_ids_consistently(self) -> None:
+        body = {
+            "model": "claude-sonnet",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Use the tool"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call.with:bad/chars",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call.with:bad/chars", "content": "done"},
+            ],
+        }
+
+        out = openai_to_anthropic_request(body)
+
+        tool_use = next(block for block in out["messages"][1]["content"] if block["type"] == "tool_use")
+        tool_result = out["messages"][2]["content"][0]
+        assert tool_use["id"] == "call_with_bad_chars"
+        assert tool_result["tool_use_id"] == "call_with_bad_chars"
+
     def test_openai_request_preserves_thinking_blocks(self) -> None:
         body = {
             "model": "claude-sonnet",
@@ -433,6 +459,40 @@ class TestOpenAIToAnthropicRequest:
         assert block["id"] == "call_abc"
         assert block["name"] == "get_weather"
         assert block["input"] == {"city": "NYC"}
+
+    def test_tool_calls_response_sanitizes_invalid_tool_id(self) -> None:
+        oai = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call.with:bad/chars",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {},
+        }
+        out = openai_to_anthropic_response(oai, "model-x")
+        assert out["content"][0]["id"] == "call_with_bad_chars"
+
+    def test_response_uses_reasoning_content_when_content_is_empty(self) -> None:
+        oai = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "visible reasoning answer",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+        out = openai_to_anthropic_response(oai, "model-x")
+        assert out["content"] == [{"type": "text", "text": "visible reasoning answer"}]
 
     def test_mixed_text_and_tools(self) -> None:
         oai = {
@@ -617,6 +677,39 @@ class TestStreamConverter:
 
         msg_delta = next(e for e in parsed if e["_event"] == "message_delta")
         assert msg_delta["delta"]["stop_reason"] == "tool_use"
+
+    def test_reasoning_content_stream_emits_text_delta(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        events = converter.feed(_make_oai_sse({
+            "choices": [{
+                "delta": {"content": None, "reasoning_content": "reasoned answer"},
+                "finish_reason": "stop",
+            }],
+        }))
+        events.extend(converter.finish())
+        parsed = _parse_anthropic_events(events)
+        deltas = [e for e in parsed if e["_event"] == "content_block_delta"]
+        assert deltas[0]["delta"] == {"type": "text_delta", "text": "reasoned answer"}
+
+    def test_tool_call_stream_sanitizes_invalid_initial_id(self) -> None:
+        converter = OpenAIToAnthropicStreamConverter(model="m")
+
+        events = converter.feed(_make_oai_sse({
+            "choices": [{
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call.with:bad/chars",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{}"},
+                }]},
+                "finish_reason": "tool_calls",
+            }],
+        }))
+        events.extend(converter.finish())
+        parsed = _parse_anthropic_events(events)
+        block_start = next(e for e in parsed if e["_event"] == "content_block_start")
+        assert block_start["content_block"]["id"] == "call_with_bad_chars"
 
     def test_tool_call_stream_without_initial_id_starts_valid_tool_block(self) -> None:
         converter = OpenAIToAnthropicStreamConverter(model="m")

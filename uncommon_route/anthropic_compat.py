@@ -14,7 +14,9 @@ Key differences handled:
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -50,6 +52,35 @@ _STATUS_TO_ERROR_TYPE: dict[int, str] = {
 }
 
 _PASSTHROUGH_CONTENT_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+_ANTHROPIC_TOOL_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _sanitize_anthropic_tool_id(
+    tool_id: object,
+    *,
+    existing: set[str] | None = None,
+) -> str:
+    """Return a valid Anthropic tool id, preserving valid ids verbatim."""
+    raw = str(tool_id or "")
+    if raw and _ANTHROPIC_TOOL_ID_RE.fullmatch(raw):
+        candidate = raw
+    elif raw:
+        candidate = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)
+        if not candidate:
+            candidate = "toolu"
+    else:
+        candidate = f"toolu_{uuid.uuid4().hex[:24]}"
+
+    if existing is None or candidate not in existing:
+        return candidate
+
+    suffix = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8] if raw else uuid.uuid4().hex[:8]
+    candidate_with_suffix = f"{candidate}_{suffix}"
+    counter = 2
+    while candidate_with_suffix in existing:
+        candidate_with_suffix = f"{candidate}_{suffix}_{counter}"
+        counter += 1
+    return candidate_with_suffix
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +203,8 @@ def openai_to_anthropic_request(body: dict[str, Any]) -> dict[str, Any]:
 
     system_blocks: list[dict[str, Any]] = []
     messages: list[dict[str, Any]] = []
+    tool_id_map: dict[str, str] = {}
+    used_tool_ids: set[str] = set()
 
     for msg in body.get("messages", []):
         if not isinstance(msg, dict):
@@ -194,13 +227,18 @@ def openai_to_anthropic_request(body: dict[str, Any]) -> dict[str, Any]:
             blocks = _openai_content_to_anthropic_blocks(content)
             for tc in msg.get("tool_calls", []) or []:
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                raw_tool_id = tc.get("id", "") if isinstance(tc, dict) else ""
+                safe_tool_id = _sanitize_anthropic_tool_id(raw_tool_id, existing=used_tool_ids)
+                used_tool_ids.add(safe_tool_id)
+                if raw_tool_id:
+                    tool_id_map[str(raw_tool_id)] = safe_tool_id
                 try:
                     input_data = json.loads(fn.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     input_data = {}
                 blocks.append({
                     "type": "tool_use",
-                    "id": tc.get("id", ""),
+                    "id": safe_tool_id,
                     "name": fn.get("name", ""),
                     "input": input_data,
                 })
@@ -211,11 +249,16 @@ def openai_to_anthropic_request(body: dict[str, Any]) -> dict[str, Any]:
             tool_result = content
             if isinstance(tool_result, list):
                 tool_result = _flatten_content_blocks(tool_result)
+            raw_tool_call_id = str(msg.get("tool_call_id", "") or "")
+            safe_tool_call_id = (
+                tool_id_map.get(raw_tool_call_id)
+                or _sanitize_anthropic_tool_id(raw_tool_call_id)
+            )
             messages.append({
                 "role": "user",
                 "content": [{
                     "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "tool_use_id": safe_tool_call_id,
                     "content": str(tool_result or ""),
                 }],
             })
@@ -479,6 +522,8 @@ def openai_to_anthropic_response(
     content_blocks: list[dict[str, Any]] = []
 
     text = message.get("content")
+    if (text is None or text == "") and message.get("reasoning_content"):
+        text = message.get("reasoning_content")
     if text:
         content_blocks.append({"type": "text", "text": text})
 
@@ -490,7 +535,7 @@ def openai_to_anthropic_response(
             input_data = {}
         content_blocks.append({
             "type": "tool_use",
-            "id": tc.get("id", ""),
+            "id": _sanitize_anthropic_tool_id(tc.get("id", "")),
             "name": fn.get("name", ""),
             "input": input_data,
         })
@@ -844,8 +889,11 @@ class OpenAIToAnthropicStreamConverter:
         delta = choices[0].get("delta", {})
         finish_reason = choices[0].get("finish_reason")
 
-        # Text content
+        # Text content. Some OpenAI-compatible reasoning models stream their
+        # visible text in reasoning_content while leaving content null.
         content = delta.get("content")
+        if (content is None or content == "") and delta.get("reasoning_content"):
+            content = delta.get("reasoning_content")
         if content is not None and content != "":
             if self._block_type != "text":
                 if self._block_type is not None:
@@ -868,7 +916,7 @@ class OpenAIToAnthropicStreamConverter:
             tc_args = tc_fn.get("arguments", "")
 
             if tc_id:
-                meta["id"] = tc_id
+                meta["id"] = _sanitize_anthropic_tool_id(tc_id)
             if tc_name:
                 meta["name"] = tc_name
 

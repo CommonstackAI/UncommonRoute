@@ -122,6 +122,8 @@ _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
+_RECURSION_GUARD_HEADER = "x-uncommon-route-recursion-guard"
+_ORIGINAL_MODEL_HEADER = "x-uncommon-route-original-model"
 
 # Cross-provider safe ceiling for outgoing max_tokens. Upstream gateways cap
 # output below the model's native limit (e.g. GLM-4.6 via some gateways rejects
@@ -521,7 +523,7 @@ def _build_debug_response(prompt: str, system_prompt: str | None, routing_config
         lines.append("")
 
     lines.extend([
-        f"Scoring",
+        "Scoring",
         f"  Signals: {', '.join(result.signals)}",
         "",
         f"Tier Boundaries: SIMPLE <{tier_boundaries.simple_medium:.2f}"
@@ -585,6 +587,54 @@ def _extract_assistant_text(content: bytes) -> str:
                 parts.append(item.get("text", ""))
         return "\n".join(parts)
     return str(text)
+
+
+def _normalize_reasoning_content_chunk(raw: bytes) -> bytes:
+    """Mirror reasoning_content into content for clients that only read content."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+
+    lines = text.split("\n")
+    changed = False
+    for idx, line in enumerate(lines):
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            continue
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content and not delta.get("content"):
+            delta["content"] = reasoning_content
+            lines[idx] = f"data: {json.dumps(data, ensure_ascii=False)}"
+            changed = True
+    if not changed:
+        return raw
+    return "\n".join(lines).encode("utf-8")
+
+
+def _recursion_guard_enabled(request: Request) -> bool:
+    value = str(request.headers.get(_RECURSION_GUARD_HEADER, "")).strip().lower()
+    return value in {"1", "true", "yes", "on", "internal"}
+
+
+def _is_virtual_model_name(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return routing_mode_from_model(normalized) is not None
 
 
 class UpstreamSemanticCompressor:
@@ -3465,6 +3515,7 @@ def create_app(
         model = (body.get("model") or "").strip().lower()
         is_streaming = body.get("stream", False)
         response_model = str(body.pop("_client_requested_model", "") or model).strip()
+        recursion_guarded = _recursion_guard_enabled(request)
 
         if not model:
             default_mode = _routing_store.default_mode()
@@ -3473,6 +3524,14 @@ def create_app(
 
         requested_model = model
         routing_mode = routing_mode_from_model(model)
+        if recursion_guarded and routing_mode is not None:
+            msg = "Virtual UncommonRoute models cannot be routed recursively"
+            if api_format == "anthropic":
+                return JSONResponse(anthropic_error_response(400, msg), status_code=400)
+            return JSONResponse(
+                {"error": {"message": msg, "type": "invalid_request_error"}},
+                status_code=400,
+            )
         is_virtual = routing_mode is not None
         route_start = time.perf_counter_ns()
         route_method: str = "pool"
@@ -3597,7 +3656,6 @@ def create_app(
                 has_tools=bool(body.get("tools") or body.get("customTools")),
             )
             ctx_features = extract_context_features(body, step_type, prompt)
-            requirements = routing_features.request_requirements()
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
@@ -3733,6 +3791,15 @@ def create_app(
             except Exception:
                 pass
             selected_model = decision.model
+            if _is_virtual_model_name(selected_model):
+                msg = f"Router selected a virtual model recursively: {selected_model}"
+                logger.error(msg)
+                if api_format == "anthropic":
+                    return JSONResponse(anthropic_error_response(500, msg), status_code=500)
+                return JSONResponse(
+                    {"error": {"message": msg, "type": "routing_error"}},
+                    status_code=500,
+                )
             tier_value = decision.tier.value
             decision_tier = tier_value
             served_quality_value = decision.served_quality.value
@@ -3949,7 +4016,7 @@ def create_app(
             )
             fallback_models = [
                 fb.model for fb in decision.fallback_chain
-                if fb.model != selected_model
+                if fb.model != selected_model and not _is_virtual_model_name(fb.model)
             ]
         else:
             selected_model = model
@@ -4012,7 +4079,14 @@ def create_app(
             if isinstance(_requested_max, int) and _requested_max > UPSTREAM_MAX_OUTPUT_TOKENS:
                 attempt_upstream_body["max_tokens"] = UPSTREAM_MAX_OUTPUT_TOKENS
             attempt_headers: dict[str, str] = {}
-            for key in ("authorization", "content-type", "accept", "user-agent"):
+            for key in (
+                "authorization",
+                "content-type",
+                "accept",
+                "user-agent",
+                _RECURSION_GUARD_HEADER,
+                _ORIGINAL_MODEL_HEADER,
+            ):
                 val = request.headers.get(key)
                 if val:
                     attempt_headers[key] = val
@@ -4023,6 +4097,10 @@ def create_app(
             if "content-type" not in attempt_headers:
                 attempt_headers["content-type"] = "application/json"
             attempt_headers["user-agent"] = f"uncommon-route/{VERSION}"
+            if is_virtual and not attempt_provider_entry:
+                attempt_headers[_RECURSION_GUARD_HEADER] = "1"
+                if requested_model:
+                    attempt_headers[_ORIGINAL_MODEL_HEADER] = requested_model
 
             resolved_model = model_name
             if not attempt_provider_entry:
@@ -4850,7 +4928,7 @@ def create_app(
                     try:
                         async for chunk in stream_resp.aiter_bytes():
                             stream_chunks.append(chunk)
-                            yield chunk
+                            yield _normalize_reasoning_content_chunk(chunk)
                         await _record_stream_success(
                             parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
                         )

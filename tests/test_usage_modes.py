@@ -199,6 +199,8 @@ class TestCLI:
             "ANTHROPIC_BASE_URL": "http://localhost:8403",
             "http_proxy": "http://127.0.0.1:9",
             "https_proxy": "http://127.0.0.1:9",
+            "NO_PROXY": "",
+            "no_proxy": "",
         }
 
         r = run_cli(["doctor"], env=env)

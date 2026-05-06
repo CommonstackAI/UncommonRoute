@@ -1033,6 +1033,11 @@ def _dynamic_quality_alignment_weight(
     ):
         return max(base_weight, 0.22)
 
+    if target is ServedQuality.BALANCED and agent_pressure >= 0.55:
+        pressure = max(0.0, min(1.0, (agent_pressure - 0.55) / 0.45))
+        low_risk_pressure = 0.5 if normalized_step_risk == "low" else 1.0
+        return base_weight + (0.08 * pressure * low_risk_pressure)
+
     if tier is not Tier.COMPLEX or target is not ServedQuality.PREMIUM:
         return base_weight
 

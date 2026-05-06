@@ -14,7 +14,12 @@ from uncommon_route.artifacts import ArtifactStore
 from uncommon_route.composition import CompositionPolicy
 from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
 from uncommon_route.model_experience import InMemoryModelExperienceStorage, ModelExperienceStore
-from uncommon_route.proxy import _extract_current_message, _extract_prompt, create_app
+from uncommon_route.proxy import (
+    _extract_current_message,
+    _extract_prompt,
+    _normalize_reasoning_content_chunk,
+    create_app,
+)
 from uncommon_route.router.config import routing_mode_from_model
 from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, RoutingConfigStore
 from uncommon_route.semantic import SemanticCallResult, SideChannelConfig, SideChannelTaskConfig
@@ -440,6 +445,45 @@ class TestPromptExtraction:
             ],
         })
         assert prompt == "summarize this file"
+
+
+def test_reasoning_content_chunk_is_mirrored_into_content() -> None:
+    raw = (
+        "data: "
+        + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": None,
+                    "reasoning_content": "reasoned answer",
+                },
+                "finish_reason": None,
+            }],
+        })
+        + "\n\n"
+    ).encode()
+
+    out = _normalize_reasoning_content_chunk(raw)
+    payload = json.loads(out.decode().split("data: ", 1)[1])
+    delta = payload["choices"][0]["delta"]
+    assert delta["content"] == "reasoned answer"
+    assert delta["reasoning_content"] == "reasoned answer"
+
+
+def test_recursion_guard_blocks_virtual_model_before_upstream_call() -> None:
+    app = create_app(upstream="http://127.0.0.1:1/fake")
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        headers={"x-uncommon-route-recursion-guard": "1"},
+    )
+
+    assert resp.status_code == 400
+    assert "cannot be routed recursively" in resp.json()["error"]["message"]
 
 
 @pytest.fixture

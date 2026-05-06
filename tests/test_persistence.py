@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from uncommon_route.persistence import LearnedState, save_state, load_state, reset_state
 
 

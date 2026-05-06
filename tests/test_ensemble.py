@@ -1,5 +1,5 @@
 from uncommon_route.signals.base import TierVote
-from uncommon_route.decision.ensemble import Ensemble, EnsembleResult
+from uncommon_route.decision.ensemble import Ensemble
 
 
 def test_unanimous_vote():

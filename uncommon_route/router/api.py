@@ -729,7 +729,6 @@ def _ensure_v2_signals() -> None:
     # Try to load embedding index
     try:
         from uncommon_route.paths import data_dir
-        from pathlib import Path
         splits_dir = data_dir() / "v2_splits"
         emb_path = splits_dir / "seed_embeddings.npy"
         labels_path = splits_dir / "seed_labels.json"

@@ -11,26 +11,18 @@ Issues:
 
 from __future__ import annotations
 
-import json
-import copy
-from dataclasses import replace
 
 from uncommon_route.router.api import route
-from uncommon_route.router.classifier import classify, extract_features, _ensure_model_loaded, update_model, save_online_model, rollback_online_model
-from uncommon_route.router.config import DEFAULT_CONFIG, DEFAULT_MODEL_PRICING, DEFAULT_MODEL_CAPABILITIES
+from uncommon_route.router.classifier import classify, extract_features, _ensure_model_loaded, update_model, rollback_online_model
 from uncommon_route.router.types import (
     ModelCapabilities,
     ModelPricing,
-    RequestRequirements,
-    RoutingConstraints,
     RoutingFeatures,
     RoutingMode,
-    ScoringConfig,
     Tier,
     WorkloadHints,
 )
 from uncommon_route.model_experience import (
-    CandidateExperience,
     InMemoryModelExperienceStorage,
     ModelExperienceStore,
 )
@@ -189,7 +181,6 @@ def test_issue3_minimax_never_wins_for_complex():
 def test_issue3_minimax_ranking_across_tiers():
     """Check MiniMax's position in ranking for each complexity level."""
     for complexity, label in [(0.15, "SIMPLE"), (0.45, "MEDIUM"), (0.85, "COMPLEX")]:
-        tier = Tier.SIMPLE if complexity < 0.33 else (Tier.MEDIUM if complexity < 0.67 else Tier.COMPLEX)
         # Use a neutral prompt and force complexity via routing features
         decision = route(
             "do something",
@@ -211,7 +202,7 @@ def test_issue3_quality_prior_is_benchmark_based():
     opus_quality = cache.get_quality("anthropic/claude-opus-4.6")
     oss_quality = cache.get_quality("nvidia/gpt-oss-120b")
 
-    print(f"\n  Benchmark quality (not price-based):")
+    print("\n  Benchmark quality (not price-based):")
     print(f"    MiniMax: {minimax_quality:.3f}")
     print(f"    Opus:    {opus_quality:.3f}")
     print(f"    gpt-oss: {oss_quality:.3f}")
@@ -248,7 +239,7 @@ def test_issue4_any_tools_means_agentic():
         prompt="hello",
     )
 
-    print(f"\n  Prompt: 'hello'")
+    print("\n  Prompt: 'hello'")
     print(f"  step_type: {step_type}")
     print(f"  is_agentic: {features.is_agentic}")
     print(f"  needs_tool_calling: {features.needs_tool_calling}")
@@ -404,7 +395,7 @@ def test_issue6_anthropic_model_resolution():
     opus_resolved = mapper.resolve("anthropic/claude-opus-4.6")
     sonnet_resolved = mapper.resolve("anthropic/claude-sonnet-4.6")
 
-    print(f"\n  Pre-discovery:")
+    print("\n  Pre-discovery:")
     print(f"    Opus → {opus_resolved}")
     print(f"    Sonnet → {sonnet_resolved}")
     print(f"    Is gateway: {mapper.is_gateway}")
@@ -424,10 +415,31 @@ def test_issue6_openrouter_detected_as_gateway():
     assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "xai/grok-4-1-fast-reasoning"
 
 
+def test_issue6_learned_fallbacks_do_not_override_gateway_seed_aliases():
+    """Runtime fallback aliases from one gateway should not hide known model renames."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
+    mapper._learned_aliases["xai/grok-4-1-fast-reasoning"] = "google/gemini-2.5-flash"
+    for model_id in ["x-ai/grok-4.1-fast", "google/gemini-2.5-flash"]:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast"
+
+
 def test_issue6_legacy_model_ids_resolve_to_live_successors():
     """Legacy internal ids should map onto current upstream successors."""
     from uncommon_route.model_map import DiscoveredModel, ModelMapper
-    from uncommon_route.router.types import ModelCapabilities, ModelPricing
 
     live_models = [
         "x-ai/grok-4",
@@ -488,7 +500,6 @@ def test_issue6_legacy_model_ids_resolve_to_live_successors():
 def test_issue6_image_generation_models_do_not_enter_chat_routing_pool():
     """Image-generation catalog entries should not become chat candidates."""
     from uncommon_route.model_map import DiscoveredModel, ModelMapper, is_routable_chat_model
-    from uncommon_route.router.types import ModelCapabilities, ModelPricing
 
     mapper = ModelMapper("https://api.commonstack.ai/v1")
     for model_id in [

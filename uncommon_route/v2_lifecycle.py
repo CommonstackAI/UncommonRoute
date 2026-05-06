@@ -10,6 +10,7 @@ Centralizes all v2 state management so proxy.py only needs a few call sites:
 from __future__ import annotations
 
 import logging
+import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,15 +222,14 @@ def on_route_complete(
             import time
             emb_list = None
             if query_embedding is not None:
-                # Estimate token count from message_count as proxy for text length
-                # message_count < 3 is likely short (under 20 tokens) → skip
-                # This respects the short-message privacy rule
-                token_est = message_count * 15 if message_count > 0 else 5
+                # Message text length is not available in this lifecycle hook,
+                # so skip embedding telemetry here to preserve short-message privacy.
+                token_est = 0
                 emb_list = _telem.prepare_embedding(query_embedding, token_est)
             rec = _telem.TelemetryRecord(
                 schema_version=1,
                 client_version="0.5.0",
-                platform=sys.platform if "sys" in dir() else __import__("sys").platform,
+                platform=sys.platform,
                 timestamp_day=time.strftime("%Y-%m-%d"),
                 predicted_tier=tier_id,
                 routed_model=model,

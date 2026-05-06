@@ -388,7 +388,7 @@ class ModelMapper:
     def _build_map(self) -> None:
         """Match every internal model name to the best upstream candidate.
 
-        Priority: learned alias > exact match > seed alias > fuzzy match.
+        Priority: exact match > seed alias > learned alias > fuzzy match.
         """
         from uncommon_route.router.config import DEFAULT_MODEL_PRICING
 
@@ -396,15 +396,15 @@ class ModelMapper:
         for internal in DEFAULT_MODEL_PRICING:
             if internal in self._upstream_models:
                 continue
+            alias = self._seed_alias_match(internal)
+            if alias:
+                self._map[internal] = alias
+                continue
             if internal in self._learned_aliases:
                 candidate = self._learned_aliases[internal]
                 if candidate in self._upstream_models:
                     self._map[internal] = candidate
                     continue
-            alias = self._seed_alias_match(internal)
-            if alias:
-                self._map[internal] = alias
-                continue
             match = self._fuzzy_match(internal)
             if match:
                 self._map[internal] = match
@@ -469,21 +469,24 @@ class ModelMapper:
         """Translate an internal model name to what the upstream expects.
 
         Priority:
-          1. Learned alias
-          2. Dynamic map (from ``/v1/models`` discovery + fuzzy matching)
-          3. Exact match in upstream model set
+          1. Exact match in discovered upstream model set
+          2. Dynamic map (from ``/v1/models`` discovery + seed/fuzzy matching)
+          3. Learned fallback alias, when it can be validated for this upstream
           4. Gateway -> keep full ``provider/model``; direct -> strip prefix
         """
-        if internal_name in self._learned_aliases:
-            candidate = self._learned_aliases[internal_name]
-            if not self._discovered or candidate in self._upstream_models:
-                return candidate
+        if self._discovered and internal_name in self._upstream_models:
+            return internal_name
 
         if internal_name in self._map:
             return self._map[internal_name]
 
-        if self._discovered and internal_name in self._upstream_models:
-            return internal_name
+        if internal_name in self._learned_aliases:
+            candidate = self._learned_aliases[internal_name]
+            if self._discovered:
+                if candidate in self._upstream_models:
+                    return candidate
+            elif not (self.is_gateway and "/" in internal_name):
+                return candidate
 
         if not self.is_gateway and "/" in internal_name:
             return internal_name.split("/", 1)[-1]

@@ -20,7 +20,7 @@ from uncommon_route.anthropic_compat import (
 )
 from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.providers import ProviderEntry, ProvidersConfig
-from uncommon_route.proxy import create_app
+from uncommon_route.proxy import create_app, _anthropic_messages_url, _anthropic_transport_base
 from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
 from uncommon_route.router.types import (
     CapabilityLane,
@@ -1088,6 +1088,14 @@ class TestAutoRouting:
 
 
 class TestTransportRouting:
+    def test_openrouter_minimax_native_messages_url_does_not_insert_anthropic_path(self) -> None:
+        transport_base = _anthropic_transport_base("https://openrouter.ai/api/v1", "minimax")
+
+        assert transport_base == "https://openrouter.ai/api/v1"
+        assert _anthropic_messages_url(transport_base) == "https://openrouter.ai/api/v1/messages"
+        assert _anthropic_transport_base("https://api.commonstack.ai/v1", "minimax") == "https://api.commonstack.ai/v1"
+        assert _anthropic_transport_base("https://openrouter.ai/api/v1", "anthropic") == "https://openrouter.ai/api/v1"
+
     def test_virtual_messages_tool_steps_filter_candidates_to_native_anthropic_transport(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1171,6 +1179,103 @@ class TestTransportRouting:
             assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
             assert resp.headers["x-uncommon-route-transport"] == "anthropic-messages"
             assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_openrouter_messages_use_native_anthropic_transport_for_minimax_without_rewriting_base(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+        model_id = "minimax/minimax-m2.5"
+
+        mapper = ModelMapper("https://openrouter.ai/api/v1")
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider="minimax",
+            owned_by="minimax",
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+        mapper._discovered = True
+
+        async def fake_discover(api_key: str | None = None) -> int:
+            return len(mapper._pool)
+
+        mapper.discover = fake_discover  # type: ignore[method-assign]
+
+        def fake_route(*args, **kwargs):
+            return RoutingDecision(
+                model=model_id,
+                tier=Tier.MEDIUM,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                served_quality=ServedQuality.BALANCED,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
+                mode=RoutingMode.AUTO,
+                confidence=0.92,
+                method="pool",
+                reasoning="forced openrouter minimax transport test",
+                cost_estimate=0.001,
+                baseline_cost=0.004,
+                savings=0.75,
+                raw_confidence=0.92,
+                complexity=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_openrouter_minimax",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model_id,
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 18, "output_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
+
+        try:
+            app = create_app(
+                upstream="https://openrouter.ai/api/v1",
+                model_mapper=mapper,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/messages",
+                json={
+                    "model": "uncommon-route/auto",
+                    "max_tokens": 64,
+                    "tools": [{
+                        "name": "read_file",
+                        "description": "Read file",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }],
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"anthropic-version": "2023-06-01"},
+            )
+
+            assert resp.status_code == 200
+            assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport-source"] == "tool-compat"
+            assert captured["url"] == "https://openrouter.ai/api/v1/messages"
         finally:
             asyncio.run(async_client.aclose())
 

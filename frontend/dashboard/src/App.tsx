@@ -3,18 +3,7 @@
  * OLED black, 200px sidebar, no animated transitions (percussive, not fluid)
  */
 
-import { useCallback, useEffect, useState } from "react";
-import {
-  fetchHealth,
-  fetchStats,
-  fetchMapping,
-  fetchSpend,
-  fetchRecent,
-  type Health,
-  type Stats,
-  type Mapping,
-  type Spend,
-} from "./api";
+import { useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Home from "./components/Home";
 import Activity from "./components/Activity";
@@ -25,40 +14,14 @@ import Connections from "./components/Connections";
 import Routing from "./components/Routing";
 import Playground from "./components/Playground";
 import Explainer from "./components/Explainer";
+import ExplainerNew from "./components/ExplainerNew";
+import { LiveDataProvider, useLiveData } from "./state/LiveDataContext";
 
-type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain";
+type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain" | "explain_new";
 
-export default function App() {
+function AppShell() {
   const [page, setPage] = useState<Page>("home");
-  const [health, setHealth] = useState<Health | null>(null);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [mapping, setMapping] = useState<Mapping | null>(null);
-  const [spend, setSpend] = useState<Spend | null>(null);
-  const [ready, setReady] = useState(false);
-
-  const [feedbackPending, setFeedbackPending] = useState(0);
-
-  const refresh = useCallback(async () => {
-    const [h, st, m, sp, recent] = await Promise.all([
-      fetchHealth(), fetchStats(), fetchMapping(), fetchSpend(), fetchRecent(30),
-    ]);
-    if (h) { setHealth(h); setReady(true); }
-    if (st) setStats(st);
-    if (m) setMapping(m);
-    if (sp) setSpend(sp);
-    // Compute actual pending count from recent — matches Feedback page's pendingCount logic
-    if (recent) {
-      setFeedbackPending(recent.filter(r => r.feedback_pending && (!r.feedback_action || r.feedback_action === "expired")).length);
-    } else {
-      setFeedbackPending(0);
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  const { health, stats, mapping, spend, feedbackPending, ready, refresh } = useLiveData();
 
   const upstream = health?.upstream?.replace(/^https?:\/\//, "").replace(/\/v1$/, "") ?? "";
   const isUp = health?.model_mapper?.discovered ?? false;
@@ -87,9 +50,10 @@ export default function App() {
 
       <main className="ml-[200px] min-h-screen">
         <div className="px-8 py-8 max-w-[1100px] mx-auto">
-          {page === "home" && <Home stats={stats} health={health} />}
+          {page === "home" && <Home stats={stats} />}
           {page === "playground" && <Playground />}
           {page === "explain" && <Explainer />}
+          {page === "explain_new" && <ExplainerNew />}
           {page === "routing" && <Routing onRefresh={refresh} />}
           {page === "activity" && <Activity stats={stats} />}
           {page === "models" && <Models mapping={mapping} />}
@@ -99,5 +63,13 @@ export default function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <LiveDataProvider>
+      <AppShell />
+    </LiveDataProvider>
   );
 }

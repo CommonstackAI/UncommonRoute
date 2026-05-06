@@ -10,6 +10,7 @@ import {
   type TraceAttempt,
   type TraceRecord,
 } from "../api";
+import { useLiveData } from "../state/LiveDataContext";
 
 const TIER_NAMES: Record<string, string> = {
   SIMPLE: "LOW",
@@ -23,6 +24,11 @@ const TIER_NAMES: Record<string, string> = {
 };
 
 export default function Explainer() {
+  const { recent: liveRecent } = useLiveData();
+  const completedCount = useMemo(
+    () => liveRecent.filter((r) => r.state === "completed").length,
+    [liveRecent],
+  );
   const [recent, setRecent] = useState<TraceRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<TraceRecord | null>(null);
@@ -31,7 +37,6 @@ export default function Explainer() {
 
   useEffect(() => {
     let cancelled = false;
-
     const load = async () => {
       const payload = await fetchTraces(30);
       if (cancelled) return;
@@ -47,14 +52,11 @@ export default function Explainer() {
         return payload.items[0]?.request_id ?? null;
       });
     };
-
     load();
-    const id = window.setInterval(load, 5000);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
     };
-  }, []);
+  }, [completedCount]);
 
   useEffect(() => {
     let cancelled = false;

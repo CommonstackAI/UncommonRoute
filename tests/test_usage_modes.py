@@ -273,7 +273,7 @@ class TestCLI:
 
     def test_support_bundle_exports_recent_traces(self, tmp_path: Path) -> None:
         data_dir = tmp_path / ".uncommon-route"
-        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces = TraceStore(storage=FileTraceStorage(base_dir=data_dir / "traces"), hot_days=99)
         traces.record(RequestTrace(
             timestamp=time.time(),
             request_id="reqsupport01",
@@ -334,7 +334,7 @@ class TestCLI:
 
     def test_support_request_prints_trace(self, tmp_path: Path) -> None:
         data_dir = tmp_path / ".uncommon-route"
-        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces = TraceStore(storage=FileTraceStorage(base_dir=data_dir / "traces"), hot_days=99)
         traces.record(RequestTrace(
             timestamp=time.time(),
             request_id="reqlookup001",

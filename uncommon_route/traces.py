@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -11,9 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from uncommon_route.paths import data_dir
-
-RETENTION_S = 14 * 86_400
-MAX_TRACES = 20_000
 
 
 def _normalize_tier_label(tier: str) -> str:
@@ -115,47 +113,223 @@ class RequestTrace:
     feedback_reason: str = ""
     feedback_submitted_at: float = 0.0
 
+    # --- Track A: session_id v2 inputs ---
+    messages_count: int = 0
+    msg_hashes: list[str] | None = None
+    first_user_hash_v2: str = ""
+    system_hash: str = ""
+    metadata_user_id: str = ""
+    previous_response_id: str = ""
+    user_agent: str = ""
+    session_id_v2: str = ""
+
+    # --- Track B: cold (content) fields ---
+    request_messages: list[dict[str, Any]] | None = None
+    request_system: str = ""
+    request_tools_count: int = 0
+    response_text: str = ""
+    response_tool_calls: list[dict[str, Any]] | None = None
+    response_finish_reason: str = ""
+    content_truncated: bool = False
+
+
+COLD_FIELDS: tuple[str, ...] = (
+    "request_messages",
+    "request_system",
+    "response_text",
+    "response_tool_calls",
+    "response_finish_reason",
+)
+
+
+def _empty_for(field_name: str) -> Any:
+    if field_name in ("request_messages", "response_tool_calls"):
+        return None
+    return ""
+
+
+def _row_to_trace(row: dict[str, Any]) -> "RequestTrace":
+    """Tolerate missing fields; rely on dataclass defaults for absent keys."""
+    field_names = {f.name for f in RequestTrace.__dataclass_fields__.values()}
+    kwargs = {k: v for k, v in row.items() if k in field_names}
+    return RequestTrace(**kwargs)
+
 
 class TraceStorage(ABC):
     @abstractmethod
-    def load(self) -> list[dict[str, Any]]: ...
+    def append(self, record: dict[str, Any]) -> None: ...
 
     @abstractmethod
-    def save(self, records: list[dict[str, Any]]) -> None: ...
+    def load_recent_days(
+        self, days: int, *, now: float
+    ) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def load_for_request(
+        self, request_id: str, timestamp: float
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def purge(self) -> None: ...
+
+
+def _date_str(ts: float) -> str:
+    """UTC date for grouping into daily files."""
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 class FileTraceStorage(TraceStorage):
-    def __init__(self, path: Path | None = None) -> None:
-        self._path = path or (data_dir() / "traces.json")
+    """Append-only JSONL store rotated daily."""
 
-    def load(self) -> list[dict[str, Any]]:
+    def __init__(self, base_dir: Path | None = None) -> None:
+        self._base_dir = base_dir or (data_dir() / "traces")
+
+    def append(self, record: dict[str, Any]) -> None:
         try:
-            if self._path.exists():
-                data = json.loads(self._path.read_text())
-                if isinstance(data, list):
-                    return data
+            self._base_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            day = _date_str(float(record.get("timestamp", time.time())))
+            path = self._base_dir / f"{day}.jsonl"
+            line = json.dumps(record, default=str, ensure_ascii=False)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            try:
+                path.chmod(0o600)
+            except Exception:
+                pass
         except Exception:
             pass
-        return []
 
-    def save(self, records: list[dict[str, Any]]) -> None:
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self._path.write_text(json.dumps(records, default=str))
-            self._path.chmod(0o600)
-        except Exception:
-            pass
+    def load_recent_days(
+        self, days: int, *, now: float
+    ) -> list[dict[str, Any]]:
+        if not self._base_dir.exists():
+            return []
+        import datetime as _dt
+        end = _dt.datetime.fromtimestamp(now, tz=_dt.timezone.utc).date()
+        accepted = {
+            (end - _dt.timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(max(1, days))
+        }
+        files = sorted(
+            f for f in self._base_dir.glob("*.jsonl") if f.stem in accepted
+        )
+        out: list[dict[str, Any]] = []
+        for f in files:
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return out
+
+    def load_for_request(
+        self, request_id: str, timestamp: float
+    ) -> dict[str, Any] | None:
+        if not self._base_dir.exists():
+            return None
+        import datetime as _dt
+        center = _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc).date()
+        candidates = [
+            center,
+            center - _dt.timedelta(days=1),
+            center + _dt.timedelta(days=1),
+        ]
+        for day in candidates:
+            f = self._base_dir / f"{day.strftime('%Y-%m-%d')}.jsonl"
+            if not f.exists():
+                continue
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if row.get("request_id") == request_id:
+                        return row
+            except Exception:
+                continue
+        return None
+
+    def purge(self) -> None:
+        if not self._base_dir.exists():
+            return
+        for f in self._base_dir.glob("*.jsonl"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
 
 class InMemoryTraceStorage(TraceStorage):
     def __init__(self) -> None:
-        self._data: list[dict[str, Any]] = []
+        self._rows: list[dict[str, Any]] = []
 
-    def load(self) -> list[dict[str, Any]]:
-        return list(self._data)
+    def append(self, record: dict[str, Any]) -> None:
+        self._rows.append(dict(record))
 
-    def save(self, records: list[dict[str, Any]]) -> None:
-        self._data = list(records)
+    def load_recent_days(
+        self, days: int, *, now: float
+    ) -> list[dict[str, Any]]:
+        return list(self._rows)
+
+    def load_for_request(
+        self, request_id: str, timestamp: float
+    ) -> dict[str, Any] | None:
+        for r in self._rows:
+            if r.get("request_id") == request_id:
+                return dict(r)
+        return None
+
+    def purge(self) -> None:
+        self._rows.clear()
+
+
+def migrate_legacy_json(legacy_path: Path, target_dir: Path) -> bool:
+    """One-time migration of the old single-file traces.json into daily JSONL.
+
+    Returns True if migration ran, False if it was skipped (target dir already
+    populated, no legacy file, or legacy file is not parseable).
+    """
+    if target_dir.exists() and any(target_dir.glob("*.jsonl")):
+        return False
+    if not legacy_path.exists():
+        return False
+    try:
+        records = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(records, list):
+        return False
+
+    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        ts = float(rec.get("timestamp", 0.0))
+        day = _date_str(ts)
+        path = target_dir / f"{day}.jsonl"
+        try:
+            line = json.dumps(rec, default=str, ensure_ascii=False)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            continue
+
+    try:
+        legacy_path.rename(legacy_path.with_suffix(".json.bak"))
+    except Exception:
+        pass
+    return True
 
 
 class TraceStore:
@@ -163,9 +337,25 @@ class TraceStore:
         self,
         storage: TraceStorage | None = None,
         now_fn: Any = None,
+        *,
+        hot_days: int | None = None,
     ) -> None:
-        self._storage = storage or FileTraceStorage()
+        if storage is None:
+            target_dir = data_dir() / "traces"
+            legacy = data_dir() / "traces.json"
+            try:
+                migrate_legacy_json(legacy, target_dir)
+            except Exception:
+                pass
+            storage = FileTraceStorage(base_dir=target_dir)
+        self._storage = storage
         self._now = now_fn or time.time
+        if hot_days is None:
+            try:
+                hot_days = int(os.environ.get("UNCOMMON_ROUTE_TRACE_HOT_DAYS", "2"))
+            except Exception:
+                hot_days = 2
+        self._hot_days = max(1, hot_days)
         self._records: list[RequestTrace] = []
         self._load()
 
@@ -182,9 +372,19 @@ class TraceStore:
         trace.capability_lane = str(trace.capability_lane or "").strip().lower()
         trace.feedback_from_tier = _normalize_tier_label(trace.feedback_from_tier) if trace.feedback_from_tier else ""
         trace.feedback_to_tier = _normalize_tier_label(trace.feedback_to_tier) if trace.feedback_to_tier else ""
+
+        # Persist full row (incl. cold fields) to disk.
+        payload = _trace_payload(trace)
+        try:
+            self._storage.append({"type": "trace", **payload})
+        except Exception:
+            pass
+
+        # Hot copy: drop cold fields before keeping in memory.
+        for f in COLD_FIELDS:
+            setattr(trace, f, _empty_for(f))
         self._records.append(trace)
         self._cleanup()
-        self._save()
 
     def record_feedback(
         self,
@@ -197,6 +397,9 @@ class TraceStore:
         to_tier: str = "",
         reason: str = "",
     ) -> bool:
+        now = self._now()
+        # Apply to in-memory state.
+        applied = False
         for record in reversed(self._records):
             if record.request_id != request_id:
                 continue
@@ -206,14 +409,33 @@ class TraceStore:
             record.feedback_from_tier = _normalize_tier_label(from_tier) if from_tier else ""
             record.feedback_to_tier = _normalize_tier_label(to_tier) if to_tier else ""
             record.feedback_reason = reason
-            record.feedback_submitted_at = self._now()
-            self._save()
-            return True
-        return False
+            record.feedback_submitted_at = now
+            applied = True
+            break
+        # Persist as event so future loads reconstruct state.
+        try:
+            self._storage.append({
+                "type": "feedback",
+                "request_id": request_id,
+                "timestamp": now,
+                "feedback_signal": signal,
+                "feedback_ok": bool(ok),
+                "feedback_action": action,
+                "feedback_from_tier": _normalize_tier_label(from_tier) if from_tier else "",
+                "feedback_to_tier": _normalize_tier_label(to_tier) if to_tier else "",
+                "feedback_reason": reason,
+                "feedback_submitted_at": now,
+            })
+        except Exception:
+            pass
+        return applied
 
     def reset(self) -> None:
-        self._records = []
-        self._save()
+        self._records.clear()
+        try:
+            self._storage.purge()
+        except Exception:
+            pass
 
     def history(self, limit: int | None = None) -> list[RequestTrace]:
         records = list(reversed(self._records))
@@ -257,6 +479,7 @@ class TraceStore:
         return None
 
     def summary(self) -> dict[str, Any]:
+        # PRESERVE the existing summary algorithm — do not replace with Counter.
         by_endpoint: dict[str, int] = {}
         by_mode: dict[str, int] = {}
         by_method: dict[str, int] = {}
@@ -300,101 +523,56 @@ class TraceStore:
             "by_capability_lane": by_capability_lane,
         }
 
-    def _cleanup(self) -> None:
-        cutoff = self._now() - RETENTION_S
-        self._records = [record for record in self._records if record.timestamp >= cutoff]
-        if len(self._records) > MAX_TRACES:
-            self._records = self._records[-MAX_TRACES:]
+    def load_content(self, request_id: str) -> dict[str, Any] | None:
+        for r in self._records:
+            if r.request_id == request_id:
+                cold = self._storage.load_for_request(request_id, r.timestamp)
+                if cold is None:
+                    return None
+                return {f: cold.get(f) for f in COLD_FIELDS}
+        return None
 
-    def _save(self) -> None:
-        self._storage.save([_trace_payload(record) for record in self._records])
+    def _cleanup(self) -> None:
+        cutoff_ts = self._now() - (self._hot_days * 86400.0)
+        self._records = [r for r in self._records if r.timestamp >= cutoff_ts]
 
     def _load(self) -> None:
-        for payload in self._storage.load():
-            if not isinstance(payload, dict) or "timestamp" not in payload or "request_id" not in payload:
+        rows = self._storage.load_recent_days(self._hot_days, now=self._now())
+        traces: dict[str, RequestTrace] = {}
+        order: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            self._records.append(RequestTrace(
-                timestamp=float(payload.get("timestamp", 0.0) or 0.0),
-                request_id=str(payload.get("request_id", "")),
-                requested_model=str(payload.get("requested_model", "")),
-                model=str(payload.get("model", "")),
-                status_code=int(payload.get("status_code", 0) or 0),
-                mode=str(payload.get("mode", "")),
-                tier=_normalize_tier_label(str(payload.get("tier", ""))),
-                decision_tier=_normalize_tier_label(str(payload.get("decision_tier", ""))) if payload.get("decision_tier", "") else "",
-                served_quality=_normalize_served_quality(str(payload.get("served_quality", ""))),
-                served_quality_target=_normalize_served_quality(str(payload.get("served_quality_target", ""))),
-                served_quality_floor=_normalize_served_quality(str(payload.get("served_quality_floor", ""))),
-                capability_lane=str(payload.get("capability_lane", "") or "").strip().lower(),
-                method=str(payload.get("method", "")),
-                api_format=str(payload.get("api_format", "openai")),
-                endpoint=str(payload.get("endpoint", "chat_completions")),
-                is_virtual=bool(payload.get("is_virtual", False)),
-                session_id=payload.get("session_id"),
-                streaming=bool(payload.get("streaming", False)),
-                prompt_preview=str(payload.get("prompt_preview", "")),
-                prompt_hash=str(payload.get("prompt_hash", "")),
-                step_type=str(payload.get("step_type", "general")),
-                route_reasoning=str(payload.get("route_reasoning", "")),
-                confidence=float(payload.get("confidence", 0.0) or 0.0),
-                raw_confidence=float(payload.get("raw_confidence", 0.0) or 0.0),
-                confidence_source=str(payload.get("confidence_source", "")),
-                calibration_version=str(payload.get("calibration_version", "")),
-                calibration_sample_count=int(payload.get("calibration_sample_count", 0) or 0),
-                calibration_temperature=float(payload.get("calibration_temperature", 1.0) or 1.0),
-                calibration_applied_tags=list(payload.get("calibration_applied_tags", []) or []),
-                complexity=float(payload.get("complexity", 0.33) or 0.33),
-                estimated_cost=float(payload.get("estimated_cost", 0.0) or 0.0),
-                baseline_cost=float(payload.get("baseline_cost", 0.0) or 0.0),
-                actual_cost=payload.get("actual_cost"),
-                savings=float(payload.get("savings", 0.0) or 0.0),
-                latency_us=float(payload.get("latency_us", 0.0) or 0.0),
-                usage_input_tokens=int(payload.get("usage_input_tokens", 0) or 0),
-                usage_output_tokens=int(payload.get("usage_output_tokens", 0) or 0),
-                cache_read_input_tokens=int(payload.get("cache_read_input_tokens", 0) or 0),
-                cache_write_input_tokens=int(payload.get("cache_write_input_tokens", 0) or 0),
-                cache_hit_ratio=float(payload.get("cache_hit_ratio", 0.0) or 0.0),
-                transport=str(payload.get("transport", "openai-chat")),
-                requested_transport=str(payload.get("requested_transport", "")),
-                transport_reason=str(payload.get("transport_reason", "")),
-                transport_preference_source=str(payload.get("transport_preference_source", "")),
-                cache_mode=str(payload.get("cache_mode", "none")),
-                cache_family=str(payload.get("cache_family", "generic")),
-                cache_breakpoints=int(payload.get("cache_breakpoints", 0) or 0),
-                input_tokens_before=int(payload.get("input_tokens_before", 0) or 0),
-                input_tokens_after=int(payload.get("input_tokens_after", 0) or 0),
-                artifacts_created=int(payload.get("artifacts_created", 0) or 0),
-                compacted_messages=int(payload.get("compacted_messages", 0) or 0),
-                semantic_summaries=int(payload.get("semantic_summaries", 0) or 0),
-                semantic_calls=int(payload.get("semantic_calls", 0) or 0),
-                semantic_failures=int(payload.get("semantic_failures", 0) or 0),
-                semantic_quality_fallbacks=int(payload.get("semantic_quality_fallbacks", 0) or 0),
-                checkpoint_created=bool(payload.get("checkpoint_created", False)),
-                rehydrated_artifacts=int(payload.get("rehydrated_artifacts", 0) or 0),
-                sidechannel_estimated_cost=float(payload.get("sidechannel_estimated_cost", 0.0) or 0.0),
-                sidechannel_actual_cost=payload.get("sidechannel_actual_cost"),
-                fallback_reason=str(payload.get("fallback_reason", "")),
-                answer_depth=str(payload.get("answer_depth", "standard")),
-                constraint_tags=list(payload.get("constraint_tags", []) or []),
-                hint_tags=list(payload.get("hint_tags", []) or []),
-                feature_tags=list(payload.get("feature_tags", []) or []),
-                routing_features_payload=dict(payload.get("routing_features_payload", {}) or {}),
-                fallback_chain_payload=list(payload.get("fallback_chain_payload", []) or []),
-                candidate_scores_payload=list(payload.get("candidate_scores_payload", []) or []),
-                selection_weights_payload=dict(payload.get("selection_weights_payload", {}) or {}),
-                attempts_payload=list(payload.get("attempts_payload", []) or []),
-                error_code=str(payload.get("error_code", "")),
-                error_stage=str(payload.get("error_stage", "")),
-                error_message=str(payload.get("error_message", "")),
-                feedback_signal=str(payload.get("feedback_signal", "")),
-                feedback_ok=bool(payload.get("feedback_ok", False)),
-                feedback_action=str(payload.get("feedback_action", "")),
-                feedback_from_tier=_normalize_tier_label(str(payload.get("feedback_from_tier", ""))) if payload.get("feedback_from_tier", "") else "",
-                feedback_to_tier=_normalize_tier_label(str(payload.get("feedback_to_tier", ""))) if payload.get("feedback_to_tier", "") else "",
-                feedback_reason=str(payload.get("feedback_reason", "")),
-                feedback_submitted_at=float(payload.get("feedback_submitted_at", 0.0) or 0.0),
-            ))
-        self._cleanup()
+            rtype = row.get("type", "trace")
+            if rtype == "trace":
+                rid = str(row.get("request_id", ""))
+                if not rid:
+                    continue
+                # Drop cold fields when constructing the hot record.
+                hot_row = {k: v for k, v in row.items() if k != "type" and k not in COLD_FIELDS}
+                # Backfill cold field defaults for the dataclass.
+                for f in COLD_FIELDS:
+                    hot_row.setdefault(f, _empty_for(f))
+                try:
+                    trace = _row_to_trace(hot_row)
+                except Exception:
+                    continue
+                if rid not in traces:
+                    order.append(rid)
+                traces[rid] = trace
+            elif rtype == "feedback":
+                rid = str(row.get("request_id", ""))
+                t = traces.get(rid)
+                if t is None:
+                    continue
+                t.feedback_signal = str(row.get("feedback_signal", ""))
+                t.feedback_ok = bool(row.get("feedback_ok", False))
+                t.feedback_action = str(row.get("feedback_action", ""))
+                t.feedback_from_tier = str(row.get("feedback_from_tier", ""))
+                t.feedback_to_tier = str(row.get("feedback_to_tier", ""))
+                t.feedback_reason = str(row.get("feedback_reason", ""))
+                t.feedback_submitted_at = float(row.get("feedback_submitted_at", 0.0) or 0.0)
+        self._records = [traces[rid] for rid in order if rid in traces]
 
 
 def _trace_payload(trace: RequestTrace) -> dict[str, Any]:
@@ -478,4 +656,19 @@ def _trace_payload(trace: RequestTrace) -> dict[str, Any]:
         "feedback_to_tier": _normalize_tier_label(trace.feedback_to_tier) if trace.feedback_to_tier else "",
         "feedback_reason": trace.feedback_reason,
         "feedback_submitted_at": trace.feedback_submitted_at,
+        "messages_count": trace.messages_count,
+        "msg_hashes": list(trace.msg_hashes) if trace.msg_hashes else [],
+        "first_user_hash_v2": trace.first_user_hash_v2,
+        "system_hash": trace.system_hash,
+        "metadata_user_id": trace.metadata_user_id,
+        "previous_response_id": trace.previous_response_id,
+        "user_agent": trace.user_agent,
+        "session_id_v2": trace.session_id_v2,
+        "request_messages": list(trace.request_messages) if trace.request_messages else None,
+        "request_system": trace.request_system,
+        "request_tools_count": trace.request_tools_count,
+        "response_text": trace.response_text,
+        "response_tool_calls": list(trace.response_tool_calls) if trace.response_tool_calls else None,
+        "response_finish_reason": trace.response_finish_reason,
+        "content_truncated": trace.content_truncated,
     }

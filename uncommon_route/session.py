@@ -17,12 +17,25 @@ def derive_session_id(messages: list[dict[str, Any]]) -> str | None:
     """Derive a session ID from the first user message (SHA-256 prefix).
 
     Used for cache key grouping and composition checkpoints, not routing.
+
+    Skips boilerplate user messages whose content is identical across
+    sessions for the same workspace — notably Codex CLI's
+    ``<environment_context>`` block, which wraps cwd/shell/date and would
+    otherwise collapse every Codex conversation in the same directory into
+    a single session.
     """
     for msg in messages:
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            text = content if isinstance(content, str) else str(content)
-            return hashlib.sha256(text.encode()).hexdigest()[:8]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        text = (content if isinstance(content, str) else str(content)).strip()
+        if not text:
+            continue
+        if text.startswith("<environment_context>") and text.endswith(
+            "</environment_context>"
+        ):
+            continue
+        return hashlib.sha256(text.encode()).hexdigest()[:8]
     return None
 
 

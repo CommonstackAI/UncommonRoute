@@ -4624,11 +4624,23 @@ def create_app(
                 })
 
             transport_for_capture = transport_decision.selected_transport
-            def _capture_for_record(b, content, chunks):
+            # The Responses API raw body has no `messages` field (it uses
+            # `input`/`previous_response_id`); use the converted chat-shape
+            # body so request_messages captures the full backbone. Other
+            # wire formats keep their original source_body to preserve shape
+            # (Anthropic blocks etc.). Decide by endpoint, not upstream
+            # transport — Responses ingress is normalized to openai-chat
+            # before reaching the upstream.
+            if endpoint_name == "responses":
+                capture_body = body
+            else:
+                capture_body = source_body or body
+
+            def _capture_for_record(content, chunks):
                 if content is not None:
-                    return _capture_non_streaming(b, content, transport_for_capture)
+                    return _capture_non_streaming(capture_body, content, transport_for_capture)
                 if chunks is not None:
-                    return _capture_streaming(b, chunks, transport_for_capture)
+                    return _capture_streaming(capture_body, chunks, transport_for_capture)
                 return {}
 
             _traces.record(RequestTrace(
@@ -4705,7 +4717,7 @@ def create_app(
                 error_stage=error_stage,
                 error_message=error_message,
                 **_extract_session_v2_inputs(request, source_body or body),
-                **_capture_for_record(source_body or body, response_content, stream_chunks),
+                **_capture_for_record(response_content, stream_chunks),
             ))
 
         def _record_response_error(response: Response, *, streaming: bool) -> None:

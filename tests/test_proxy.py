@@ -22,6 +22,7 @@ from uncommon_route.proxy import (
 )
 from uncommon_route.router.config import routing_mode_from_model
 from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, RoutingConfigStore
+import uncommon_route.scene_store as scene_store_module
 from uncommon_route.semantic import SemanticCallResult, SideChannelConfig, SideChannelTaskConfig
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
 from uncommon_route.traces import InMemoryTraceStorage, TraceStore
@@ -998,6 +999,98 @@ class TestRoutingConfigEndpoint:
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["fallback"] == []
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["overridden"] is False
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["selection_mode"] == "adaptive"
+
+
+class TestScenesEndpoint:
+    def test_post_scene_requires_admin_token(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scene_store_module, "_SCENES_FILE", tmp_path / "scenes.json")
+        monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
+        app = create_app(upstream="http://127.0.0.1:1/fake")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        denied = client.post("/v1/scenes", json={
+            "action": "add",
+            "name": "coding",
+            "primary": "anthropic/claude-sonnet-4.6",
+        })
+        assert denied.status_code == 401
+
+        allowed = client.post(
+            "/v1/scenes",
+            headers={"authorization": "Bearer test-admin"},
+            json={
+                "action": "add",
+                "name": "coding",
+                "primary": "anthropic/claude-sonnet-4.6",
+            },
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["scene"]["name"] == "coding"
+
+    def test_header_scene_routes_real_model_through_hard_pin(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(scene_store_module, "_SCENES_FILE", tmp_path / "scenes.json")
+        monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
+        posted_models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            posted_models.append(str(body.get("model")))
+            return httpx.Response(200, json={
+                "id": "chatcmpl_scene",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            })
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            scene = client.post(
+                "/v1/scenes",
+                headers={"authorization": "Bearer test-admin"},
+                json={
+                    "action": "add",
+                    "name": "private",
+                    "primary": "anthropic/claude-opus-4.6",
+                    "hard_pin": True,
+                },
+            )
+            assert scene.status_code == 200
+
+            resp = client.post(
+                "/v1/chat/completions",
+                headers={"x-uncommon-route-scene": "private"},
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            assert resp.status_code == 200
+            assert posted_models == ["claude-opus-4.6"]
+            assert resp.headers["x-uncommon-route-mode"] == "auto"
+            assert resp.headers["x-uncommon-route-model"] == "anthropic/claude-opus-4.6"
+            assert resp.headers["x-uncommon-route-method"] == "scene:private:hard-pin"
+        finally:
+            asyncio.run(async_client.aclose())
 
 
 class TestChatCompletions:

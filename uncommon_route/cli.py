@@ -124,6 +124,12 @@ Stats subcommands:
   stats history [--limit <n>]         Recent routing decisions
   stats reset                         Clear all stats
 
+Scene subcommands:
+  scene list                          List named routing scenes
+  scene add <name> <primary> [...]    Add or update a routing scene
+  scene show <name>                   Show one routing scene
+  scene remove <name>                 Remove one routing scene
+
 Config subcommands:
   config show [--json]                Show active default mode and tier overrides
   config set-default-mode <mode>      Set the default mode used when no model is specified
@@ -148,6 +154,7 @@ Examples:
   uncommon-route support bundle
   uncommon-route spend set hourly 5.00
   uncommon-route provider add deepseek sk-...
+  uncommon-route scene add coding anthropic/claude-sonnet-4.6 openai/gpt-5.2
   uncommon-route config set-default-mode fast
   uncommon-route config set-tier auto SIMPLE openai/gpt-4o-mini --fallback moonshot/kimi-k2.5 --strategy hard-pin
 """)
@@ -263,6 +270,20 @@ Classify a prompt and show the routing decision without sending it upstream.
 """)
 
 
+def _print_scene_help() -> None:
+    print("""Usage: uncommon-route scene <list|add|show|remove> [...]
+
+Manage named routing scenes.
+
+Examples:
+  uncommon-route scene list
+  uncommon-route scene add coding anthropic/claude-sonnet-4.6 openai/gpt-5.2
+  uncommon-route scene add private anthropic/claude-opus-4.6 --hard-pin --description "private chat"
+  uncommon-route scene show coding
+  uncommon-route scene remove coding
+""")
+
+
 def _print_generic_subcommand_help(cmd: str) -> None:
     printers = {
         "init": _print_init_help,
@@ -273,6 +294,7 @@ def _print_generic_subcommand_help(cmd: str) -> None:
         "support": _print_support_help,
         "provider": _print_provider_help,
         "route": _print_route_help,
+        "scene": _print_scene_help,
     }
     printer = printers.get(cmd, _print_help)
     printer()
@@ -1779,6 +1801,116 @@ def _setup_openai(args: list[str]) -> None:
 """)
     print(f"  Status: {status}")
 
+def _cmd_scene(args: list[str]) -> None:
+    """Manage named routing scenes."""
+    if not args:
+        print("Usage: uncommon-route scene <action>", file=sys.stderr)
+        print("  Actions: list, add, remove, show", file=sys.stderr)
+        sys.exit(1)
+
+    from uncommon_route.scene_store import SceneConfig, SceneStore
+
+    store = SceneStore()
+    action = args[0].lower()
+
+    if action == "list":
+        scenes = store.list()
+        if not scenes:
+            print("No scenes configured.")
+            print("  Add one: uncommon-route scene add intimate anthropic/claude-opus-4.6 --hard-pin")
+            return
+        for scene in scenes:
+            pin_label = " [hard-pin]" if scene.hard_pin else " [adaptive]"
+            desc = f"  ({scene.description})" if scene.description else ""
+            fallback_str = f" -> {', '.join(scene.fallback)}" if scene.fallback else ""
+            print(f"  {scene.name}: {scene.primary}{fallback_str}{pin_label}{desc}")
+
+    elif action == "add":
+        if len(args) < 3:
+            print(
+                "Usage: uncommon-route scene add <name> <primary> [fallback...] "
+                "[--hard-pin] [--description 'desc']",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        name = args[1]
+        primary = args[2]
+        fallback = []
+        hard_pin = False
+        description = ""
+        i = 3
+        while i < len(args):
+            if args[i] == "--hard-pin":
+                hard_pin = True
+                i += 1
+            elif args[i] == "--description" and i + 1 < len(args):
+                description = args[i + 1]
+                i += 2
+            elif args[i] == "--fallback":
+                i += 1
+                while i < len(args) and not args[i].startswith("--"):
+                    fallback.append(args[i])
+                    i += 1
+            elif not args[i].startswith("--"):
+                fallback.append(args[i])
+                i += 1
+            else:
+                i += 1
+
+        scene = SceneConfig(
+            name=name,
+            primary=primary,
+            fallback=fallback,
+            hard_pin=hard_pin,
+            description=description,
+        )
+        stored = store.add(scene)
+        pin_label = "hard-pin" if stored.hard_pin else "adaptive"
+        print(f"Scene '{stored.name}' saved: {stored.primary} [{pin_label}]")
+        if stored.fallback:
+            print(f"  Fallback: {', '.join(stored.fallback)}")
+
+    elif action == "remove":
+        if len(args) < 2:
+            print("Usage: uncommon-route scene remove <name>", file=sys.stderr)
+            sys.exit(1)
+        name = args[1]
+        if store.remove(name):
+            print(f"Scene '{name}' removed.")
+        else:
+            print(f"Scene '{name}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "show":
+        if len(args) < 2:
+            print("Usage: uncommon-route scene show <name>", file=sys.stderr)
+            sys.exit(1)
+        name = args[1]
+        scene = store.get(name)
+        if not scene:
+            print(f"Scene '{name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Scene: {scene.name}")
+        print(f"  Primary: {scene.primary}")
+        if scene.fallback:
+            print(f"  Fallback: {', '.join(scene.fallback)}")
+        print(f"  Mode: {'hard-pin' if scene.hard_pin else 'adaptive'}")
+        if scene.description:
+            print(f"  Description: {scene.description}")
+        if scene.tier_floor:
+            print(f"  Tier floor: {scene.tier_floor.value}")
+        if scene.tier_cap:
+            print(f"  Tier cap: {scene.tier_cap.value}")
+        if scene.allowed_providers:
+            print(f"  Allowed providers: {', '.join(scene.allowed_providers)}")
+        if scene.max_cost_per_request is not None:
+            print(f"  Max cost/req: ${scene.max_cost_per_request:.4f}")
+        print(f"  Model pool: {' -> '.join(scene.model_pool())}")
+
+    else:
+        print(f"Unknown scene action: {action}", file=sys.stderr)
+        print("  Actions: list, add, remove, show", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_telemetry(args: list[str]) -> None:
@@ -1896,6 +2028,7 @@ def main() -> None:
         "explain": _cmd_explain,
         "telemetry": _cmd_telemetry,
         "traces": _cmd_traces,
+        "scene": _cmd_scene,
     }
 
     handler = commands.get(cmd)

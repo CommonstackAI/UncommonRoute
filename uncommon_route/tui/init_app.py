@@ -25,9 +25,9 @@ from typing import Callable
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Container, Horizontal, Middle, Vertical, VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.theme import Theme
 from textual.widgets import (
     Button,
     Checkbox,
@@ -44,32 +44,15 @@ from textual.widgets import (
 from uncommon_route.version import VERSION
 
 
-# Figma palette — deep indigo brand color + cool purple ramp
-PAL_DEEP_INDIGO = "#1B1B7E"
-PAL_MID_PURPLE = "#6E72A6"
-PAL_LIGHT_PURPLE = "#B7BCD5"
-PAL_LAVENDER = "#E5E7F2"
-
-UNCOMMON_ROUTE_THEME = Theme(
-    name="uncommon-route",
-    primary=PAL_DEEP_INDIGO,
-    secondary=PAL_MID_PURPLE,
-    accent=PAL_LIGHT_PURPLE,
-    foreground="#FFFFFF",
-    background="#06061A",
-    surface="#10103A",
-    panel="#16163C",
-    success=PAL_LIGHT_PURPLE,  # done state — match brand instead of generic green
-    warning="#E0BB5C",
-    error="#E07878",
-    dark=True,
-    variables={
-        "text-muted": PAL_LIGHT_PURPLE,
-        "text-disabled": PAL_MID_PURPLE,
-    },
-)
 
 from uncommon_route.connections_store import ConnectionsStore
+from uncommon_route.tui.i18n import (
+    DEFAULT_LANG,
+    LANG_EN,
+    LANG_ZH,
+    SUPPORTED_LANGS,
+    t as translate,
+)
 from uncommon_route.tui.init_plan import (
     CLIENT_CHOICES,
     CONNECTION_CHOICES,
@@ -95,67 +78,128 @@ def _render_banner(color: str) -> str:
     return "\n".join(f"[bold {color}]{line}[/]" for line in _BANNER_GLYPHS)
 
 
-SPLASH_BANNER = _render_banner("#FFFFFF") + f"\n\n[{PAL_LIGHT_PURPLE}]ROUTE  ·  local llm router[/]"
+SPLASH_BANNER_BLOCK = _render_banner("$accent")
 DONE_BANNER = _render_banner("$accent")
 
 
-class SplashScreen(Screen):
-    """Brief launch screen — auto-dismisses after a beat or on any key."""
+def splash_full_text(lang: str) -> str:
+    subtitle = translate("splash.subtitle", lang)
+    return f"{SPLASH_BANNER_BLOCK}\n\n[dim]{subtitle}[/dim]"
 
-    DEFAULT_CSS = f"""
-    SplashScreen {{
-        align: center middle;
-        background: {PAL_DEEP_INDIGO};
-    }}
 
-    #splash-banner {{
-        text-align: center;
-        padding: 1 4;
-    }}
+class LangOption(Static):
+    """A clickable text option in the splash language picker."""
 
-    #splash-version {{
-        text-align: center;
-        color: {PAL_LIGHT_PURPLE};
-        margin-top: 1;
-    }}
+    class Selected(Message):
+        def __init__(self, lang: str) -> None:
+            super().__init__()
+            self.lang = lang
 
-    #splash-hint {{
-        text-align: center;
-        color: {PAL_MID_PURPLE};
-        margin-top: 2;
-    }}
+    DEFAULT_CSS = """
+    LangOption {
+        margin: 0 2;
+        padding: 0 1;
+        color: $text-muted;
+        height: 1;
+        width: auto;
+    }
+
+    LangOption:hover {
+        background: $boost;
+        color: $accent;
+        text-style: bold;
+    }
     """
 
-    AUTO_DISMISS_SECONDS = 1.6
+    def __init__(self, content: str, *, lang: str, id: str | None = None) -> None:
+        super().__init__(content, id=id, markup=True)
+        self._lang_code = lang
+
+    def on_click(self) -> None:
+        self.post_message(self.Selected(self._lang_code))
+
+
+class SplashScreen(Screen[str]):
+    """Launch screen — UR logo + language picker. Dismisses with the
+    chosen language code so the app can apply translations."""
+
+    DEFAULT_CSS = """
+    SplashScreen {
+        align: center middle;
+        background: $background;
+    }
+
+    #splash-banner {
+        text-align: center;
+        padding: 1 4;
+    }
+
+    #splash-version {
+        text-align: center;
+        color: $text-muted;
+        margin-top: 1;
+    }
+
+    #splash-prompt {
+        text-align: center;
+        color: $text;
+        text-style: bold;
+        margin-top: 2;
+    }
+
+    #splash-options {
+        width: auto;
+        height: 1;
+        margin-top: 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("e", "pick('en')", "EN", priority=True),
+        Binding("z", "pick('zh')", "中文", priority=True),
+    ]
+
+    def __init__(self, lang: str = DEFAULT_LANG) -> None:
+        super().__init__()
+        self._lang = lang
 
     def compose(self) -> ComposeResult:
         with Middle():
             with Center():
-                yield Static(SPLASH_BANNER, id="splash-banner")
+                yield Static(splash_full_text(self._lang), id="splash-banner")
             with Center():
                 yield Static(f"v{VERSION}", id="splash-version")
             with Center():
-                yield Static("press any key…", id="splash-hint")
+                yield Static("Select language / 选择语言", id="splash-prompt")
+            with Center():
+                with Horizontal(id="splash-options"):
+                    yield LangOption(
+                        r"[$accent]\[E][/]  English",
+                        lang=LANG_EN,
+                        id="opt-en",
+                    )
+                    yield LangOption(
+                        r"[$accent]\[Z][/]  中文",
+                        lang=LANG_ZH,
+                        id="opt-zh",
+                    )
 
-    def on_mount(self) -> None:
-        self._timer = self.set_timer(self.AUTO_DISMISS_SECONDS, self._auto_dismiss)
+    def on_lang_option_selected(self, event: LangOption.Selected) -> None:
+        if event.lang in SUPPORTED_LANGS:
+            self.dismiss(event.lang)
 
-    def _auto_dismiss(self) -> None:
-        if self.is_active:
-            self.dismiss()
-
-    def on_key(self, event) -> None:
-        self._timer.stop()
-        self.dismiss()
+    def action_pick(self, lang: str) -> None:
+        if lang in SUPPORTED_LANGS:
+            self.dismiss(lang)
 
 
 STEPS: list[tuple[str, str]] = [
-    ("welcome", "Welcome"),
-    ("upstream", "Upstream"),
-    ("byok", "BYOK keys"),
-    ("client", "Client"),
-    ("review", "Review & apply"),
-    ("done", "Done"),
+    ("welcome", "step.welcome"),
+    ("upstream", "step.upstream"),
+    ("byok", "step.byok"),
+    ("client", "step.client"),
+    ("review", "step.review"),
+    ("done", "step.done"),
 ]
 
 
@@ -195,13 +239,6 @@ Screen {
 #main {
     width: 1fr;
     padding: 1 2;
-}
-
-#preview {
-    width: 40;
-    background: $boost;
-    padding: 1 2;
-    border-left: solid $primary;
 }
 
 .step-title {
@@ -254,10 +291,6 @@ Button {
 .step-problems {
     margin-top: 1;
     color: $warning;
-}
-
-#preview-list {
-    height: 1fr;
 }
 
 #problems {
@@ -323,10 +356,14 @@ class InitApp(App):
         )
         self.applied: bool = False
         self.last_result: ApplyResult | None = None
+        self._lang: str = DEFAULT_LANG
         try:
             self._existing_upstream = ConnectionsStore().primary().upstream
         except Exception:
             self._existing_upstream = ""
+
+    def t(self, key: str, **fmt: object) -> str:
+        return translate(key, self._lang, **fmt)
 
     # ------------------------------------------------------------------
     # Compose
@@ -336,12 +373,16 @@ class InitApp(App):
         yield Header(show_clock=False)
         with Horizontal():
             with Vertical(id="sidebar"):
-                yield Static("uncommon-route init", id="sidebar-title")
-                for i, (_, label) in enumerate(STEPS):
-                    yield Static(f"{i + 1}. {label}", id=f"step-row-{i}", classes="step-row")
+                yield Static(self.t("app.title"), id="sidebar-title")
+                for i, (_, label_key) in enumerate(STEPS):
+                    yield Static(
+                        f"{i + 1}. {self.t(label_key)}",
+                        id=f"step-row-{i}",
+                        classes="step-row",
+                    )
                 yield Static("", classes="muted")
-                yield Static("Ctrl+N next   Ctrl+P prev", classes="muted")
-                yield Static("Ctrl+Q quit", classes="muted")
+                yield Static(self.t("sidebar.shortcut.next_prev"), id="sidebar-shortcut-nav", classes="muted")
+                yield Static(self.t("sidebar.shortcut.quit"), id="sidebar-shortcut-quit", classes="muted")
             with Vertical(id="main"):
                 with ContentSwitcher(initial="welcome", id="switcher"):
                     yield self._build_welcome()
@@ -350,135 +391,113 @@ class InitApp(App):
                     yield self._build_client()
                     yield self._build_review()
                     yield self._build_done()
-            with VerticalScroll(id="preview"):
-                yield Static("Will write", classes="step-title")
-                yield Static("(nothing yet)", id="preview-body", classes="muted")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.register_theme(UNCOMMON_ROUTE_THEME)
-        self.theme = "uncommon-route"
         self._refresh_sidebar()
         self._refresh_preview()
-        self.push_screen(SplashScreen())
+        self.push_screen(SplashScreen(self._lang), self._after_splash)
+
+    def _after_splash(self, lang: str | None) -> None:
+        if lang and lang in SUPPORTED_LANGS:
+            self._lang = lang
+        self._apply_translations()
 
     # ------------------------------------------------------------------
     # Step content builders
     # ------------------------------------------------------------------
 
-    def _next_button(self, label: str = "Next ▶") -> Button:
-        return Button(label, classes="step-next", variant="primary")
+    def _next_button(self, label_key: str = "upstream.button", *, button_id: str | None = None) -> Button:
+        btn = Button(self.t(label_key), classes="step-next", variant="primary")
+        btn.label_key = label_key  # remembered for re-translation
+        if button_id:
+            btn.id = button_id
+        return btn
 
     def _build_welcome(self) -> Container:
         c = VerticalScroll(id="welcome")
         c.compose_add_child(Static(DONE_BANNER, id="welcome-banner"))
-        c.compose_add_child(Static(
-            "[b]Cut LLM costs by 82% with automatic model routing.[/b]",
-            id="welcome-tagline",
-        ))
-        c.compose_add_child(Static(
-            "UncommonRoute is a local proxy that picks the cheapest model "
-            "capable of handling each request — Haiku-class for simple edits, "
-            "Sonnet for harder work, Opus only when it really earns the spend.\n\n"
-            "OpenAI- and Anthropic-compatible. No code changes — just point "
-            "your client at localhost.",
-            id="welcome-intro",
-            classes="muted",
-        ))
-        c.compose_add_child(Static("This wizard will:", classes="section-label"))
-        c.compose_add_child(Static(
-            "  • choose how UncommonRoute talks to upstream models\n"
-            "  • register your own provider keys (optional)\n"
-            "  • configure Claude Code / Codex / OpenAI SDK exports\n"
-            "  • optionally start the proxy in the background"
-        ))
-        c.compose_add_child(Static(
-            "Press Next (or Ctrl+N) to continue. Ctrl+P moves back at any time.",
-            classes="muted",
-        ))
-        c.compose_add_child(self._next_button("Get started ▶"))
+        c.compose_add_child(Static(self.t("welcome.tagline"), id="welcome-tagline"))
+        c.compose_add_child(Static(self.t("welcome.intro"), id="welcome-intro", classes="muted"))
+        c.compose_add_child(Static(self.t("welcome.checklist_label"), id="welcome-checklist-label", classes="section-label"))
+        c.compose_add_child(Static(self.t("welcome.checklist"), id="welcome-checklist"))
+        c.compose_add_child(Static(self.t("welcome.nav_hint"), id="welcome-nav-hint", classes="muted"))
+        c.compose_add_child(self._next_button("welcome.button", button_id="btn-welcome-next"))
         return c
 
     def _build_upstream(self) -> Container:
         c = VerticalScroll(id="upstream")
-        c.compose_add_child(Static("How should UncommonRoute connect upstream?", classes="step-title"))
+        c.compose_add_child(Static(self.t("upstream.title"), id="upstream-title", classes="step-title"))
         c.compose_add_child(RadioSet(
-            RadioButton("Commonstack managed upstream  (recommended)", id="conn-commonstack", value=True),
-            RadioButton("Local or custom upstream  (Ollama, gateway, self-hosted)", id="conn-local"),
-            RadioButton("Bring your own provider keys (BYOK)", id="conn-byok"),
-            RadioButton("Skip — only configure the client side", id="conn-skip"),
+            RadioButton(self.t("upstream.choice.commonstack"), id="conn-commonstack", value=True),
+            RadioButton(self.t("upstream.choice.local"), id="conn-local"),
+            RadioButton(self.t("upstream.choice.byok"), id="conn-byok"),
+            RadioButton(self.t("upstream.choice.skip"), id="conn-skip"),
             id="conn-radio",
         ))
-        c.compose_add_child(Static("Upstream URL", classes="section-label"))
+        c.compose_add_child(Static(self.t("upstream.url_label"), id="upstream-url-label", classes="section-label"))
         c.compose_add_child(Input(
             value="https://api.commonstack.ai/v1",
             placeholder="https://api.commonstack.ai/v1",
             id="conn-url",
         ))
-        c.compose_add_child(Static("API key", classes="section-label"))
-        c.compose_add_child(Input(placeholder="ak-…", password=True, id="conn-key"))
-        clear_label = (
-            f"Clear stored primary upstream  (currently: {self._existing_upstream})"
-            if self._existing_upstream
-            else "Clear stored primary upstream"
-        )
-        clear_box = Checkbox(clear_label, id="conn-clear")
+        c.compose_add_child(Static(self.t("upstream.key_label"), id="upstream-key-label", classes="section-label"))
+        c.compose_add_child(Input(placeholder=self.t("upstream.key_placeholder.commonstack"), password=True, id="conn-key"))
+        clear_box = Checkbox(self._clear_upstream_label(), id="conn-clear")
         clear_box.display = False  # only relevant when BYOK is picked + existing upstream
         c.compose_add_child(clear_box)
         c.compose_add_child(Static("", id="problems-upstream", classes="step-problems"))
-        c.compose_add_child(self._next_button())
+        c.compose_add_child(self._next_button("upstream.button", button_id="btn-upstream-next"))
         return c
+
+    def _clear_upstream_label(self) -> str:
+        if self._existing_upstream:
+            return self.t("upstream.clear_label.with_url", url=self._existing_upstream)
+        return self.t("upstream.clear_label.empty")
 
     def _build_byok(self) -> Container:
         c = VerticalScroll(id="byok")
-        c.compose_add_child(Static("Bring your own provider keys", classes="step-title"))
-        c.compose_add_child(Static(
-            "Leave a row blank to skip that provider. "
-            "Keys are stored locally at ~/.uncommon-route/providers.json (chmod 600).",
-            classes="muted",
-        ))
+        c.compose_add_child(Static(self.t("byok.title"), id="byok-title", classes="step-title"))
+        c.compose_add_child(Static(self.t("byok.description"), id="byok-description", classes="muted"))
         for name in KNOWN_PROVIDERS:
             c.compose_add_child(Static(name, classes="section-label"))
             c.compose_add_child(Input(
-                placeholder=f"{name} API key",
+                placeholder=self.t("byok.key_placeholder", name=name),
                 password=True,
                 id=f"byok-{name}",
             ))
         c.compose_add_child(Static("", id="problems-byok", classes="step-problems"))
-        c.compose_add_child(self._next_button())
+        c.compose_add_child(self._next_button("byok.button", button_id="btn-byok-next"))
         return c
 
     def _build_client(self) -> Container:
         c = VerticalScroll(id="client")
-        c.compose_add_child(Static("Client integration", classes="step-title"))
+        c.compose_add_child(Static(self.t("client.title"), id="client-title", classes="step-title"))
         c.compose_add_child(RadioSet(
-            RadioButton("Claude Code", id="client-claude-code"),
-            RadioButton("Codex", id="client-codex"),
-            RadioButton("OpenAI SDK / Cursor", id="client-openai"),
-            RadioButton("Skip — don't write shell exports", id="client-skip", value=True),
+            RadioButton(self.t("client.choice.claude_code"), id="client-claude-code"),
+            RadioButton(self.t("client.choice.codex"), id="client-codex"),
+            RadioButton(self.t("client.choice.openai"), id="client-openai"),
+            RadioButton(self.t("client.choice.skip"), id="client-skip", value=True),
             id="client-radio",
         ))
-        c.compose_add_child(Static("Proxy port (default 8403)", classes="section-label"))
+        c.compose_add_child(Static(self.t("client.port_label"), id="client-port-label", classes="section-label"))
         c.compose_add_child(Input(value="8403", id="client-port"))
         c.compose_add_child(Checkbox(
-            f"Write exports to {self._rc_display}",
+            self.t("client.write_rc", rc=self._rc_display),
             value=True,
             id="client-write-rc",
         ))
-        c.compose_add_child(self._next_button("Review ▶"))
+        c.compose_add_child(self._next_button("client.button", button_id="btn-client-next"))
         return c
 
     def _build_review(self) -> Container:
         c = VerticalScroll(id="review")
-        c.compose_add_child(Static("Review", classes="step-title"))
-        c.compose_add_child(Static(
-            "Below is the exact set of changes that will be applied.",
-            classes="muted",
-        ))
+        c.compose_add_child(Static(self.t("review.title"), id="review-title", classes="step-title"))
+        c.compose_add_child(Static(self.t("review.description"), id="review-description", classes="muted"))
         c.compose_add_child(Static("", id="review-plan"))
-        c.compose_add_child(Checkbox("Start proxy in background after applying", id="review-start"))
+        c.compose_add_child(Checkbox(self.t("review.start_proxy"), id="review-start"))
         c.compose_add_child(Static("", id="problems"))
-        c.compose_add_child(Button("Apply changes", id="btn-apply", variant="success"))
+        c.compose_add_child(Button(self.t("review.button"), id="btn-apply", variant="success"))
         return c
 
     def _build_done(self) -> Container:
@@ -487,7 +506,7 @@ class InitApp(App):
         c.compose_add_child(Static("", id="done-headline", classes="step-title"))
         c.compose_add_child(Static("", id="done-summary"))
         c.compose_add_child(Static("", id="done-hint", classes="muted"))
-        c.compose_add_child(Button("Quit", id="btn-quit", variant="primary", classes="step-next"))
+        c.compose_add_child(Button(self.t("done.button"), id="btn-quit", variant="primary", classes="step-next"))
         return c
 
     # ------------------------------------------------------------------
@@ -502,7 +521,7 @@ class InitApp(App):
 
     def action_next_step(self) -> None:
         current_id = STEPS[self.step_index][0]
-        problems = validate(self.answers, step=current_id)
+        problems = validate(self.answers, step=current_id, t=self.t)
         box = self._problems_box(current_id)
         if problems:
             if box is not None:
@@ -537,18 +556,114 @@ class InitApp(App):
         if STEPS[new][0] == "review":
             self._refresh_problems()
 
+    def _apply_translations(self) -> None:
+        """Re-evaluate every visible label after the user changes language."""
+
+        # Static text widgets — selector → key
+        statics: dict[str, str] = {
+            "#sidebar-title": "app.title",
+            "#sidebar-shortcut-nav": "sidebar.shortcut.next_prev",
+            "#sidebar-shortcut-quit": "sidebar.shortcut.quit",
+            "#welcome-tagline": "welcome.tagline",
+            "#welcome-intro": "welcome.intro",
+            "#welcome-checklist-label": "welcome.checklist_label",
+            "#welcome-checklist": "welcome.checklist",
+            "#welcome-nav-hint": "welcome.nav_hint",
+            "#upstream-title": "upstream.title",
+            "#upstream-url-label": "upstream.url_label",
+            "#upstream-key-label": "upstream.key_label",
+            "#byok-title": "byok.title",
+            "#byok-description": "byok.description",
+            "#client-title": "client.title",
+            "#client-port-label": "client.port_label",
+            "#review-title": "review.title",
+            "#review-description": "review.description",
+        }
+        for selector, key in statics.items():
+            try:
+                self.query_one(selector, Static).update(self.t(key))
+            except Exception:
+                continue
+
+        # RadioButton labels
+        radios: dict[str, str] = {
+            "#conn-commonstack": "upstream.choice.commonstack",
+            "#conn-local": "upstream.choice.local",
+            "#conn-byok": "upstream.choice.byok",
+            "#conn-skip": "upstream.choice.skip",
+            "#client-claude-code": "client.choice.claude_code",
+            "#client-codex": "client.choice.codex",
+            "#client-openai": "client.choice.openai",
+            "#client-skip": "client.choice.skip",
+        }
+        for selector, key in radios.items():
+            try:
+                self.query_one(selector, RadioButton).label = self.t(key)
+            except Exception:
+                continue
+
+        # Buttons that carry a `label_key` attribute (set by _next_button)
+        for btn in self.query(Button):
+            key = getattr(btn, "label_key", None)
+            if key:
+                btn.label = self.t(key)
+        # Button labels not tied to label_key
+        button_labels: dict[str, str] = {
+            "#btn-apply": "review.button",
+            "#btn-quit": "done.button",
+        }
+        for selector, key in button_labels.items():
+            try:
+                self.query_one(selector, Button).label = self.t(key)
+            except Exception:
+                continue
+
+        # Checkboxes that carry a translated label
+        try:
+            self.query_one("#client-write-rc", Checkbox).label = self.t(
+                "client.write_rc", rc=self._rc_display
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#review-start", Checkbox).label = self.t("review.start_proxy")
+        except Exception:
+            pass
+
+        # BYOK provider rows — placeholders are translated, names stay literal
+        for name in KNOWN_PROVIDERS:
+            try:
+                self.query_one(f"#byok-{name}", Input).placeholder = self.t(
+                    "byok.key_placeholder", name=name
+                )
+            except Exception:
+                continue
+
+        # The clear-upstream checkbox label (depends on existing upstream)
+        try:
+            self.query_one("#conn-clear", Checkbox).label = self._clear_upstream_label()
+        except Exception:
+            pass
+
+        # Trigger downstream refreshers — they read self.t() lazily
+        self._update_api_key_placeholder()
+        self._refresh_sidebar()
+        self._refresh_preview()
+        if self.step_index < len(STEPS) and STEPS[self.step_index][0] == "review":
+            self._refresh_problems()
+        if self.applied and self.last_result is not None:
+            self._render_done(self.last_result)
+
     def _update_api_key_placeholder(self) -> None:
         try:
             key_input = self.query_one("#conn-key", Input)
         except Exception:
             return
         choice = self.answers.connection_choice
-        if choice == "commonstack":
-            key_input.placeholder = "ak-…"
-        elif choice == "local":
-            key_input.placeholder = "leave blank if not needed"
+        if choice == "local":
+            key_input.placeholder = self.t("upstream.key_placeholder.local")
         else:
-            key_input.placeholder = "ak-…"
+            key_input.placeholder = self.t("upstream.key_placeholder.commonstack")
 
     def _update_clear_visibility(self) -> None:
         """Show the clear-upstream checkbox only for BYOK + existing upstream."""
@@ -567,7 +682,7 @@ class InitApp(App):
 
     def _refresh_sidebar(self) -> None:
         visible = 0
-        for i, (_, label) in enumerate(STEPS):
+        for i, (_, label_key) in enumerate(STEPS):
             row = self.query_one(f"#step-row-{i}", Static)
             applicable = self._step_applicable(i)
             row.display = applicable
@@ -575,7 +690,7 @@ class InitApp(App):
                 continue
             visible += 1
             row.set_classes("step-row")
-            row.update(f"{visible}. {label}")
+            row.update(f"{visible}. {self.t(label_key)}")
             if i < self.step_index:
                 row.add_class("done")
             elif i == self.step_index:
@@ -654,9 +769,10 @@ class InitApp(App):
     }
 
     def _refresh_preview(self) -> None:
-        plan = build_plan(self.answers, rc_display=self._rc_display)
+        """Render the plan into the Review step's #review-plan Static."""
+        plan = build_plan(self.answers, rc_display=self._rc_display, t=self.t)
         if not plan:
-            text = "[dim](nothing yet)[/dim]"
+            text = f"[dim]{self.t('preview.empty')}[/dim]"
         else:
             lines = []
             for item in plan:
@@ -666,17 +782,12 @@ class InitApp(App):
                     lines.append(f"   [dim]{item.detail}[/dim]")
             text = "\n".join(lines)
         try:
-            self.query_one("#preview-body", Static).update(text)
-        except Exception:
-            pass
-        try:
-            review_plan = self.query_one("#review-plan", Static)
-            review_plan.update(text)
+            self.query_one("#review-plan", Static).update(text)
         except Exception:
             pass
 
     def _refresh_problems(self) -> None:
-        problems = validate(self.answers)
+        problems = validate(self.answers, t=self.t)
         try:
             box = self.query_one("#problems", Static)
         except Exception:
@@ -702,7 +813,7 @@ class InitApp(App):
             self.action_next_step()
 
     def _do_apply(self) -> None:
-        problems = validate(self.answers)
+        problems = validate(self.answers, t=self.t)
         if problems:
             self._refresh_problems()
             return
@@ -724,15 +835,15 @@ class InitApp(App):
         hint = self.query_one("#done-hint", Static)
 
         if result.failures and not result.successes:
-            headline.update("[$error]Setup did not complete.[/]")
+            headline.update(self.t("done.headline.error"))
         elif result.failures:
-            headline.update("[$warning]Setup finished with warnings.[/]")
+            headline.update(self.t("done.headline.warning"))
         else:
-            headline.update("[$success]You're all set.[/]")
+            headline.update(self.t("done.headline.success"))
 
-        lines: list[str] = ["[b]What was configured:[/b]"]
+        lines: list[str] = [self.t("done.summary_header")]
         if not result.successes and not result.failures:
-            lines.append("  [$text-disabled](nothing changed)[/]")
+            lines.append(self.t("done.summary_empty"))
         for ok in result.successes:
             lines.append(f"  [$success]✓[/] {ok}")
         for err in result.failures:
@@ -740,15 +851,9 @@ class InitApp(App):
         summary.update("\n".join(lines))
 
         if not result.failures:
-            hint.update(
-                "Use model ID  [b]uncommon-route/auto[/b]  in your client.\n"
-                "Press the Quit button or Ctrl+Q to exit."
-            )
+            hint.update(self.t("done.hint.success"))
         else:
-            hint.update(
-                "Some steps failed — re-run init or use the matching subcommand "
-                "(`provider`, `setup`, `serve`) to retry."
-            )
+            hint.update(self.t("done.hint.failure"))
 
 
 def run_init_tui(

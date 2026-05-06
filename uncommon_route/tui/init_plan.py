@@ -12,11 +12,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from uncommon_route.connections_store import ConnectionsStore
 from uncommon_route.onboarding import upsert_shell_block
 from uncommon_route.providers import add_provider
+
+
+class Translator(Protocol):
+    def __call__(self, key: str, **fmt: object) -> str: ...
+
+
+def _identity_translator(key: str, **fmt: object) -> str:
+    return key
 
 KNOWN_PROVIDERS: tuple[str, ...] = (
     "openai",
@@ -52,87 +60,115 @@ class PlanItem:
     kind: str = "info"  # write | append | skip | warn | info
 
 
-def build_plan(answers: InitAnswers, *, rc_display: str) -> list[PlanItem]:
+def build_plan(
+    answers: InitAnswers,
+    *,
+    rc_display: str,
+    t: Translator | None = None,
+) -> list[PlanItem]:
+    """Render the plan in the active language. When `t` is None we
+    return raw English (the catalog default), preserving the previous
+    behaviour for code paths that have not been localised yet."""
+    tr: Translator = t or _identity_translator
     items: list[PlanItem] = []
+    missing = tr("value.missing")
 
     if answers.connection_choice == "commonstack":
         items.append(PlanItem(
             target="~/.uncommon-route/connections.json",
-            detail=f"set primary upstream → {answers.upstream_url or '(missing)'}",
+            detail=tr("plan.connections_set", url=answers.upstream_url or missing),
             kind="write",
         ))
     elif answers.connection_choice == "local":
         items.append(PlanItem(
             target="~/.uncommon-route/connections.json",
-            detail=f"set primary upstream → {answers.upstream_url or '(missing)'}",
+            detail=tr("plan.connections_set", url=answers.upstream_url or missing),
             kind="write",
         ))
     elif answers.connection_choice == "byok":
         if answers.clear_primary_for_byok:
             items.append(PlanItem(
                 target="~/.uncommon-route/connections.json",
-                detail="reset primary upstream (BYOK-only)",
+                detail=tr("plan.connections_reset"),
                 kind="write",
             ))
         keys = [(name, key) for name, key in answers.byok_keys.items() if key.strip()]
         if not keys:
-            items.append(PlanItem(target="BYOK providers", detail="no keys entered", kind="warn"))
+            items.append(PlanItem(
+                target=tr("plan.byok_target"),
+                detail=tr("plan.byok_no_keys"),
+                kind="warn",
+            ))
         for name, _ in keys:
             items.append(PlanItem(
                 target="~/.uncommon-route/providers.json",
-                detail=f"add provider → {name}",
+                detail=tr("plan.add_provider", name=name),
                 kind="append",
             ))
     else:
-        items.append(PlanItem(target="connection setup", detail="skipped", kind="skip"))
+        items.append(PlanItem(
+            target=tr("plan.skip_connection"),
+            detail=tr("plan.skip_value"),
+            kind="skip",
+        ))
 
     if answers.client_choice != "skip":
         if answers.write_rc:
             items.append(PlanItem(
                 target=rc_display,
-                detail=f"insert/update shell exports for {answers.client_choice}",
+                detail=tr("plan.client_exports", client=answers.client_choice),
                 kind="append",
             ))
         else:
             items.append(PlanItem(
-                target=f"shell exports ({answers.client_choice})",
-                detail="display only",
+                target=tr("plan.shell_exports", client=answers.client_choice),
+                detail=tr("plan.display_only"),
                 kind="info",
             ))
     else:
-        items.append(PlanItem(target="client integration", detail="skipped", kind="skip"))
+        items.append(PlanItem(
+            target=tr("plan.skip_client"),
+            detail=tr("plan.skip_value"),
+            kind="skip",
+        ))
 
     if answers.start_proxy:
         items.append(PlanItem(
-            target="proxy daemon",
-            detail=f"start on 127.0.0.1:{answers.port}",
+            target=tr("plan.proxy_daemon_target"),
+            detail=tr("plan.proxy_daemon_detail", port=answers.port),
             kind="write",
         ))
 
     return items
 
 
-def validate(answers: InitAnswers, *, step: str = "all") -> list[str]:
+def validate(
+    answers: InitAnswers,
+    *,
+    step: str = "all",
+    t: Translator | None = None,
+) -> list[str]:
     """Return human-readable problems that block advancement.
 
     `step` scopes the checks. "all" runs everything (used by the Review
     step); "upstream"/"byok" only check fields owned by that step so a
     user is not blamed for empty fields they have not seen yet.
     """
+    tr: Translator = t or _identity_translator
     problems: list[str] = []
     if step in ("all", "upstream"):
         if answers.connection_choice == "commonstack":
             if not answers.upstream_url.strip():
-                problems.append("Commonstack URL is required.")
+                problems.append(tr("validate.commonstack_url"))
             if not answers.upstream_api_key.strip():
-                problems.append("Commonstack API key is required.")
+                problems.append(tr("validate.commonstack_key"))
         elif answers.connection_choice == "local":
             if not answers.upstream_url.strip():
-                problems.append("Upstream URL is required.")
+                problems.append(tr("validate.local_url"))
     if step in ("all", "byok"):
         if answers.connection_choice == "byok":
             if not any(v.strip() for v in answers.byok_keys.values()):
-                problems.append("Add at least one BYOK provider key (or pick a different connection).")
+                problems.append(tr("validate.byok_empty"))
     return problems
 
 

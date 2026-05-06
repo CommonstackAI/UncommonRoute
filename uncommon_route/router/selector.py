@@ -59,7 +59,15 @@ _UNKNOWN_MODEL_PRICING = ModelPricing(5.0, 25.0)
 
 def _pricing_for_model(model: str, pricing: dict[str, ModelPricing]) -> ModelPricing:
     """Use conservative pricing for unknown models instead of treating them as free."""
-    return pricing.get(model) or DEFAULT_MODEL_PRICING.get(model) or _UNKNOWN_MODEL_PRICING
+    candidate = pricing.get(model) or DEFAULT_MODEL_PRICING.get(model) or _UNKNOWN_MODEL_PRICING
+    if (
+        candidate.input_price < 0
+        or candidate.output_price < 0
+        or not math.isfinite(candidate.input_price)
+        or not math.isfinite(candidate.output_price)
+    ):
+        return _UNKNOWN_MODEL_PRICING
+    return candidate
 
 
 def _stabilize_agent_step_selection(features: RoutingFeatures) -> bool:

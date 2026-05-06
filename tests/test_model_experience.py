@@ -108,6 +108,24 @@ def test_incomplete_upstream_pricing_is_not_treated_as_free() -> None:
     assert capabilities.free is False
 
 
+def test_negative_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({
+        "prompt": "-1",
+        "completion": "-1",
+        "input_cache_reads": "-1",
+    })
+    capabilities = infer_capabilities(
+        "openrouter/auto",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert pricing.cached_input_price is None
+    assert capabilities.free is False
+
+
 def test_model_experience_updates_from_observation_and_feedback() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
 

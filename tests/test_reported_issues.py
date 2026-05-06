@@ -413,23 +413,36 @@ def test_issue6_anthropic_model_resolution():
     # Gateway mode should keep the full provider/model prefix
 
 
+def test_issue6_openrouter_detected_as_gateway():
+    """OpenRouter should keep provider/model ids when resolving upstream names."""
+    from uncommon_route.model_map import ModelMapper
+
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
+
+    assert mapper.provider == "openrouter"
+    assert mapper.is_gateway
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "xai/grok-4-1-fast-reasoning"
+
+
 def test_issue6_legacy_model_ids_resolve_to_live_successors():
     """Legacy internal ids should map onto current upstream successors."""
     from uncommon_route.model_map import DiscoveredModel, ModelMapper
     from uncommon_route.router.types import ModelCapabilities, ModelPricing
 
     live_models = [
-        "x-ai/grok-4-1-fast-non-reasoning",
-        "x-ai/grok-4.1-fast-reasoning",
+        "x-ai/grok-4",
+        "x-ai/grok-4.1-fast",
         "x-ai/grok-code-fast-1",
         "google/gemini-3.1-pro-preview",
         "openai/gpt-4.1",
         "openai/gpt-5.3-codex",
-        "openai/gpt-5.4-mini-2026-03-17",
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-2026-03-05",
+        "openai/o3",
+        "openai/o4-mini",
     ]
 
-    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
     for model_id in live_models:
         provider = model_id.split("/", 1)[0]
         mapper._pool[model_id] = DiscoveredModel(
@@ -443,17 +456,17 @@ def test_issue6_legacy_model_ids_resolve_to_live_successors():
     mapper._build_map()
     mapper._discovered = True
 
-    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4-1-fast-non-reasoning"
-    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast-reasoning"
-    assert mapper.resolve("xai/grok-4-1-fast-non-reasoning") == "x-ai/grok-4-1-fast-non-reasoning"
+    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4"
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast"
+    assert mapper.resolve("xai/grok-4-1-fast-non-reasoning") == "x-ai/grok-4.1-fast"
     assert mapper.resolve("xai/grok-code-fast-1") == "x-ai/grok-code-fast-1"
     assert mapper.resolve("google/gemini-3-pro-preview") == "google/gemini-3.1-pro-preview"
     assert mapper.resolve("google/gemini-3.1-pro") == "google/gemini-3.1-pro-preview"
     assert mapper.resolve("openai/gpt-4o") == "openai/gpt-4.1"
     assert mapper.resolve("openai/gpt-5.2-codex") == "openai/gpt-5.3-codex"
-    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini-2026-03-17"
-    assert mapper.resolve("openai/o3") == "openai/gpt-5.4-2026-03-05"
-    assert mapper.resolve("openai/o4-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini"
+    assert mapper.resolve("openai/o3") == "openai/o3"
+    assert mapper.resolve("openai/o4-mini") == "openai/o4-mini"
     assert not any(
         model in mapper.unresolved_models()
         for model in (

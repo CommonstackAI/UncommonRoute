@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ logger = logging.getLogger("uncommon-route")
 
 GATEWAY_DOMAINS: dict[str, str] = {
     "commonstack.ai": "commonstack",
+    "openrouter.ai": "openrouter",
 }
 
 DIRECT_PROVIDER_DOMAINS: dict[str, str] = {
@@ -90,14 +92,19 @@ SEED_ALIASES: dict[str, list[str]] = {
         "google/gemini-3.1-pro-preview",
     ],
     "xai/grok-4-0709": [
+        "x-ai/grok-4",
         "x-ai/grok-4-1-fast-non-reasoning",
     ],
     "xai/grok-4-1-fast-reasoning": [
         "x-ai/grok-4.1-fast-reasoning",
         "x-ai/grok-4-1-fast-reasoning",
+        "x-ai/grok-4.1-fast",
+        "x-ai/grok-4-fast",
     ],
     "xai/grok-4-1-fast-non-reasoning": [
         "x-ai/grok-4-1-fast-non-reasoning",
+        "x-ai/grok-4.1-fast",
+        "x-ai/grok-4-fast",
     ],
     "xai/grok-code-fast-1": [
         "x-ai/grok-code-fast-1",
@@ -109,6 +116,7 @@ SEED_ALIASES: dict[str, list[str]] = {
         "openai/gpt-5.3-codex",
     ],
     "openai/o1-mini": [
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-mini-2026-03-17",
     ],
     "openai/o3": [
@@ -116,6 +124,7 @@ SEED_ALIASES: dict[str, list[str]] = {
         "openai/gpt-5",
     ],
     "openai/o4-mini": [
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-mini-2026-03-17",
     ],
 }
@@ -135,15 +144,33 @@ def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
     if "prompt" not in raw or "completion" not in raw:
         return ModelPricing(5.0, 25.0)
     try:
-        input_price = float(raw.get("prompt", 0)) * 1_000_000
-        output_price = float(raw.get("completion", 0)) * 1_000_000
+        prompt_price = float(raw.get("prompt", 0))
+        completion_price = float(raw.get("completion", 0))
+        if (
+            not math.isfinite(prompt_price)
+            or not math.isfinite(completion_price)
+            or prompt_price < 0
+            or completion_price < 0
+        ):
+            return ModelPricing(5.0, 25.0)
+        input_price = prompt_price * 1_000_000
+        output_price = completion_price * 1_000_000
         cached_input = raw.get("input_cache_reads")
         cache_write = raw.get("input_cache_writes")
+
+        def optional_price(value: object) -> float | None:
+            if value in (None, ""):
+                return None
+            parsed = float(value)
+            if not math.isfinite(parsed) or parsed < 0:
+                return None
+            return round(parsed * 1_000_000, 4)
+
         return ModelPricing(
             input_price=round(input_price, 4),
             output_price=round(output_price, 4),
-            cached_input_price=round(float(cached_input) * 1_000_000, 4) if cached_input else None,
-            cache_write_price=round(float(cache_write) * 1_000_000, 4) if cache_write else None,
+            cached_input_price=optional_price(cached_input),
+            cache_write_price=optional_price(cache_write),
         )
     except (ValueError, TypeError):
         return ModelPricing(5.0, 25.0)

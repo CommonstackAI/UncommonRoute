@@ -2345,6 +2345,64 @@ def _supports_anthropic_thinking_payload(model: str) -> bool:
     return False
 
 
+def _merge_available_models(
+    available_models: list[str],
+    extra_models: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for model in [*available_models, *(extra_models or ())]:
+        model_id = str(model or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        merged.append(model_id)
+    return merged
+
+
+def _latest_successful_session_model(
+    *,
+    session_id: str | None,
+    trace_store: TraceStore,
+    step_types: tuple[str, ...] = ("tool-selection", "tool-result-followup", "general"),
+) -> str | None:
+    previous_trace = trace_store.latest_for_session(
+        session_id,
+        step_types=step_types,
+    ) if session_id else None
+    if (
+        previous_trace is None
+        or previous_trace.status_code >= 400
+    ):
+        return None
+    previous_model = str(previous_trace.model or "").strip()
+    if not previous_model or _is_virtual_model_name(previous_model):
+        return None
+    return previous_model
+
+
+def _raise_anthropic_thinking_affinity_error(
+    *,
+    previous_model: str,
+    reason: str,
+    available_models: list[str],
+) -> None:
+    raise RoutingInfeasibleError(
+        RoutingInfeasibility(
+            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
+            message=(
+                "Anthropic thinking blocks require the same model that created "
+                f"the prior signed thinking context ({previous_model}); {reason}."
+            ),
+            available_model_count=len(available_models),
+            candidate_count=0,
+            constraint_tags=("anthropic-thinking-context",),
+            failed_constraints=("anthropic-thinking-model-affinity",),
+            missing_capabilities=("signed-thinking-continuity",),
+        )
+    )
+
+
 def _filter_anthropic_thinking_context(
     *,
     available_models: list[str],
@@ -2358,10 +2416,8 @@ def _filter_anthropic_thinking_context(
         return [], ""
     if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
         return list(available_models), ""
-    if not (
-        _anthropic_thinking_enabled(source_body)
-        or _contains_anthropic_thinking_blocks(source_body)
-    ):
+    thinking_blocks_present = _contains_anthropic_thinking_blocks(source_body)
+    if not (_anthropic_thinking_enabled(source_body) or thinking_blocks_present):
         return list(available_models), ""
 
     previous_note = ""
@@ -2377,6 +2433,20 @@ def _filter_anthropic_thinking_context(
     ):
         previous_model = str(previous_trace.model or "").strip()
         if previous_model:
+            if thinking_blocks_present:
+                if previous_model not in available_models:
+                    _raise_anthropic_thinking_affinity_error(
+                        previous_model=previous_model,
+                        reason="that model is not available in the current route pool",
+                        available_models=available_models,
+                    )
+                if not _supports_anthropic_thinking_payload(previous_model):
+                    _raise_anthropic_thinking_affinity_error(
+                        previous_model=previous_model,
+                        reason="that model is not compatible with Anthropic thinking payloads",
+                        available_models=available_models,
+                    )
+                return [previous_model], f"thinking-context=locked-to-previous={previous_model}"
             if previous_model in available_models:
                 previous_note = f";previous={previous_model}"
             else:
@@ -2393,6 +2463,40 @@ def _filter_anthropic_thinking_context(
         f"thinking-context=compatible-pool({len(compatible_models)}/{len(available_models)})"
         f"{previous_note}"
     )
+
+
+def _should_use_session_sticky_model(features: RoutingFeatures) -> bool:
+    if not features.session_present:
+        return False
+    if features.step_type in {"tool-selection", "tool-result-followup"}:
+        return True
+    if features.has_tool_results:
+        return True
+    if features.agent_step_count >= 2:
+        return True
+    return bool(features.is_agentic and (features.needs_tool_calling or features.is_coding))
+
+
+def _filter_session_sticky_context(
+    *,
+    available_models: list[str],
+    session_id: str | None,
+    routing_features: RoutingFeatures,
+    trace_store: TraceStore,
+) -> tuple[list[str], str]:
+    if len(available_models) <= 1:
+        return list(available_models), ""
+    if not _should_use_session_sticky_model(routing_features):
+        return list(available_models), ""
+    previous_model = _latest_successful_session_model(
+        session_id=session_id,
+        trace_store=trace_store,
+    )
+    if not previous_model:
+        return list(available_models), ""
+    if previous_model in available_models:
+        return [previous_model], f"session-sticky=previous-model={previous_model}"
+    return list(available_models), f"session-sticky=previous-unavailable={previous_model}"
 
 
 def _reuse_anthropic_source_body(
@@ -3170,9 +3274,10 @@ def create_app(
         )
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
-        available_models = _circuit_breaker.filter_available(
-            _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
-        )
+        base_available_models = _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+        if user_keyed:
+            base_available_models = _merge_available_models(base_available_models, sorted(user_keyed))
+        available_models = _circuit_breaker.filter_available(base_available_models)
         available_models, transport_pool_note = _filter_transport_compatible_models(
             available_models=available_models,
             api_format="openai",
@@ -4214,9 +4319,10 @@ def create_app(
             user_keyed = _providers.keyed_models() or None
             route_pool_notes: list[str] = []
             try:
-                route_available_models = _circuit_breaker.filter_available(
-                    _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
-                )
+                base_available_models = _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+                if user_keyed:
+                    base_available_models = _merge_available_models(base_available_models, sorted(user_keyed))
+                route_available_models = _circuit_breaker.filter_available(base_available_models)
                 if _active_scene and not _active_scene.hard_pin:
                     scene_pool = _active_scene.model_pool()
                     available_scene_models = [m for m in scene_pool if m in route_available_models]
@@ -4245,6 +4351,14 @@ def create_app(
                 )
                 if thinking_lock_note:
                     route_pool_notes.append(thinking_lock_note)
+                route_available_models, session_sticky_note = _filter_session_sticky_context(
+                    available_models=route_available_models,
+                    session_id=session_id,
+                    routing_features=routing_features,
+                    trace_store=_traces,
+                )
+                if session_sticky_note:
+                    route_pool_notes.append(session_sticky_note)
 
                 if _active_scene and _active_scene.hard_pin:
                     from uncommon_route.router.types import (
@@ -4751,7 +4865,7 @@ def create_app(
             resolved_model = model_name
             if not attempt_provider_entry:
                 resolved_model = _mapper.resolve(model_name)
-                attempt_upstream_body["model"] = resolved_model
+            attempt_upstream_body["model"] = resolved_model
 
             attempt_has_tools = bool(
                 attempt_upstream_body.get("tools")

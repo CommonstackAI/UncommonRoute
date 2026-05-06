@@ -1,8 +1,7 @@
 """Session identity utilities.
 
-Provides ``derive_session_id`` for cache key generation and
-composition checkpoint tracking.  Routing no longer uses sticky
-sessions — every request is routed independently by the pool scorer.
+Provides ``derive_session_id`` for cache key generation, composition
+checkpoint tracking, and routing continuity for agent/tool sessions.
 """
 
 from __future__ import annotations
@@ -16,7 +15,8 @@ from typing import Any
 def derive_session_id(messages: list[dict[str, Any]]) -> str | None:
     """Derive a session ID from the first user message (SHA-256 prefix).
 
-    Used for cache key grouping and composition checkpoints, not routing.
+    Used for cache key grouping, composition checkpoints, and agent/tool
+    session continuity.
 
     Skips boilerplate user messages whose content is identical across
     sessions for the same workspace — notably Codex CLI's

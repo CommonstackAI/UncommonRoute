@@ -13,7 +13,9 @@ from starlette.testclient import TestClient
 from uncommon_route.artifacts import ArtifactStore
 from uncommon_route.composition import CompositionPolicy
 from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
+from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.model_experience import InMemoryModelExperienceStorage, ModelExperienceStore
+from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import (
     _extract_current_message,
     _extract_prompt,
@@ -25,10 +27,12 @@ from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, Ro
 import uncommon_route.scene_store as scene_store_module
 from uncommon_route.semantic import SemanticCallResult, SideChannelConfig, SideChannelTaskConfig
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
-from uncommon_route.traces import InMemoryTraceStorage, TraceStore
+from uncommon_route.traces import InMemoryTraceStorage, RequestTrace, TraceStore
 from uncommon_route.router.types import (
     CapabilityLane,
     FallbackOption,
+    ModelCapabilities,
+    ModelPricing,
     RoutingDecision,
     RoutingMode,
     ServedQuality,
@@ -55,6 +59,22 @@ class QualityFallbackSemanticCompressor(FakeSemanticCompressor):
             estimated_cost=0.001,
             quality_fallbacks=3,
         )
+
+
+def _build_test_mapper(*model_ids: str) -> ModelMapper:
+    mapper = ModelMapper("https://api.example.test/v1")
+    for model_id in model_ids:
+        provider = model_id.split("/", 1)[0] if "/" in model_id else "unknown"
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(1.0, 5.0),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._discovered = True
+    return mapper
 
 
 class TestPromptExtraction:
@@ -874,6 +894,191 @@ class TestFallbackAttribution:
             assert trace["fallback_reason"]
             assert trace["attempts_payload"][0]["selected_model"] == "primary/model"
             assert trace["attempts_payload"][1]["selected_model"] == "fallback/model"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
+class TestRoutingContinuity:
+    def test_agent_tool_session_locks_route_pool_to_previous_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-opus-4-5",
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.BALANCED,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.9,
+                method="pool",
+                reasoning="sticky session route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_session_sticky",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "anthropic/claude-opus-4-5",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="anthropic/claude-opus-4-5",
+            status_code=200,
+            api_format="openai",
+            endpoint="chat_completions",
+            is_virtual=True,
+            session_id="agent-session",
+            step_type="tool-selection",
+            transport="openai-chat",
+            served_quality="premium",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                model_mapper=_build_test_mapper(
+                    "anthropic/claude-opus-4-5",
+                    "anthropic/claude-sonnet-4-6",
+                ),
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [{"role": "user", "content": "Continue the coding task."}],
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "read_file", "parameters": {"type": "object"}},
+                    }],
+                },
+                headers={"x-session-id": "agent-session"},
+            )
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == ["anthropic/claude-opus-4-5"]
+            assert captured["body"]["model"] == "anthropic/claude-opus-4-5"
+            trace = traces.find(resp.headers["x-uncommon-route-request-id"])
+            assert trace is not None
+            assert "session-sticky=previous-model=anthropic/claude-opus-4-5" in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_byok_custom_models_are_injected_into_virtual_route_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="custom/private-model",
+                tier=Tier.SIMPLE,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.ECONOMY,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="byok-preferred (custom/private-model) | pool",
+                reasoning="custom BYOK route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_byok_custom",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "custom/private-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        providers = ProvidersConfig(providers={
+            "custom": ProviderEntry(
+                name="custom",
+                api_key="sk-custom",
+                base_url="https://custom.example/v1",
+                models=["custom/private-model"],
+            ),
+        })
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                providers_config=providers,
+                model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == [
+                "openai/gpt-4o-mini",
+                "custom/private-model",
+            ]
+            assert captured["url"] == "https://custom.example/v1/chat/completions"
+            assert captured["headers"]["authorization"] == "Bearer sk-custom"
+            assert captured["body"]["model"] == "custom/private-model"
         finally:
             asyncio.run(async_client.aclose())
 

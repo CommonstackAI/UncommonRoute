@@ -244,7 +244,7 @@ def cmd_provider(args: list[str]) -> None:
 
     elif sub == "add":
         if len(args) < 3:
-            print("Usage: uncommon-route provider add <name> <api_key> [--plan <plan>]", file=sys.stderr)
+            print("Usage: uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>] [--models <model1,model2>]", file=sys.stderr)
             print(f"  Known providers: {', '.join(KNOWN_BASE_URLS.keys())}", file=sys.stderr)
             sys.exit(1)
         name = args[1]
@@ -259,9 +259,18 @@ def cmd_provider(args: list[str]) -> None:
             idx = args.index("--url")
             if idx + 1 < len(args):
                 base_url = args[idx + 1]
+        models = None
+        if "--models" in args:
+            idx = args.index("--models")
+            if idx + 1 < len(args):
+                models = [
+                    item.strip()
+                    for item in args[idx + 1].split(",")
+                    if item.strip()
+                ]
 
-        add_provider(name, api_key, base_url=base_url, plan=plan)
-        models = PROVIDER_MODELS.get(name, [])
+        cfg = add_provider(name, api_key, base_url=base_url, models=models, plan=plan)
+        models = cfg.providers[name].models
         print(f"  Added provider: {name}")
         if models:
             print(f"  Models: {', '.join(models)}")

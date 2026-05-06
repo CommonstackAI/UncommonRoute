@@ -46,6 +46,18 @@ class TestProviderConfig:
         cfg = add_provider("openai", "sk-openai", base_url="https://my-proxy.com/v1")
         assert cfg.providers["openai"].base_url == "https://my-proxy.com/v1"
 
+    def test_add_provider_custom_models(self) -> None:
+        cfg = add_provider(
+            "custom",
+            "sk-custom",
+            base_url="https://custom.example/v1",
+            models=["custom/private-model", "custom/fast-model"],
+        )
+        assert cfg.providers["custom"].models == [
+            "custom/private-model",
+            "custom/fast-model",
+        ]
+
     def test_remove_provider(self) -> None:
         add_provider("deepseek", "sk-key")
         assert remove_provider("deepseek") is True
@@ -157,3 +169,32 @@ class TestCLI:
             capture_output=True, text=True,
         )
         assert "provider" in r.stdout
+
+    def test_provider_add_cli_accepts_custom_models(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from uncommon_route.providers import cmd_provider
+
+        monkeypatch.setattr(
+            "uncommon_route.providers.verify_key",
+            lambda _base_url, _api_key: (True, "ok"),
+        )
+
+        cmd_provider([
+            "add",
+            "custom",
+            "sk-custom",
+            "--url",
+            "https://custom.example/v1",
+            "--models",
+            "custom/private-model, custom/fast-model",
+        ])
+
+        cfg = load_providers()
+        assert cfg.providers["custom"].models == [
+            "custom/private-model",
+            "custom/fast-model",
+        ]
+        assert "custom/private-model, custom/fast-model" in capsys.readouterr().out

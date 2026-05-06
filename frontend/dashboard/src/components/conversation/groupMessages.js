@@ -1,0 +1,43 @@
+// Hand-mirrored from groupMessages.ts so node --test can import it
+// without a compile step. Keep the two in sync — the .ts is the source
+// of truth for the React build; this .js is the source of truth for tests.
+
+export function group(input) {
+  const out = [];
+  let buffer = [];
+  let capturedAsstCount = 0;
+  const pending = [...input.compact_breaks].sort((a, b) => a - b);
+
+  const flushBuffer = () => {
+    if (buffer.length > 0) {
+      out.push({ type: "tool_group", steps: buffer });
+      buffer = [];
+    }
+  };
+
+  for (const m of input.messages) {
+    const isAsstToolOnly =
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.length > 0 &&
+      (m.text === "" || m.text == null);
+
+    if (isAsstToolOnly) {
+      buffer.push({ assistant: m, results: [] });
+    } else if (m.role === "tool_result" && buffer.length > 0) {
+      buffer[buffer.length - 1].results.push(m);
+    } else {
+      flushBuffer();
+      out.push({ type: "message", message: m });
+    }
+
+    if (m.role === "assistant" && m.decision != null) {
+      capturedAsstCount += 1;
+      while (pending.length > 0 && pending[0] <= capturedAsstCount) {
+        out.push({ type: "compact_break", atTurnIndex: pending.shift() });
+      }
+    }
+  }
+  flushBuffer();
+  return out;
+}

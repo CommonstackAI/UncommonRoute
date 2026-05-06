@@ -342,6 +342,7 @@ export async function resetRoutingConfig(): Promise<RoutingConfigState | null> {
 
 export interface RecentRequest {
   request_id: string;
+  turn_id: string;
   timestamp: number;
   mode: string;
   model: string;
@@ -521,3 +522,51 @@ export async function fetchRoutePreview(prompt: string, riskTolerance: number = 
     return res.json();
   } catch { return null; }
 }
+
+// === conversation view (PR 2) ===
+
+export interface DecisionCard {
+  model: string;
+  decision_tier: string;
+  served_quality: string;
+  capability_lane: string;
+  raw_confidence: number;
+  latency_us: number;
+  estimated_cost: number;
+  route_reasoning: string;
+  feature_tags: string[];
+  constraint_tags: string[];
+  hint_tags: string[];
+  transport: string;
+  transport_reason: string;
+  attempts_payload: TraceAttempt[];
+  fallback_reason: string;
+}
+
+export interface ConversationToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown> | string;
+}
+
+export interface ConversationMessage {
+  role: "user" | "assistant" | "tool_result";
+  text: string;
+  tool_calls?: ConversationToolCall[];
+  tool_use_id?: string;
+  ts?: number | null;
+  request_id?: string | null;
+  from_request_id?: string;
+  decision?: DecisionCard | null;
+}
+
+export interface Conversation {
+  session_id: string;
+  turn_count: number;
+  content_available: boolean;
+  compact_breaks: number[];
+  messages: ConversationMessage[];
+}
+
+export const fetchConversation = (sessionId: string) =>
+  get<Conversation>(`/v1/sessions/${encodeURIComponent(sessionId)}/conversation`);

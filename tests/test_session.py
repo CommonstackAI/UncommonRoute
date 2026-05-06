@@ -23,3 +23,57 @@ class TestDeriveSessionId:
     def test_deterministic(self) -> None:
         messages = [{"role": "user", "content": "test prompt"}]
         assert derive_session_id(messages) == derive_session_id(messages)
+
+
+class TestDeriveSessionIdRegression:
+    """Lock the legacy derivation byte-identical so anyone using session_id as a
+    cache key sees no behavior change."""
+
+    def test_specific_known_input_known_output(self) -> None:
+        # SHA-256("hello").hexdigest()[:8] == "2cf24dba"
+        # If you change derive_session_id, this test must be updated only with
+        # a deliberate decision documented in the changelog.
+        messages = [{"role": "user", "content": "hello"}]
+        assert derive_session_id(messages) == "2cf24dba"
+
+
+class TestDeriveSessionIdSkipsEnvironmentContext:
+    """Codex CLI injects an `<environment_context>` user message that is
+    identical across sessions in the same workspace. derive_session_id must
+    skip it so each conversation gets a distinct session id anchored to the
+    user's actual first prompt."""
+
+    def _env_context_msg(self, cwd: str = "/tmp/proj") -> dict[str, str]:
+        return {
+            "role": "user",
+            "content": (
+                "<environment_context>\n"
+                f"  <cwd>{cwd}</cwd>\n"
+                "  <shell>zsh</shell>\n"
+                "  <current_date>2026-05-06</current_date>\n"
+                "  <timezone>Asia/Shanghai</timezone>\n"
+                "</environment_context>"
+            ),
+        }
+
+    def test_skips_environment_context_user_message(self) -> None:
+        messages = [
+            {"role": "system", "content": "codex prompt"},
+            self._env_context_msg(),
+            {"role": "user", "content": "hello"},
+        ]
+        # Should anchor on "hello", not the env_context block.
+        assert derive_session_id(messages) == "2cf24dba"
+
+    def test_two_codex_sessions_with_different_prompts_have_distinct_ids(self) -> None:
+        env = self._env_context_msg()
+        a = [env, {"role": "user", "content": "first task"}]
+        b = [env, {"role": "user", "content": "second task"}]
+        assert derive_session_id(a) != derive_session_id(b)
+
+    def test_returns_none_when_only_env_context_user_message(self) -> None:
+        messages = [
+            {"role": "system", "content": "codex prompt"},
+            self._env_context_msg(),
+        ]
+        assert derive_session_id(messages) is None

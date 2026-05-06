@@ -100,6 +100,11 @@ class TestCLI:
         assert "Usage: uncommon-route serve" in r.stdout
         assert "Start the local proxy server." in r.stdout
 
+    def test_subcommand_help_allows_prior_flags(self) -> None:
+        r = run_cli(["init", "--lang", "zh", "--help"])
+        assert r.returncode == 0
+        assert "Usage: uncommon-route init" in r.stdout
+
     def test_route_text(self) -> None:
         r = run_cli(["route", "what is 2+2"])
         assert r.returncode == 0
@@ -184,7 +189,7 @@ class TestCLI:
             "UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route"),
             "SHELL": "/bin/zsh",
         }
-        init = run_cli(["init"], env=env, input_text="3\n1\nsk-test\nn\n4\nn\n")
+        init = run_cli(["init"], env=env, input_text="1\n3\n1\nsk-test\nn\n4\nn\n")
         assert init.returncode == 0
 
         doctor = run_cli(["doctor"], env=env)
@@ -217,11 +222,11 @@ class TestCLI:
         r = run_cli(
             ["init"],
             env=env,
-            input_text="1\n\ncsk-test-key\n2\ny\nn\n",
+            input_text="1\n1\n\ncsk-test-key\n2\ny\nn\n",
         )
 
         assert r.returncode == 0
-        assert "Setup summary" in r.stdout
+        assert "Primary connection saved for Commonstack." in r.stdout
 
         connections_path = tmp_path / ".uncommon-route" / "connections.json"
         payload = json.loads(connections_path.read_text())
@@ -242,7 +247,7 @@ class TestCLI:
         r = run_cli(
             ["init"],
             env=env,
-            input_text="1\n\ncsk-test-key\n1\ny\nn\n",
+            input_text="1\n1\n\ncsk-test-key\n1\ny\nn\n",
         )
 
         assert r.returncode == 0
@@ -263,7 +268,7 @@ class TestCLI:
         r = run_cli(
             ["init"],
             env=env,
-            input_text="3\n1\nsk-openai\nn\n4\nn\n",
+            input_text="1\n3\n1\nsk-openai\nn\n4\nn\n",
         )
 
         assert r.returncode == 0
@@ -273,7 +278,7 @@ class TestCLI:
 
     def test_support_bundle_exports_recent_traces(self, tmp_path: Path) -> None:
         data_dir = tmp_path / ".uncommon-route"
-        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces = TraceStore(storage=FileTraceStorage(base_dir=data_dir / "traces"), hot_days=99)
         traces.record(RequestTrace(
             timestamp=time.time(),
             request_id="reqsupport01",
@@ -334,7 +339,7 @@ class TestCLI:
 
     def test_support_request_prints_trace(self, tmp_path: Path) -> None:
         data_dir = tmp_path / ".uncommon-route"
-        traces = TraceStore(storage=FileTraceStorage(path=data_dir / "traces.json"))
+        traces = TraceStore(storage=FileTraceStorage(base_dir=data_dir / "traces"), hot_days=99)
         traces.record(RequestTrace(
             timestamp=time.time(),
             request_id="reqlookup001",

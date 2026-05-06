@@ -112,6 +112,55 @@ body {
   animation: fadeIn 300ms ease-out;
 }
 
+/* New traffic row entry: row opens vertically (pushes rows below down),
+   then content slides in horizontally from the left. */
+@keyframes rowExpandSlide {
+  0% {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    transform: translateX(-40px);
+  }
+  35% {
+    max-height: 80px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    opacity: 0;
+    transform: translateX(-40px);
+  }
+  100% {
+    max-height: 80px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.animate-rowEnter {
+  overflow: hidden;
+  animation: rowExpandSlide 520ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Dot white flash on new entry — delayed so it fires once the row is in view */
+@keyframes dotFlash {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.85); background-color: #fff; transform: scale(1.4); }
+  40%  { box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.15); background-color: #fff; transform: scale(1.1); }
+  100% { box-shadow: 0 0 0 14px rgba(255, 255, 255, 0); transform: scale(1); }
+}
+.animate-dotFlash {
+  animation: dotFlash 700ms ease-out 350ms backwards;
+}
+
+/* Pending request indicator (blue, soft pulse) */
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.85); }
+}
+.animate-dotPulse {
+  animation: dotPulse 1s ease-in-out infinite;
+}
+
 /* Hover brightening for data rows */
 .row-hover {
   transition: background-color 150ms ease-out;
@@ -119,3 +168,40 @@ body {
 .row-hover:hover {
   background-color: var(--surface);
 }
+
+/* ─── Prism syntax highlighting (OLED theme) ─── */
+.code-hl .token.comment,
+.code-hl .token.prolog,
+.code-hl .token.doctype,
+.code-hl .token.cdata { color: #6a6a6a; font-style: italic; }
+.code-hl .token.punctuation { color: #b0b0b0; }
+.code-hl .token.namespace { opacity: 0.7; }
+.code-hl .token.property,
+.code-hl .token.tag,
+.code-hl .token.constant,
+.code-hl .token.symbol,
+.code-hl .token.deleted { color: #f08080; }
+.code-hl .token.boolean,
+.code-hl .token.number { color: #c39bff; }
+.code-hl .token.selector,
+.code-hl .token.attr-name,
+.code-hl .token.string,
+.code-hl .token.char,
+.code-hl .token.builtin,
+.code-hl .token.inserted { color: #98c379; }
+.code-hl .token.operator,
+.code-hl .token.entity,
+.code-hl .token.url,
+.code-hl .language-css .token.string,
+.code-hl .style .token.string { color: #d4a843; }
+.code-hl .token.atrule,
+.code-hl .token.attr-value,
+.code-hl .token.keyword { color: #5b9bf6; }
+.code-hl .token.function,
+.code-hl .token.class-name { color: #61dafb; }
+.code-hl .token.regex,
+.code-hl .token.important,
+.code-hl .token.variable { color: #d4a843; }
+.code-hl .token.important,
+.code-hl .token.bold { font-weight: 600; }
+.code-hl .token.italic { font-style: italic; }

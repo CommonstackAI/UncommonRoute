@@ -20,7 +20,7 @@ const NAV: NavEntry[] = [
   { kind: "divider", label: "MONITOR" },
   { kind: "item", id: "home", label: "HOME" },
   { kind: "item", id: "playground", label: "PLAYGROUND" },
-  { kind: "item", id: "explain", label: "EXPLAIN" },
+  { kind: "item", id: "explain_new", label: "EXPLAIN" },
   { kind: "item", id: "activity", label: "ACTIVITY" },
   { kind: "divider", label: "CONFIGURE" },
   { kind: "item", id: "routing", label: "ROUTING" },

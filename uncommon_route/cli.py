@@ -153,7 +153,7 @@ Examples:
 
 
 def _print_init_help() -> None:
-    print("""Usage: uncommon-route init [--port <n>]
+    print("""Usage: uncommon-route init [--port <n>] [--tui]
 
 Interactive first-run setup.
 
@@ -164,8 +164,12 @@ What it can do:
   - Configure Claude Code / Codex / OpenAI SDK shell exports
   - Optionally start the proxy in background
 
+Flags:
+  --tui          Launch the Textual UI (requires `pip install 'uncommon-route[tui]'`)
+
 Examples:
   uncommon-route init
+  uncommon-route init --tui
   uncommon-route init --port 8404
 """)
 
@@ -816,8 +820,31 @@ def _cmd_logs(args: list[str]) -> None:
 def _cmd_init(args: list[str]) -> None:
     from uncommon_route.providers import KNOWN_BASE_URLS, add_provider, load_providers
 
-    flags, _ = _parse_flags(args, {"port": True})
+    flags, _ = _parse_flags(args, {"port": True, "tui": False})
     port = int(flags.get("port", 8403))
+
+    if flags.get("tui") or os.environ.get("UNCOMMON_ROUTE_TUI") == "1":
+        try:
+            from uncommon_route.tui.init_app import run_init_tui
+        except ImportError:
+            print("  ! Textual is not installed. Install the optional extra:", file=sys.stderr)
+            print("      pip install 'uncommon-route[tui]'", file=sys.stderr)
+            sys.exit(1)
+
+        rc_display, rc_path = _detect_rc_path()
+
+        def _render(client: str, port: int) -> list[str]:
+            return _render_client_exports(client, port=port)
+
+        run_init_tui(
+            rc_path=rc_path,
+            rc_display=rc_display,
+            render_exports=_render,
+            start_background_proxy=_start_background_proxy,
+            port=port,
+        )
+        return
+
     prompter = TerminalPrompter()
     store = ConnectionsStore()
 

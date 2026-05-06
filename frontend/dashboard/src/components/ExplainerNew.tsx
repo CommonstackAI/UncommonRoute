@@ -93,8 +93,10 @@ export default function ExplainerNew() {
                 <button
                   key={session.id}
                   onClick={() => setSelectedId(session.id)}
-                  className={`row-hover w-full border-b border-n-border px-5 py-4 text-left ${
-                    active ? "bg-n-raised" : "hover:bg-n-raised"
+                  className={`row-hover w-full border-b border-l-2 border-n-border px-5 py-4 text-left ${
+                    active
+                      ? "border-l-n-primary bg-n-raised"
+                      : "border-l-transparent hover:bg-n-raised"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-3">

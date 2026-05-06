@@ -279,7 +279,7 @@ def _print_generic_subcommand_help(cmd: str) -> None:
 
 
 def _wants_help(args: list[str]) -> bool:
-    return bool(args) and args[0] in {"-h", "--help"}
+    return any(arg in {"-h", "--help"} for arg in args)
 
 
 def _detect_rc_path() -> tuple[str, Path]:
@@ -1821,20 +1821,19 @@ def _cmd_explain(args: list[str]) -> None:
         print("Usage: uncommon-route explain <prompt>")
         print('Example: uncommon-route explain "Design a distributed rate limiter"')
         return
-    from uncommon_route.router.api import _v2_classify, _TIER_ID_TO_COMPLEXITY
+    from uncommon_route.router.api import _v2_classify
     from uncommon_route.v2_tiers import ID_TO_TIER
     v2 = _v2_classify(prompt, None, None, None, None)
     print(f"\n  Tier: {ID_TO_TIER.get(v2.tier_id, '?')} (id={v2.tier_id})")
     print(f"  Confidence: {v2.confidence:.1%}")
     print(f"  Method: {v2.method}")
-    cost = _TIER_ID_TO_COMPLEXITY.get(v2.tier_id, 0.02)
     print(f"  Complexity: {v2.complexity:.2f}")
     signals = [
         ("metadata", v2.vote_a.tier_id, v2.vote_a.confidence, False),
         ("structural", v2.vote_b.tier_id, v2.vote_b.confidence, True),
         ("embedding", v2.vote_c.tier_id, v2.vote_c.confidence, False),
     ]
-    print(f"\n  Signals:")
+    print("\n  Signals:")
     for name, tier, conf, shadow in signals:
         shadow_tag = " [shadow]" if shadow else ""
         tier_str = str(tier) if tier is not None else "abstain"

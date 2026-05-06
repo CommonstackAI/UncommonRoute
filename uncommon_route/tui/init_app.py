@@ -35,7 +35,6 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
-    Label,
     RadioButton,
     RadioSet,
     Static,
@@ -54,8 +53,6 @@ from uncommon_route.tui.i18n import (
     t as translate,
 )
 from uncommon_route.tui.init_plan import (
-    CLIENT_CHOICES,
-    CONNECTION_CHOICES,
     KNOWN_PROVIDERS,
     ApplyResult,
     InitAnswers,

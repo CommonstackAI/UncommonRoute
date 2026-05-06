@@ -1507,7 +1507,7 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_use_compatible_pool_without_locking_previous_model(
+    def test_virtual_messages_with_thinking_blocks_lock_to_previous_model(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1627,15 +1627,12 @@ class TestTransportRouting:
             )
 
             assert resp.status_code == 200
-            assert set(routed["available_models"]) == {
-                "minimax/minimax-m2.7",
-                "anthropic/claude-opus-4-5",
-            }
+            assert routed["available_models"] == ["minimax/minimax-m2.7"]
             assert captured["url"] == "https://api.commonstack.ai/v1/messages"
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-context=compatible-pool;previous=minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert "thinking-context=locked-to-previous=minimax/minimax-m2.7" in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 
@@ -1725,7 +1722,7 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_continue_when_previous_model_unavailable(
+    def test_virtual_messages_with_thinking_blocks_fail_closed_when_previous_model_unavailable(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1841,14 +1838,10 @@ class TestTransportRouting:
                 },
             )
 
-            assert resp.status_code == 200
-            assert routed["available_models"] == ["anthropic/claude-opus-4-5"]
-            assert called["route"] is True
-            assert called["upstream"] is True
-            request_id = resp.headers["x-uncommon-route-request-id"]
-            trace = traces.find(request_id)
-            assert trace is not None
-            assert "thinking-context=compatible-pool;previous-unavailable=minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert resp.status_code == 400
+            assert called["route"] is False
+            assert called["upstream"] is False
+            assert "signed thinking context" in resp.text
         finally:
             asyncio.run(async_client.aclose())
 

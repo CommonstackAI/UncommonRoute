@@ -254,7 +254,7 @@ Diagnostics helpers:
 def _print_provider_help() -> None:
     print("""Usage:
   uncommon-route provider list
-  uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>]
+  uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>] [--models <model1,model2>]
   uncommon-route provider remove <name>
   uncommon-route provider models
 

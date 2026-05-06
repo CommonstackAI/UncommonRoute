@@ -1883,6 +1883,8 @@ def _anthropic_transport_base(base_url: str, family: str) -> str:
     lower = root.lower()
     if "commonstack.ai" in lower:
         return root
+    if "openrouter.ai" in lower:
+        return root
     if "/anthropic" in lower:
         return root
     if lower.endswith("/v1"):
@@ -1934,7 +1936,7 @@ def _supports_native_anthropic_transport(
         return True
     if "api.minimax.io" in target_lower or "api.minimaxi.com" in target_lower:
         return True
-    return upstream_provider in {"minimax", "commonstack"}
+    return upstream_provider in {"minimax", "commonstack", "openrouter"}
 
 
 def _choose_transport(

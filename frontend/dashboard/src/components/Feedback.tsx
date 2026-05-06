@@ -12,6 +12,12 @@ const TIER_COLOR: Record<string, string> = {
   COMPLEX: "text-n-accent",
 };
 
+const TIER_BORDER: Record<string, string> = {
+  SIMPLE: "border-n-success",
+  MEDIUM: "border-n-warning",
+  COMPLEX: "border-n-accent",
+};
+
 function fmtTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
@@ -102,22 +108,20 @@ export default function Feedback() {
         </p>
       </div>
 
-      <div className="rounded-card border border-n-border bg-n-surface overflow-hidden">
+      <div className="rounded-card border border-n-border bg-n-surface overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="border-b border-n-border">
               <th className="label px-6 py-4 text-left w-24">TIME</th>
-              <th className="label px-6 py-4 text-left w-24">MODE</th>
-              <th className="label px-6 py-4 text-left">PROMPT</th>
-              <th className="label px-6 py-4 text-left w-24">TIER</th>
+              <th className="label px-6 py-4 text-left">REQUEST</th>
               <th className="label px-6 py-4 text-left">MODEL</th>
               <th className="label px-6 py-4 text-right w-24">COST</th>
-              <th className="label px-6 py-4 text-right pl-4 pr-8 w-[280px]"></th>
+              <th className="label px-6 py-4 text-right pl-4 pr-8 w-[320px]">FEEDBACK</th>
             </tr>
           </thead>
           <tbody>
             {visibleRequests.length === 0 ? (
-              <tr><td colSpan={7} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet. Send requests through the proxy to start collecting feedback.</td></tr>
+              <tr><td colSpan={5} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet. Send requests through the proxy to start collecting feedback.</td></tr>
             ) : (
               visibleRequests.map((r) => {
                 const fb = submitted[r.request_id] ?? storedFeedback(r);
@@ -127,33 +131,33 @@ export default function Feedback() {
                 return (
                   <tr key={r.request_id} className="border-b border-n-border last:border-0 row-hover hover:bg-n-raised">
                     <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{fmtTime(r.timestamp)}</td>
-                    <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{r.mode || "auto"}</td>
                     <td className="px-6 py-4">
                       <div className="max-w-[300px] truncate text-[13px] text-n-primary" title={r.prompt_preview}>
                         {r.prompt_preview || "\u2014"}
                       </div>
-                      {(r.constraint_tags?.length || r.hint_tags?.length || (r.answer_depth && r.answer_depth !== "standard")) ? (
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {r.answer_depth && r.answer_depth !== "standard" && (
-                            <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                              {r.answer_depth.replace(/[-_]/g, " ")}
-                            </span>
-                          )}
-                          {r.constraint_tags?.map((tag) => (
-                            <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                              {tag.replace(/[-_]/g, " ")}
-                            </span>
-                          ))}
-                          {r.hint_tags?.map((tag) => (
-                            <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                              {tag.replace(/[-_]/g, " ")}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className={`px-6 py-4 font-mono text-[12px] font-medium ${TIER_COLOR[displayTier] ?? "text-n-secondary"}`}>
-                      {displayTier}
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <span className={`rounded-pill border px-2 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wider ${TIER_BORDER[displayTier] ?? "border-n-border-vis"} ${TIER_COLOR[displayTier] ?? "text-n-secondary"}`}>
+                          {displayTier}
+                        </span>
+                        <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                          {r.mode || "auto"}
+                        </span>
+                        {r.answer_depth && r.answer_depth !== "standard" && (
+                          <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                            {r.answer_depth.replace(/[-_]/g, " ")}
+                          </span>
+                        )}
+                        {r.constraint_tags?.map((tag) => (
+                          <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                            {tag.replace(/[-_]/g, " ")}
+                          </span>
+                        ))}
+                        {r.hint_tags?.map((tag) => (
+                          <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
+                            {tag.replace(/[-_]/g, " ")}
+                          </span>
+                        ))}
+                      </div>
                     </td>
                     <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{r.model.split("/").pop()}</td>
                     <td className="px-6 py-4 text-right font-mono text-[12px] text-n-secondary">${r.cost.toFixed(4)}</td>
@@ -166,25 +170,25 @@ export default function Feedback() {
                           {feedbackLabel(fb)}
                         </span>
                       ) : (
-                        <div className="flex justify-end gap-2">
+                        <div className="flex justify-end gap-1.5">
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "strong")}
-                            className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
+                            className="rounded-pill border border-n-border-vis px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
                             TOO STRONG
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "ok")}
-                            className="rounded-pill bg-n-display px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
+                            className="rounded-pill bg-n-display px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
                             JUST RIGHT
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "weak")}
-                            className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
+                            className="rounded-pill border border-n-border-vis px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
                             TOO WEAK
                           </button>

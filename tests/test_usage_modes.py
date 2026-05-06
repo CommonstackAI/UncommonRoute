@@ -105,6 +105,27 @@ class TestCLI:
         assert r.returncode == 0
         assert "Usage: uncommon-route init" in r.stdout
 
+    def test_scene_add_and_show(self, tmp_path: Path) -> None:
+        env = {"UNCOMMON_ROUTE_DATA_DIR": str(tmp_path / ".uncommon-route")}
+
+        add = run_cli(
+            [
+                "scene",
+                "add",
+                "coding",
+                "anthropic/claude-sonnet-4.6",
+                "openai/gpt-5.2",
+            ],
+            env=env,
+        )
+        assert add.returncode == 0
+
+        show = run_cli(["scene", "show", "coding"], env=env)
+        assert show.returncode == 0
+        assert "Scene: coding" in show.stdout
+        assert "Primary: anthropic/claude-sonnet-4.6" in show.stdout
+        assert "Model pool: anthropic/claude-sonnet-4.6 -> openai/gpt-5.2" in show.stdout
+
     def test_route_text(self) -> None:
         r = run_cli(["route", "what is 2+2"])
         assert r.returncode == 0

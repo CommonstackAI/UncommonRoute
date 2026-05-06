@@ -32,6 +32,9 @@ v2 = [
     "sentence-transformers>=2.2",
     "xgboost>=2.0",
 ]
+tui = [
+    "textual>=0.60",
+]
 dev = [
     "build>=1.2",
     "pytest>=8.0",

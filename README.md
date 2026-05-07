@@ -98,26 +98,22 @@ Routing happens locally and independently for each agent step. You can inspect e
 
 ## Visual Routing
 
-UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, its actual or estimated cost, and how to tune the policy.
+UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, what it cost, and what you can tune next.
 
 ```bash
 uncommon-route serve
 # -> http://localhost:8403/dashboard/
 ```
 
-| Page | What it does |
-|---|---|
-| Home | Live requests, complexity distribution, model choices, and cost changes |
-| Playground | Type a prompt and preview complexity, confidence, estimated cost, and signal readout |
-| Explain | Inspect each routing decision per session, including model, latency, and cost |
-| Activity | See request complexity, served quality, transport paths, capability lanes, model usage, and cost distribution |
-| Routing | Configure `auto` / `fast` / `best`, or set primary and fallback models per complexity tier |
-| Models | Browse the active model pool, providers, capability tags, and input / output prices |
-| Connections | Manage the primary upstream and BYOK provider keys, and verify connection status |
-| Budget | Set per-request, hourly, or daily spend limits |
-| Feedback | Mark routes as `too strong`, `just right`, or `too weak` to improve the local classifier |
+With the Dashboard, you can:
 
-To kick the tires: type a prompt in Playground, inspect the predicted complexity, confidence, and cost estimate, then open Explain / Activity to trace real routing decisions.
+- Preview how a prompt will be classified before sending it.
+- Inspect each routed request by session, including model, latency, cost, and signal readout.
+- See which complexity classes and models are driving your spend.
+- Tune routing policy, fallbacks, budgets, provider keys, and model pools.
+- Rate decisions as `too strong`, `just right`, or `too weak`; those labels train a local model overlay without touching the base model.
+
+That Feedback loop is the part that matters after day one. If UncommonRoute routes something too aggressively or too conservatively, you can correct it in the Dashboard. Training happens locally, the base model stays intact, and you can roll back the overlay anytime.
 
 ---
 
@@ -161,7 +157,7 @@ resp = client.chat.completions.create(
 | Explainable decisions | See complexity, confidence, signal readout, selected model, and cost for each route |
 | Adjustable policy | Use `auto` / `fast` / `best`, or override simple / medium / complex with primary and fallback models |
 | Spend caps | Set per-request, hourly, or daily API spend limits |
-| Local feedback | Mark routes as too strong, just right, or too weak to improve the classifier locally |
+| Local training | Feedback updates a local model overlay; the base model is never overwritten and can be restored anytime |
 | Drop-in integration | Claude Code, Cursor, Codex, OpenAI SDK, and OpenClaw work without application code changes |
 
 ---
@@ -265,6 +261,34 @@ UncommonRoute also learns from local feedback: high-confidence agreement grows t
 - You only call LLMs occasionally and your bill is already small.
 - You expect a router to make low-cost models fundamentally more capable. UncommonRoute doesn't make that claim.
 - You want every request to use the strongest model, no matter what. You can use `uncommon-route/best`, but the savings will be smaller.
+
+---
+
+## FAQ
+
+**Will this hurt quality?**
+
+UncommonRoute doesn't blindly chase the cheapest model. Uncertain or high-risk requests escalate to stronger models, and the held-out SWE-bench Verified result above shows matched task quality on that split.
+
+**Where do my prompts go?**
+
+Routing runs locally. Your prompt is sent to the upstream provider you configure, not to a separate hosted routing service.
+
+**What happens when the router is unsure?**
+
+It falls back conservatively: low-confidence decisions escalate instead of quietly sending complex work to an underpowered model.
+
+**Can I override the routing?**
+
+Yes. Use `auto`, `fast`, or `best`, or configure primary and fallback models for simple / medium / complex requests.
+
+**Can I use my own API keys?**
+
+Yes. You can use Commonstack as a managed upstream or register your own provider keys with BYOK.
+
+**Does feedback train anything?**
+
+Yes. Feedback updates a local model overlay and labeled traces can calibrate runtime confidence. The base model is never overwritten, and you can roll back the overlay.
 
 ---
 

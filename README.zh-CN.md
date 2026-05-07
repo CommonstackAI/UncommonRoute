@@ -98,26 +98,22 @@ UncommonRoute 的边界很清楚：它不替代 Claude Code、Cursor 或 Codex�
 
 ## 可视化路由
 
-UncommonRoute 不只是转发请求的代理。Dashboard 会记录并展示每次路由决策：请求被判定为 simple、medium 还是 complex，最终选择哪个模型，预计或实际成本是多少，以及后续可以如何调整策略。
+UncommonRoute 不只是转发请求的代理。Dashboard 会记录并解释每次路由决策：请求被判定为 simple、medium 还是 complex，最终选择哪个模型，实际花了多少钱，以及后续可以怎么调。
 
 ```bash
 uncommon-route serve
 # -> http://localhost:8403/dashboard/
 ```
 
-| 页面 | 功能 |
-|---|---|
-| Home | 实时请求、复杂度分布、模型选择、成本变化 |
-| Playground | 输入 prompt，预览复杂度分类、置信度、成本估算和信号读数 |
-| Explain | 按会话查看每一步路由决策、模型、延迟和成本 |
-| Activity | 请求复杂度、服务档位、传输路径、能力通道、模型使用和成本分布 |
-| Routing | 配置 `auto` / `fast` / `best`，也可以按复杂度档位指定 primary / fallback model |
-| Models | 查看当前模型池、provider、能力标签和输入 / 输出价格 |
-| Connections | 管理托管 upstream 或 BYOK provider key，并验证连接状态 |
-| Budget | 设置请求级、小时级或每日预算上限 |
-| Feedback | 标记路由 `too strong` / `just right` / `too weak`，用本地反馈改进分类器 |
+Dashboard 主要解决五件事：
 
-推荐的演示路径是：先在 Playground 输入一个 prompt，看路由器给出的复杂度分类、置信度和成本估算；再到 Explain / Activity 里查看真实请求的路由轨迹。
+- 发送前预览 prompt 会被判定为 simple / medium / complex。
+- 按会话查看每一步路由决策，包括模型、延迟、成本和信号读数。
+- 看清楚哪些复杂度分类、哪些模型真正消耗了预算。
+- 调整路由策略、fallback、预算上限、provider key 和模型池。
+- 把路由结果标成 `too strong` / `just right` / `too weak`；这些标注会训练本地模型覆盖层，不会覆盖基础模型。
+
+Feedback 是长期使用里很有价值的一块。如果某次路由太激进或太保守，你可以直接在 Dashboard 里纠正。训练在本地完成，基础模型保持不变，模型覆盖层也可以随时回滚。
 
 ---
 
@@ -155,13 +151,13 @@ resp = client.chat.completions.create(
 
 | 能力 | 结果 |
 |---|---|
-| 本地路由 | prompt、completion 和路由决策不需要发送给额外的云端路由器 |
+| 本地路由 | 路由器在本地运行，不会在你和 provider 之间额外插入一个云端路由服务 |
 | 按请求路由 | 每个 agent step 独立判断，不把整个会话固定在同一个复杂度分类或模型档位上 |
 | 自动选择模型 | 根据任务难度、上下文结构、工具调用和 provider 可用性选择路由结果 |
 | 可解释决策 | 每次路由都能看到复杂度分类、置信度、信号读数、模型和成本 |
 | 可调整策略 | 支持 `auto` / `fast` / `best`，也支持按 simple / medium / complex 配置 override 和 fallback |
 | 预算封顶 | 可以设置请求级、小时级或每日 API 花费上限 |
-| 本地反馈 | 标记路由太强、刚好或太弱，用本地反馈改进分类器 |
+| 本地训练 | Feedback 会更新本地模型覆盖层；基础模型不会被覆盖，也可以随时回滚 |
 | 即插即用 | Claude Code、Cursor、Codex、OpenAI SDK、OpenClaw 都不用改业务代码 |
 
 ---
@@ -205,7 +201,7 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ## 隐私
 
-路由在本机完成。**prompt、completion 和路由决策都不会为了路由发送给额外服务。**
+路由在本地完成。**prompt 不会经过额外的云端路由器；它只会发给你配置的 upstream provider。**
 
 ```bash
 uncommon-route telemetry status
@@ -265,6 +261,34 @@ UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进
 - 你只偶尔调用 LLM，账单本来就很低。
 - 你希望路由器提升低成本模型本身的能力。UncommonRoute 不做这个承诺。
 - 你所有任务都必须无条件使用最强模型。那可以直接用 `uncommon-route/best`，但省钱空间会小很多。
+
+---
+
+## FAQ
+
+**会影响任务质量吗？**
+
+UncommonRoute 不是一味追求便宜。不确定或风险高的请求会向更强模型升档，上面的 held-out SWE-bench Verified 结果也显示，在那组任务上任务完成质量持平。
+
+**我的 prompt 会发到哪里？**
+
+路由在本地完成。prompt 会发给你配置的 upstream provider，不会额外经过一个托管的云端路由服务。
+
+**路由器不确定时怎么办？**
+
+默认保守处理：低置信度请求会升档，而不是悄悄把复杂任务发给能力不足的模型。
+
+**我可以手动覆盖路由吗？**
+
+可以。你可以用 `auto`、`fast`、`best`，也可以按 simple / medium / complex 配置 primary 和 fallback model。
+
+**可以用自己的 API key 吗？**
+
+可以。你可以用 Commonstack 托管 upstream，也可以用 BYOK 注册自己的 provider key。
+
+**Feedback 真的会训练东西吗？**
+
+会。Feedback 会更新本地模型覆盖层，带标注的本地 trace 也可以用于校准运行时置信度。基础模型不会被覆盖，模型覆盖层可以随时回滚。
 
 ---
 

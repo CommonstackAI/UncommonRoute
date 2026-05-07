@@ -975,7 +975,7 @@ def test_high_pressure_simple_step_only_promotes_one_public_tier(monkeypatch) ->
     assert "pressure-rescue=premium-window" not in decision.reasoning
 
 
-def test_high_pressure_medium_step_does_not_get_premium_window_without_complex_evidence(monkeypatch) -> None:
+def test_high_pressure_routine_medium_step_stays_capped_without_complex_evidence(monkeypatch) -> None:
     monkeypatch.setattr(api, "_ensure_v2_signals", lambda: None)
     monkeypatch.setattr(api, "_v2_sig_a", _FakeSignal(TierVote(1, 0.80)))
     monkeypatch.setattr(api, "_v2_sig_b", _FakeSignal(TierVote(None, 0.0)))
@@ -1016,10 +1016,11 @@ def test_high_pressure_medium_step_does_not_get_premium_window_without_complex_e
         record_lifecycle=False,
     )
 
-    assert decision.tier is Tier.COMPLEX
+    assert decision.tier is Tier.MEDIUM
     assert decision.served_quality_target is ServedQuality.BALANCED
     assert decision.model == "minimax/minimax-m2.7"
-    assert "agent-pressure-floor=COMPLEX(from=MEDIUM)" in decision.reasoning
+    assert "agent-pressure-floor=COMPLEX(from=MEDIUM)" not in decision.reasoning
+    assert "tier-cap-preserved(short-observation)" in decision.reasoning
     assert "pressure-rescue=step-up" in decision.reasoning
     assert "pressure-rescue=premium-window" not in decision.reasoning
 

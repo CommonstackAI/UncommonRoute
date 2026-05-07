@@ -4,10 +4,12 @@
 
 <h1>UncommonRoute</h1>
 
-**Cut your LLM costs by 82% with automatic model routing.**
+**Automatic model routing for lower LLM spend.**
 
 Most of your LLM budget goes to simple tasks that don't need a premium model.
 UncommonRoute picks the cheapest model that still gets the job done — automatically.
+
+Current held-out eval: **91.8% task pass rate** with an **81.9 cost-savings score** on CommonRouterBench.
 
 <br>
 
@@ -41,6 +43,8 @@ pipx install uncommon-route
 ```
 
 `pipx` is the best default for most CLI users: it installs UncommonRoute into its own isolated environment, keeps your system Python clean, and gives you a clean uninstall path.
+
+A normal install includes the trained v2 runtime assets and embedding dependencies. You do not need a separate `[v2]` install for production routing.
 
 If you do not have `pipx` yet, prefer your OS package manager when it is available (`brew install pipx` on macOS, `sudo apt install pipx` on recent Ubuntu, `sudo dnf install pipx` on Fedora), then run `pipx ensurepath`.
 
@@ -138,26 +142,30 @@ Auto-routing will only consider models backed by a registered provider.
 
 ## How It Works
 
-Every request is analyzed by three independent signals, then routed to the cheapest capable model:
+Every request is analyzed by multiple local signals, then routed to the cheapest capable model available from your configured upstream:
 
 ```
-"hello"                              → 🟢 nano         $0.0008
-"fix the typo on line 3"             → 🟢 deepseek     $0.0012
-"refactor this 500-line module"      → 🟠 sonnet       $0.0337
-"design a distributed scheduler"     → 🔴 opus         $0.0562
+"hello"                              → economy tier
+"fix the typo on line 3"             → economy / balanced tier
+"refactor this 500-line module"      → balanced / premium tier
+"design a distributed scheduler"     → premium tier
 ```
+
+Actual model IDs and prices come from the live upstream model catalog plus your local overrides. UncommonRoute does not rely on a single hardcoded model list.
 
 | Signal | What it does | Speed (CPU, warm) |
 |---|---|---|
 | **Metadata** | Conversation structure, tool usage, depth | <1ms |
-| **Embedding** | Semantic similarity to known task patterns (bge-small) | ~20ms |
-| **Structural** | Text complexity features (shadow mode) | <1ms |
+| **Embedding** | Trained BGE classifier over the user request, recent agent state, and metadata; KNN fallback when uncertain | ~25–35ms end-to-end warm route overhead |
+| **Structural** | Text and conversation complexity; active on selected requests, shadow-tracked otherwise | <1ms |
 
-End-to-end `route()` overhead on a warm process is **~20–25ms** (dominated by the embedding signal). Cold start is a few hundred ms for the first request. GPU or a cached embedding path can bring this under 5ms.
+End-to-end `route()` overhead on a warm process is typically **~25–35ms** on CPU and is dominated by the embedding signal. Cold start includes loading the embedding model and can take seconds on a fresh process or machine; after warmup, routing stays local.
 
-Signals vote. The ensemble picks the tier. The router selects the cheapest model in that tier. If uncertain, it leans conservative — better to spend a little more than to fail the task.
+Signals vote. The ensemble picks the tier. The router then selects the cheapest model that satisfies tier, capability, transport, and upstream availability constraints. Unknown or dynamic upstream pricing is treated conservatively instead of being interpreted as a real negative price.
 
-**It gets smarter over time.** Signal weights adjust from routing outcomes. The embedding index grows with usage. Low-confidence predictions automatically escalate.
+Routing is **per request / per agent step**, not sticky for an entire session. Protocol-level constraints still apply when the request requires them, for example Anthropic thinking continuations.
+
+**It gets smarter over time.** Local feedback can adjust signal weights, high-confidence agreement can grow the embedding index, and low-confidence predictions escalate instead of silently under-routing.
 
 ---
 
@@ -171,9 +179,9 @@ We didn't patch it. We rebuilt from scratch.
 
 | | v1 | v2 |
 |---|---|---|
-| **Accuracy** | 43% | **78%** |
-| **Task pass rate** | 100% (cheated — always chose most expensive) | **93.4%** (real routing) |
-| **Cost savings** | 0% | **82%** |
+| **Tier match accuracy** | 43% | **74.0%** held-out |
+| **Task pass rate** | 100% (cheated — always chose most expensive) | **91.8%** with real routing |
+| **Cost-savings score** | 0% | **81.9** |
 
 We're telling you this because we'd rather you trust our numbers than be impressed by them.
 
@@ -181,17 +189,21 @@ We're telling you this because we'd rather you trust our numbers than be impress
 
 ## Benchmarks
 
-Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 970 real agent task traces across SWE-Bench, BFCL, MT-RAG, QMSum, and PinchBench. All numbers measured end-to-end through the production code path.
+Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 970 real agent task traces across SWE-Bench, BFCL, MT-RAG, QMSum, and PinchBench. The public numbers below use the 196-row held-out split, not the training or calibration rows.
 
 | Metric | Value |
 |---|---|
-| **Cost savings** | **82%** vs always-premium |
-| **Task pass rate** | **93.4%** |
-| **Routing overhead** | **~20–25ms** (warm process, CPU, bge-small embedding) |
-| **Accuracy** | **78%** tier match |
+| **Task pass rate** | **91.8%** |
+| **Tier match accuracy** | **74.0%** |
+| **Cost-savings score** | **81.9** vs always-premium baseline |
+| **Overall score** | **76.7** |
+| **Warm routing overhead** | **p50 25.6ms / p90 32.1ms** on a local CPU run |
 
 ```bash
-python scripts/eval_v2.py  # reproduce it yourself
+python -m pip install -e ".[dev]"
+python -m pip install "git+https://github.com/CommonstackAI/CommonRouterBench.git"
+python scripts/eval_v2.py --split holdout
+python scripts/bench_overhead.py --iterations 50 --json
 ```
 
 ---

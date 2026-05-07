@@ -263,6 +263,33 @@ def test_issue4_tool_selection_always_triggers():
         assert step_type == "tool-selection", f"'{msg}' got step_type={step_type}"
 
 
+def test_anthropic_tool_names_are_counted_for_step_risk():
+    """Anthropic messages use top-level tool names, not OpenAI function wrappers."""
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    tools = [
+        {"name": f"Tool{i}", "input_schema": {"type": "object"}}
+        for i in range(8)
+    ]
+    body = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": tools,
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="hello",
+    )
+
+    assert step_type == "tool-selection"
+    assert len(tool_names) == 8
+    assert features.tool_names == tuple(f"Tool{i}" for i in range(8))
+    assert features.step_risk == "normal"
+
+
 # ─── Issue 5: Feedback mechanism ineffective ───
 
 def test_issue5_averaged_perceptron_update_magnitude():
@@ -526,6 +553,52 @@ def test_issue6_image_generation_models_do_not_enter_chat_routing_pool():
     assert "google/gemini-3-pro-image-preview" not in mapper.routable_models
     assert "google/gemini-3.1-flash-image-preview" not in mapper.routable_models
     assert "google/gemini-3.1-pro-preview" in mapper.routable_models
+
+
+def test_superseded_gemini_pro_is_not_routed_when_successor_exists():
+    """Catalog discovery can include old Gemini Pro IDs, but routing should use the successor."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in [
+        "google/gemini-2.5-pro",
+        "google/gemini-3.1-pro-preview",
+        "zai-org/glm-4.7",
+    ]:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=True),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert "google/gemini-2.5-pro" in mapper.available_models
+    assert "google/gemini-2.5-pro" not in mapper.routable_models
+    assert "google/gemini-3.1-pro-preview" in mapper.routable_models
+
+
+def test_gemini_pro_stays_routable_without_successor():
+    """A discovered model is hidden only when a live successor is also present."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    mapper._pool["google/gemini-2.5-pro"] = DiscoveredModel(
+        id="google/gemini-2.5-pro",
+        provider="google",
+        owned_by="google",
+        pricing=ModelPricing(0.2, 0.8),
+        capabilities=ModelCapabilities(tool_calling=True, vision=True),
+    )
+    mapper._upstream_models.add("google/gemini-2.5-pro")
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert "google/gemini-2.5-pro" in mapper.routable_models
 
 
 # ─── Summary: combined issue reproduction ───

@@ -52,6 +52,37 @@ def test_contextual_followup_can_escalate_dense_latest_request() -> None:
     assert floor is Tier.COMPLEX
 
 
+def test_short_run_followup_does_not_inherit_complex_floor() -> None:
+    floor = contextual_followup_floor_from_text(
+        prior_text="就按这个方案，帮我把所有代码写出来",
+        latest_text="跑一下试试，查一下北京的天气",
+    )
+
+    assert floor is None
+
+
+def test_short_commit_followup_does_not_inherit_context_floor() -> None:
+    floor = contextual_followup_floor_from_text(
+        prior_text="跑一下试试，查一下北京的天气\n北京天气查询正常。",
+        latest_text="没问题的话帮我创建 git 并 commit",
+    )
+
+    assert floor is None
+
+
+def test_short_dense_build_followup_can_inherit_complex_floor() -> None:
+    floor = contextual_followup_floor_from_text(
+        prior_text=(
+            "我想做一个 免费的无需额外配置的命令行天气查询工具，"
+            "输入城市名就能显示当前天气、温度、湿度。帮我规划一下："
+            "用什么天气 API、项目结构怎么组织、需要处理哪些边界情况"
+        ),
+        latest_text="就按这个方案，帮我把所有代码写出来",
+    )
+
+    assert floor is Tier.COMPLEX
+
+
 def test_protocol_structured_system_prompt_is_not_a_domain_whitelist() -> None:
     assert system_prompt_has_structured_output_constraint("Respond in JSON format.")
     assert not system_prompt_has_structured_output_constraint("You are Claude Code.")

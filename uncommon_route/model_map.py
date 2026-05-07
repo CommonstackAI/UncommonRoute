@@ -132,6 +132,13 @@ SEED_ALIASES: dict[str, list[str]] = {
 # Backward compat
 KNOWN_ALIASES = SEED_ALIASES
 
+ROUTING_SUPERSEDED_MODELS: dict[str, tuple[str, ...]] = {
+    "google/gemini-2.5-pro": (
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3-pro-preview",
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Pricing parser
@@ -204,6 +211,15 @@ def is_routable_chat_model(model_id: str) -> bool:
     """
     core = _core(str(model_id or "").lower())
     return not any(marker in core for marker in _NON_CHAT_MODEL_MARKERS)
+
+
+def _superseded_routing_models(model_ids: set[str]) -> set[str]:
+    """Return routable IDs to hide when their live successor is available."""
+    return {
+        model_id
+        for model_id, successors in ROUTING_SUPERSEDED_MODELS.items()
+        if model_id in model_ids and any(successor in model_ids for successor in successors)
+    }
 
 
 def infer_capabilities(
@@ -534,7 +550,12 @@ class ModelMapper:
     @property
     def routable_models(self) -> list[str]:
         """Chat-routable upstream model IDs, sorted."""
-        return [model for model in self.available_models if is_routable_chat_model(model)]
+        superseded = _superseded_routing_models(set(self.available_models))
+        return [
+            model
+            for model in self.available_models
+            if model not in superseded and is_routable_chat_model(model)
+        ]
 
     def get_pricing(self, model_id: str) -> ModelPricing | None:
         """Look up pricing for a single model (internal or upstream ID)."""

@@ -530,6 +530,12 @@ def _pressure_rescue_tier_floor(
         return None, None
 
     rescue_floor = _PRESSURE_RESCUE_NEXT_TIER[predicted_tier]
+    cap_reason = str(features.tier_cap_reason or "").strip().lower()
+    if (
+        cap_reason in {"routine-success", "short-observation", "recoverable-tool-error"}
+        and predicted_tier is not Tier.COMPLEX
+    ):
+        return None, None
     return rescue_floor, f"agent-pressure-floor={rescue_floor.value}(from={predicted_tier.value})"
 
 

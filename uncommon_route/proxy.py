@@ -1037,7 +1037,7 @@ def _classify_step(body: dict) -> tuple[str, list[str]]:
     tool_names: list[str] = []
     for t in raw_tools:
         fn = t.get("function") or t.get("definition") or {}
-        name = fn.get("name", "")
+        name = fn.get("name") or t.get("name") or ""
         if name:
             tool_names.append(name)
 
@@ -1534,6 +1534,7 @@ def _tool_result_is_environment_recovery(text: str, is_error: bool, command: str
 _REASONING_DISABLED_VALUES = {"", "none", "off", "false", "disabled", "disable"}
 _REASONING_FLOOR_VALUES = {"medium", "high", "xhigh", "x-high", "max"}
 _TIER_RANK = {Tier.SIMPLE: 0, Tier.MEDIUM: 1, Tier.COMPLEX: 2}
+_SUGGESTION_MODE_RE = re.compile(r"^\s*\[SUGGESTION MODE:", re.IGNORECASE)
 
 
 def _max_tier(left: Tier | None, right: Tier | None) -> Tier | None:
@@ -1593,6 +1594,11 @@ def _reasoning_preference(body: dict[str, Any]) -> tuple[bool, Tier | None]:
     return prefers_reasoning, tier_floor
 
 
+def _is_suggestion_mode_prompt(prompt: str) -> bool:
+    """Detect Claude Code's autocomplete prompt wrapper."""
+    return bool(_SUGGESTION_MODE_RE.match(str(prompt or "")))
+
+
 def _estimate_step_risk(
     *,
     messages: list[Any],
@@ -1605,6 +1611,8 @@ def _estimate_step_risk(
     tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(messages, step_type)
     previous_tool_result_text, previous_tool_result_is_error = _latest_tool_result_signal(messages)
     prompt_text = str(prompt or "")
+    if _is_suggestion_mode_prompt(prompt_text):
+        return "low"
     prompt_has_high_risk_shape = (
         needs_tool_calling
         and text_substance_score(prompt_text)
@@ -1678,7 +1686,7 @@ def _extract_routing_features(
         derived_tool_names: list[str] = []
         for tool in raw_tools:
             fn = tool.get("function") or tool.get("definition") or {}
-            name = str(fn.get("name") or "").strip()
+            name = str(fn.get("name") or tool.get("name") or "").strip()
             if name:
                 derived_tool_names.append(name)
         normalized_tool_names = tuple(derived_tool_names)
@@ -1686,6 +1694,7 @@ def _extract_routing_features(
     has_vision = any(_has_vision_content(msg.get("content")) for msg in messages if isinstance(msg, dict))
     needs_tool_calling = bool(raw_tools)
     has_tool_results = step_type == "tool-result-followup"
+    suggestion_mode = _is_suggestion_mode_prompt(prompt)
 
     response_format = body.get("response_format")
     response_format_name: str | None = None
@@ -1708,7 +1717,7 @@ def _extract_routing_features(
         needs_tool_calling=needs_tool_calling,
         wants_structured_output=wants_structured_output,
     )
-    contextual_floor = _contextual_followup_floor(messages, prompt)
+    contextual_floor = None if suggestion_mode else _contextual_followup_floor(messages, prompt)
     if contextual_floor is not None and step_risk == "low":
         step_risk = "normal"
     tier_floor = Tier.MEDIUM if step_risk == "high" or wants_structured_output else None
@@ -1740,17 +1749,23 @@ def _extract_routing_features(
         and _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command)
     )
     tier_cap = (
-        Tier.MEDIUM
-        if step_risk == "low"
-        or environment_recovery
-        or invocation_recovery
-        or routine_success
-        or short_success_observation
-        else None
+        Tier.SIMPLE
+        if suggestion_mode
+        else (
+            Tier.MEDIUM
+            if step_risk == "low"
+            or environment_recovery
+            or invocation_recovery
+            or routine_success
+            or short_success_observation
+            else None
+        )
     )
     tier_cap_reason = ""
     if tier_cap is not None:
-        if environment_recovery:
+        if suggestion_mode:
+            tier_cap_reason = "suggestion-mode"
+        elif environment_recovery:
             tier_cap_reason = "environment-recovery"
         elif invocation_recovery:
             tier_cap_reason = "invocation-recovery"
@@ -2423,6 +2438,8 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "tier_cap": features.tier_cap.value if features.tier_cap is not None else None,
         "tier_cap_reason": features.tier_cap_reason,
         "session_present": features.session_present,
+        "agent_step_count": features.agent_step_count,
+        "agent_pressure": round(features.agent_pressure, 6),
         "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
         "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
         "continuity_quality_floor": features.continuity_quality_floor.value if features.continuity_quality_floor is not None else None,
@@ -2986,7 +3003,8 @@ def create_app(
 
         previous_served_quality: ServedQuality | None = None
         continuity_quality_floor: ServedQuality | None = None
-        if session_id:
+        protocol_side_channel = features.tier_cap_reason == "suggestion-mode"
+        if session_id and not protocol_side_channel:
             latest_session_trace = _traces.latest_for_session(session_id)
             if latest_session_trace is not None:
                 previous_served_quality = normalize_served_quality(latest_session_trace.served_quality)

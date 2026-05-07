@@ -1507,6 +1507,86 @@ def test_normal_tool_selection_does_not_force_medium_floor() -> None:
     assert features.tier_cap is None
 
 
+def test_suggestion_mode_prompt_is_simple_capped_side_channel() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    suggestion_prompt = (
+        "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\n\n"
+        "FIRST: Look at the user's recent messages and original request.\n"
+        "Your job is to predict what THEY would type - not what you think they should do.\n"
+        "Reply with ONLY the suggestion, no quotes or explanation."
+    )
+    body = {
+        "messages": [
+            {"role": "user", "content": "Build a small weather CLI."},
+            {"role": "assistant", "content": "I created the project files."},
+            {"role": "user", "content": suggestion_prompt},
+        ],
+        "tools": [{"type": "function", "function": {"name": "bash"}}],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt=suggestion_prompt,
+    )
+
+    assert features.step_type == "tool-selection"
+    assert features.step_risk == "low"
+    assert features.tier_floor is None
+    assert features.tier_cap is Tier.SIMPLE
+    assert features.tier_cap_reason == "suggestion-mode"
+
+
+def test_short_tool_selection_task_is_not_high_risk_from_tool_presence_alone() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    prompt = "帮我创建一个新的 Python 项目目录，叫 weather-cli"
+    body = {
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "function", "function": {"name": "bash"}} for _ in range(27)],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt=prompt,
+    )
+
+    assert features.step_type == "tool-selection"
+    assert features.step_risk == "normal"
+    assert features.tier_floor is None
+
+
+def test_dense_tool_selection_task_can_still_be_high_risk_by_shape() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    prompt = (
+        "清空目录中的所有内容，我想做一个不需要 api 的命令行天气查询工具，输入城市名就能显示当前天气、"
+        "温度、湿度。帮我规划一下：用什么天气 API、项目结构怎么组织"
+    )
+    body = {
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "function", "function": {"name": "bash"}} for _ in range(27)],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt=prompt,
+    )
+
+    assert features.step_type == "tool-selection"
+    assert features.step_risk == "high"
+    assert features.tier_floor is Tier.MEDIUM
+
+
 def test_system_json_directive_sets_structured_output_floor() -> None:
     from uncommon_route.proxy import _classify_step, _extract_routing_features
 

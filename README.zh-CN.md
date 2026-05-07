@@ -4,10 +4,12 @@
 
 <h1>UncommonRoute</h1>
 
-**自动模型路由，节省 82% 的 LLM 开销。**
+**自动模型路由，降低 LLM 开销。**
 
 大部分 LLM 预算都花在了不需要顶配模型的简单任务上。
 UncommonRoute 自动选最便宜、又能完成任务的模型。
+
+当前 held-out 评测：CommonRouterBench 上 **91.8% 任务完成率**，**81.9 成本节省分数**。
 
 <br>
 
@@ -41,6 +43,8 @@ pipx install uncommon-route
 ```
 
 对大多数 CLI 用户来说，`pipx` 是更好的默认方案：它会把 UncommonRoute 安装到独立环境里，不污染系统 Python，卸载也更干净。
+
+普通安装已经包含训练好的 v2 runtime assets 和 embedding 依赖。生产路由不需要再额外安装 `[v2]`。
 
 如果你还没有安装 `pipx`，优先使用系统包管理器安装会更稳妥，比如 macOS 上用 `brew install pipx`，较新的 Ubuntu 用 `sudo apt install pipx`，Fedora 用 `sudo dnf install pipx`，然后执行 `pipx ensurepath`。
 
@@ -138,24 +142,30 @@ Auto 路由只会在已注册的 provider 范围内选模型。
 
 ## 工作原理
 
-每个请求经过三个独立信号的分析，然后路由到最便宜的合适模型：
+每个请求会先经过多个本地信号分析，然后路由到你配置的 upstream 里最便宜的合适模型：
 
 ```
-"你好"                     → 🟢 nano         $0.0008
-"修一下第 3 行的拼写错误"   → 🟢 deepseek     $0.0012
-"重构这个 500 行的模块"    → 🟠 sonnet       $0.0337
-"设计一个分布式调度系统"    → 🔴 opus         $0.0562
+"你好"                     → economy tier
+"修一下第 3 行的拼写错误"   → economy / balanced tier
+"重构这个 500 行的模块"    → balanced / premium tier
+"设计一个分布式调度系统"    → premium tier
 ```
+
+具体模型 ID 和价格来自当前 upstream 的模型目录以及你的本地配置。UncommonRoute 不依赖单一写死的模型列表。
 
 | 信号 | 分析内容 | 耗时 |
 |---|---|---|
 | **元数据信号** | 对话轮次、工具调用、上下文深度 | <1ms |
-| **语义信号** | 与已知任务模式的相似度（embedding） | ~20ms |
-| **结构信号** | 文本复杂度特征（影子模式运行） | <1ms |
+| **语义信号** | 基于 BGE 的训练分类器，结合用户请求、最近 agent 状态和元数据；不确定时回退到 KNN | warm route 端到端约 ~25–35ms |
+| **结构信号** | 文本和对话复杂度；部分请求直接参与，其他请求以 shadow 方式追踪 | <1ms |
 
-三个信号投票，集成模型决定 tier，路由器在对应 tier 中选最便宜的模型。遇到不确定的情况，宁可多花一点也不冒失败风险。
+warm process 上，端到端 `route()` 开销通常是 **~25–35ms**（CPU），主要来自语义信号。冷启动需要加载 embedding 模型，在全新进程或新机器上可能需要数秒；预热后路由都在本地完成。
 
-**越用越准。** 信号权重根据实际路由效果自动调整，向量索引随使用量增长，低置信度预测自动升级。
+多个信号投票，集成模型决定 tier。随后路由器会在满足 tier、能力、协议和 upstream 可用性约束的模型中选择最低成本的模型。未知价格或动态价格会被保守处理，不会被当成真实负价格。
+
+路由是 **per request / per agent step** 的，不会把整个 session 锁死在同一个模型上。只有协议本身要求连续性的场景才会加约束，比如 Anthropic thinking continuation。
+
+**越用越准。** 本地反馈可以调整信号权重，高置信度一致判断可以扩展 embedding index，低置信度预测会升级，而不是静默降到不合适的模型。
 
 ---
 
@@ -169,9 +179,9 @@ v1 分类器在干净的 benchmark 上跑出了 88.5% 的准确率，我们直�
 
 | | v1 | v2 |
 |---|---|---|
-| **准确率** | 43% | **78%** |
-| **任务完成率** | 100%（作弊——永远选最贵的） | **93.4%**（真正的路由决策） |
-| **成本节省** | 0% | **82%** |
+| **Tier match 准确率** | 43% | **74.0%** held-out |
+| **任务完成率** | 100%（作弊——永远选最贵的） | **91.8%**（真正的路由决策） |
+| **成本节省分数** | 0% | **81.9** |
 
 我们把这些数据告诉你，是因为比起让你被数字震撼到，我们更希望你能信任它。
 
@@ -179,17 +189,21 @@ v1 分类器在干净的 benchmark 上跑出了 88.5% 的准确率，我们直�
 
 ## 性能数据
 
-基于 [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) 测试——970 条真实 Agent 任务轨迹，覆盖 SWE-Bench、BFCL、MT-RAG、QMSum 和 PinchBench。所有数据通过生产代码端到端测量。
+基于 [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) 测试——970 条真实 Agent 任务轨迹，覆盖 SWE-Bench、BFCL、MT-RAG、QMSum 和 PinchBench。下面的公开数字使用 196 条 held-out split，不包含训练集和 calibration 集。
 
 | 指标 | 数值 |
 |---|---|
-| **成本节省** | **82%**（对比全程顶配） |
-| **任务完成率** | **93.4%** |
-| **路由延迟** | **~20–25ms**（warm process, CPU, bge-small embedding） |
-| **准确率** | **78%** tier 匹配 |
+| **任务完成率** | **91.8%** |
+| **Tier match 准确率** | **74.0%** |
+| **成本节省分数** | **81.9**（对比全程顶配 baseline） |
+| **综合分数** | **76.7** |
+| **warm 路由延迟** | 本地 CPU 运行 **p50 25.6ms / p90 32.1ms** |
 
 ```bash
-python scripts/eval_v2.py  # 自己跑一遍看看
+python -m pip install -e ".[dev]"
+python -m pip install "git+https://github.com/CommonstackAI/CommonRouterBench.git"
+python scripts/eval_v2.py --split holdout
+python scripts/bench_overhead.py --iterations 50 --json
 ```
 
 ---

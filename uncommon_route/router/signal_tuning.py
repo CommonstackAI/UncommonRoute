@@ -25,7 +25,11 @@ class RoutingSignalTuning:
     contextual_complex_prior_score: float = 0.30
     contextual_latest_medium_score: float = 0.06
     contextual_latest_complex_score: float = 0.24
-    tool_prompt_high_risk_substance_score: float = 0.32
+    contextual_latest_medium_token_floor: int = 12
+    contextual_question_medium_token_floor: int = 8
+    contextual_latest_complex_token_floor: int = 12
+    contextual_short_latest_complex_entropy_score: float = 0.45
+    tool_prompt_high_risk_substance_score: float = 0.55
     vision_prompt_token_floor: int = 3
     compact_system_prompt_char_limit: int = 1200
     compact_system_prompt_word_limit: int = 180
@@ -202,14 +206,49 @@ def contextual_followup_floor_from_text(
     if (
         prior_score >= tuning.contextual_complex_prior_score
         and latest_score >= tuning.contextual_latest_complex_score
+        and _latest_supports_complex_followup_floor(latest, tuning=tuning)
     ):
         return Tier.COMPLEX
     if (
         prior_score >= tuning.contextual_prior_score
         and latest_score >= tuning.contextual_latest_medium_score
+        and _latest_supports_medium_followup_floor(latest, tuning=tuning)
     ):
         return Tier.MEDIUM
     return None
+
+
+def _latest_supports_medium_followup_floor(
+    latest_text: str,
+    *,
+    tuning: RoutingSignalTuning = DEFAULT_SIGNAL_TUNING,
+) -> bool:
+    """Require enough latest-turn shape before inheriting a MEDIUM floor."""
+    token_estimate = estimate_tokens(latest_text)
+    if token_estimate >= tuning.contextual_latest_medium_token_floor:
+        return True
+
+    dims = {dim.name: dim.score for dim in extract_structural_features(latest_text)}
+    return (
+        token_estimate >= tuning.contextual_question_medium_token_floor
+        and dims.get("functional_intent", 0.0) < 0.0
+    )
+
+
+def _latest_supports_complex_followup_floor(
+    latest_text: str,
+    *,
+    tuning: RoutingSignalTuning = DEFAULT_SIGNAL_TUNING,
+) -> bool:
+    """Require enough latest-turn shape before inheriting a COMPLEX floor."""
+    token_estimate = estimate_tokens(latest_text)
+    if token_estimate >= tuning.contextual_latest_complex_token_floor:
+        return True
+    if token_estimate < 10:
+        return False
+
+    dims = {dim.name: dim.score for dim in extract_structural_features(latest_text)}
+    return dims.get("shannon_entropy", 0.0) >= tuning.contextual_short_latest_complex_entropy_score
 
 
 def vision_prompt_needs_medium_floor(

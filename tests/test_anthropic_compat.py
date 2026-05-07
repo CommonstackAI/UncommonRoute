@@ -99,7 +99,7 @@ class TestAnthropicToOpenAIRequest:
         assert out["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
         assert out["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
-    def test_thinking_blocks_are_preserved_in_preview(self) -> None:
+    def test_thinking_blocks_are_dropped_for_openai_request(self) -> None:
         body = {
             "model": "m",
             "max_tokens": 100,
@@ -122,8 +122,10 @@ class TestAnthropicToOpenAIRequest:
         out = anthropic_to_openai_request(body)
 
         assert out["messages"][1]["role"] == "assistant"
-        assert out["messages"][1]["content"][0]["type"] == "thinking"
-        assert out["messages"][1]["content"][0]["signature"] == "sig_123"
+        assert out["messages"][1]["content"] == "Let me think."
+        serialized = json.dumps(out)
+        assert "sig_123" not in serialized
+        assert '"thinking"' not in serialized
 
     def test_user_content_blocks(self) -> None:
         body = {
@@ -1096,7 +1098,7 @@ class TestTransportRouting:
         assert _anthropic_transport_base("https://api.commonstack.ai/v1", "minimax") == "https://api.commonstack.ai/v1"
         assert _anthropic_transport_base("https://openrouter.ai/api/v1", "anthropic") == "https://openrouter.ai/api/v1"
 
-    def test_virtual_messages_tool_steps_filter_candidates_to_native_anthropic_transport(
+    def test_virtual_messages_tool_steps_can_route_to_openai_transport_models(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1105,18 +1107,19 @@ class TestTransportRouting:
 
         def fake_route(*args, **kwargs):
             routed["available_models"] = list(kwargs.get("available_models") or [])
+            routed["capability_lane"] = kwargs["routing_features"].capability_lane
             return RoutingDecision(
-                model="minimax/minimax-m2.1",
+                model="deepseek/deepseek-v3.2",
                 tier=Tier.MEDIUM,
-                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.ANTHROPIC_TOOL_SAFE,
-                served_quality=ServedQuality.ECONOMY,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.GENERAL,
+                served_quality=ServedQuality.BALANCED,
                 served_quality_target=ServedQuality.BALANCED,
                 served_quality_floor=ServedQuality.ECONOMY,
                 continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
                 mode=RoutingMode.AUTO,
                 confidence=0.92,
                 method="pool",
-                reasoning="forced minimax route for transport-safe pool test",
+                reasoning="forced openai-compatible route for tool step test",
                 cost_estimate=0.001,
                 baseline_cost=0.004,
                 savings=0.75,
@@ -1131,14 +1134,16 @@ class TestTransportRouting:
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_minimax_safe_pool",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "minimax/minimax-m2.1",
-                    "content": [{"type": "text", "text": "done"}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 18, "output_tokens": 2},
+                    "id": "chatcmpl_tool_openai",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek/deepseek-v3.2",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 18, "completion_tokens": 2, "total_tokens": 20},
                 },
                 headers={"content-type": "application/json"},
             )
@@ -1156,6 +1161,7 @@ class TestTransportRouting:
             app = create_app(
                 upstream="https://api.commonstack.ai/v1",
                 model_mapper=mapper,
+                trace_store=TraceStore(storage=InMemoryTraceStorage()),
                 spend_control=SpendControl(storage=InMemorySpendControlStorage()),
             )
             client = TestClient(app, raise_server_exceptions=False)
@@ -1175,10 +1181,18 @@ class TestTransportRouting:
             )
 
             assert resp.status_code == 200
-            assert routed["available_models"] == ["minimax/minimax-m2.1"]
+            assert set(routed["available_models"]) == {
+                "deepseek/deepseek-v3.2",
+                "minimax/minimax-m2.1",
+            }
+            assert routed["capability_lane"] == CapabilityLane.GENERAL
             assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
-            assert resp.headers["x-uncommon-route-transport"] == "anthropic-messages"
-            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["model"] == "deepseek/deepseek-v3.2"
+            assert body["tools"][0]["function"]["name"] == "get_weather"
         finally:
             asyncio.run(async_client.aclose())
 
@@ -1279,19 +1293,57 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_tool_steps_fail_closed_when_no_transport_safe_models_exist(
+    def test_virtual_messages_tool_steps_use_openai_transport_when_no_native_models_exist(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        captured: dict[str, object] = {}
         called = {"route": False, "upstream": False}
+        routed: dict[str, object] = {}
 
         def fake_route(*args, **kwargs):
             called["route"] = True
-            raise AssertionError("route() should not run when no transport-safe models exist")
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="deepseek/deepseek-v3.2",
+                tier=Tier.MEDIUM,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.GENERAL,
+                served_quality=ServedQuality.BALANCED,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.87,
+                method="pool",
+                reasoning="forced openai-compatible route without native transport",
+                cost_estimate=0.001,
+                baseline_cost=0.004,
+                savings=0.75,
+                raw_confidence=0.87,
+                complexity=0.5,
+                routing_features=kwargs["routing_features"],
+            )
 
         def handler(request: httpx.Request) -> httpx.Response:
             called["upstream"] = True
-            raise AssertionError("Upstream request should not be attempted when routing is infeasible")
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_tool_followup_openai",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek/deepseek-v3.2",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 18, "completion_tokens": 2, "total_tokens": 20},
+                },
+                headers={"content-type": "application/json"},
+            )
 
         async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
@@ -1338,14 +1390,17 @@ class TestTransportRouting:
                 headers={"anthropic-beta": "interleaved-thinking-2025-05-14"},
             )
 
-            assert resp.status_code == 400
-            payload = resp.json()
-            assert payload["error"]["code"] == "routing_constraints_unmet"
-            assert "native anthropic transport" in payload["error"]["message"].lower()
-            assert payload["error"]["details"]["failed_constraints"] == ["anthropic-native-transport"]
-            assert payload["error"]["details"]["missing_capabilities"] == ["anthropic-tool-transport"]
-            assert called["route"] is False
-            assert called["upstream"] is False
+            assert resp.status_code == 200
+            assert called["route"] is True
+            assert called["upstream"] is True
+            assert routed["available_models"] == ["deepseek/deepseek-v3.2"]
+            assert resp.headers["x-uncommon-route-requested-transport"] == "anthropic-messages"
+            assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["messages"][0]["tool_calls"][0]["function"]["name"] == "mkdir"
+            assert body["messages"][1]["role"] == "tool"
         finally:
             asyncio.run(async_client.aclose())
 
@@ -1507,7 +1562,7 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_lock_to_previous_model(
+    def test_virtual_messages_with_thinking_blocks_do_not_lock_to_previous_model(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1517,17 +1572,17 @@ class TestTransportRouting:
         def fake_route(*args, **kwargs):
             routed["available_models"] = list(kwargs.get("available_models") or [])
             return RoutingDecision(
-                model="minimax/minimax-m2.7",
-                tier=Tier.COMPLEX,
-                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
-                served_quality=ServedQuality.PREMIUM,
-                served_quality_target=ServedQuality.PREMIUM,
+                model="deepseek/deepseek-v3.2",
+                tier=Tier.MEDIUM,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.GENERAL,
+                served_quality=ServedQuality.BALANCED,
+                served_quality_target=ServedQuality.BALANCED,
                 served_quality_floor=ServedQuality.BALANCED,
                 continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
                 mode=RoutingMode.AUTO,
                 confidence=0.93,
                 method="pool",
-                reasoning="forced minimax route for thinking continuity",
+                reasoning="forced openai-compatible route despite prior thinking block",
                 cost_estimate=0.005,
                 baseline_cost=0.02,
                 savings=0.75,
@@ -1542,14 +1597,16 @@ class TestTransportRouting:
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_sticky_thinking",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "minimax/minimax-m2.7",
-                    "content": [{"type": "text", "text": "done"}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                    "id": "chatcmpl_prior_thinking",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek/deepseek-v3.2",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 21, "completion_tokens": 2, "total_tokens": 23},
                 },
                 headers={"content-type": "application/json"},
             )
@@ -1578,7 +1635,7 @@ class TestTransportRouting:
         try:
             mapper = _build_seed_mapper(
                 "minimax/minimax-m2.7",
-                "anthropic/claude-opus-4-5",
+                "deepseek/deepseek-v3.2",
             )
             app = create_app(
                 upstream="https://api.commonstack.ai/v1",
@@ -1602,21 +1659,12 @@ class TestTransportRouting:
                                     "thinking": "Need to inspect requirements first.",
                                     "signature": "sig_123",
                                 },
-                                {
-                                    "type": "tool_use",
-                                    "id": "toolu_01",
-                                    "name": "mkdir",
-                                    "input": {"path": "weather-cli"},
-                                },
+                                {"type": "text", "text": "Ready."},
                             ],
                         },
                         {
                             "role": "user",
-                            "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": "toolu_01",
-                                "content": [{"type": "text", "text": "done"}],
-                            }],
+                            "content": "Continue in one sentence.",
                         },
                     ],
                 },
@@ -1627,27 +1675,38 @@ class TestTransportRouting:
             )
 
             assert resp.status_code == 200
-            assert routed["available_models"] == ["minimax/minimax-m2.7"]
-            assert captured["url"] == "https://api.commonstack.ai/v1/messages"
+            assert set(routed["available_models"]) == {
+                "minimax/minimax-m2.7",
+                "deepseek/deepseek-v3.2",
+            }
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            serialized = json.dumps(body)
+            assert "sig_123" not in serialized
+            assert '"thinking"' not in serialized
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-context=locked-to-previous=minimax/minimax-m2.7" in trace["route_reasoning"]
+            assert "thinking-context=" not in trace["route_reasoning"]
+            assert trace["model"] == "deepseek/deepseek-v3.2"
+            assert trace["transport"] == "openai-chat"
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_enabled_filters_unsupported_models(
+    def test_virtual_messages_with_thinking_enabled_keeps_full_route_pool(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        captured: dict[str, object] = {}
         routed: dict[str, object] = {}
 
         def fake_route(*args, **kwargs):
             routed["available_models"] = list(kwargs.get("available_models") or [])
             return RoutingDecision(
-                model="anthropic/claude-sonnet-4-6",
+                model="deepseek/deepseek-v3.2",
                 tier=Tier.MEDIUM,
-                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.GENERAL,
                 served_quality=ServedQuality.BALANCED,
                 served_quality_target=ServedQuality.BALANCED,
                 served_quality_floor=ServedQuality.ECONOMY,
@@ -1655,7 +1714,7 @@ class TestTransportRouting:
                 mode=RoutingMode.AUTO,
                 confidence=0.84,
                 method="pool",
-                reasoning="forced sonnet route for thinking support",
+                reasoning="forced openai-compatible route with thinking enabled",
                 cost_estimate=0.004,
                 baseline_cost=0.02,
                 savings=0.80,
@@ -1665,17 +1724,21 @@ class TestTransportRouting:
             )
 
         def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_thinking_supported",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "anthropic/claude-sonnet-4-6",
-                    "content": [{"type": "text", "text": "done"}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                    "id": "chatcmpl_thinking_enabled",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek/deepseek-v3.2",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 21, "completion_tokens": 2, "total_tokens": 23},
                 },
                 headers={"content-type": "application/json"},
             )
@@ -1688,6 +1751,7 @@ class TestTransportRouting:
         try:
             traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
             mapper = _build_seed_mapper(
+                "deepseek/deepseek-v3.2",
                 "anthropic/claude-haiku-4-5",
                 "anthropic/claude-sonnet-4-6",
                 "minimax/minimax-m2.1",
@@ -1712,20 +1776,28 @@ class TestTransportRouting:
 
             assert resp.status_code == 200
             assert set(routed["available_models"]) == {
+                "deepseek/deepseek-v3.2",
+                "anthropic/claude-haiku-4-5",
                 "anthropic/claude-sonnet-4-6",
+                "minimax/minimax-m2.1",
                 "minimax/minimax-m2.7",
             }
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert "thinking" not in body
             request_id = resp.headers["x-uncommon-route-request-id"]
             trace = traces.find(request_id)
             assert trace is not None
-            assert "thinking-context=compatible-pool(2/4)" in trace["route_reasoning"]
+            assert "thinking-context=" not in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_virtual_messages_with_thinking_blocks_fail_closed_when_previous_model_unavailable(
+    def test_virtual_messages_with_thinking_blocks_reroute_when_previous_model_unavailable(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        captured: dict[str, object] = {}
         called = {"route": False, "upstream": False}
         routed: dict[str, object] = {}
 
@@ -1733,10 +1805,10 @@ class TestTransportRouting:
             called["route"] = True
             routed["available_models"] = list(kwargs.get("available_models") or [])
             return RoutingDecision(
-                model="anthropic/claude-opus-4-5",
+                model="deepseek/deepseek-v3.2",
                 tier=Tier.MEDIUM,
-                capability_lane=CapabilityLane.ANTHROPIC_TOOL_SAFE,
-                served_quality=ServedQuality.PREMIUM,
+                capability_lane=kwargs["routing_features"].capability_lane or CapabilityLane.GENERAL,
+                served_quality=ServedQuality.BALANCED,
                 served_quality_target=ServedQuality.BALANCED,
                 served_quality_floor=ServedQuality.ECONOMY,
                 continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
@@ -1754,17 +1826,21 @@ class TestTransportRouting:
 
         def handler(request: httpx.Request) -> httpx.Response:
             called["upstream"] = True
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_thinking_rerouted",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "anthropic/claude-opus-4-5",
-                    "content": [{"type": "text", "text": "done"}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 21, "output_tokens": 2},
+                    "id": "chatcmpl_thinking_rerouted",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek/deepseek-v3.2",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 21, "completion_tokens": 2, "total_tokens": 23},
                 },
                 headers={"content-type": "application/json"},
             )
@@ -1791,7 +1867,7 @@ class TestTransportRouting:
         monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
 
         try:
-            mapper = _build_seed_mapper("anthropic/claude-opus-4-5")
+            mapper = _build_seed_mapper("deepseek/deepseek-v3.2")
             app = create_app(
                 upstream="https://api.commonstack.ai/v1",
                 model_mapper=mapper,
@@ -1838,10 +1914,20 @@ class TestTransportRouting:
                 },
             )
 
-            assert resp.status_code == 400
-            assert called["route"] is False
-            assert called["upstream"] is False
-            assert "signed thinking context" in resp.text
+            assert resp.status_code == 200
+            assert called["route"] is True
+            assert called["upstream"] is True
+            assert routed["available_models"] == ["deepseek/deepseek-v3.2"]
+            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            serialized = json.dumps(body)
+            assert "sig_123" not in serialized
+            assert '"thinking"' not in serialized
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert "thinking-context=" not in trace["route_reasoning"]
         finally:
             asyncio.run(async_client.aclose())
 

@@ -1,6 +1,6 @@
 {
   "name": "@anjieyang/uncommon-route",
-  "version": "0.7.17",
+  "version": "0.7.18",
   "description": "OpenClaw plugin for UncommonRoute, the local LLM router that cuts premium-model spend",
   "type": "module",
   "main": "src/index.js",

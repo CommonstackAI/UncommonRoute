@@ -77,12 +77,9 @@ from uncommon_route.router.signal_tuning import (
 )
 from uncommon_route.router.structural import estimate_tokens, estimate_output_budget
 from uncommon_route.router.types import (
-    CapabilityLane,
     ModelPricing,
     RequestRequirements,
-    RoutingFailureCode,
     RoutingFeatures,
-    RoutingInfeasibility,
     RoutingInfeasibleError,
     RoutingMode,
     ServedQuality,
@@ -2226,88 +2223,6 @@ def _choose_transport(
     )
 
 
-def _requires_transport_safe_candidates(
-    *,
-    api_format: str,
-    endpoint_name: str,
-    step_type: str,
-    has_tools: bool,
-    has_tool_results: bool,
-) -> bool:
-    requested_transport = _requested_transport_name(
-        api_format=api_format,
-        endpoint_name=endpoint_name,
-    )
-    if requested_transport != "anthropic-messages":
-        return False
-    return (
-        step_type in {"tool-selection", "tool-result-followup"}
-        or has_tools
-        or has_tool_results
-    )
-
-
-def _filter_transport_compatible_models(
-    *,
-    available_models: list[str],
-    api_format: str,
-    endpoint_name: str,
-    upstream_provider: str,
-    upstream_base: str,
-    step_type: str,
-    has_tools: bool,
-    has_tool_results: bool,
-    anthropic_beta_present: bool,
-    providers_config: ProvidersConfig,
-) -> tuple[list[str], str]:
-    if not available_models:
-        return [], ""
-    if not _requires_transport_safe_candidates(
-        api_format=api_format,
-        endpoint_name=endpoint_name,
-        step_type=step_type,
-        has_tools=has_tools,
-        has_tool_results=has_tool_results,
-    ):
-        return list(available_models), ""
-
-    compatible: list[str] = []
-    for model_name in available_models:
-        transport_decision = _choose_transport(
-            api_format=api_format,
-            endpoint_name=endpoint_name,
-            selected_model=model_name,
-            provider_entry=providers_config.get_for_model(model_name),
-            upstream_provider=upstream_provider,
-            upstream_base=upstream_base,
-            step_type=step_type,
-            has_tools=has_tools,
-            has_tool_results=has_tool_results,
-            anthropic_beta_present=anthropic_beta_present,
-        )
-        if transport_decision.native_anthropic_transport:
-            compatible.append(model_name)
-
-    if compatible:
-        note = f"transport-filter=anthropic-native-tools({len(compatible)}/{len(available_models)})"
-        return compatible, note
-
-    raise RoutingInfeasibleError(
-        RoutingInfeasibility(
-            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
-            message=(
-                "Anthropic tool semantics require native anthropic transport, "
-                "but no compatible models are available for the current upstream"
-            ),
-            available_model_count=len(available_models),
-            candidate_count=0,
-            constraint_tags=("transport-safe",),
-            failed_constraints=("anthropic-native-transport",),
-            missing_capabilities=("anthropic-tool-transport",),
-        )
-    )
-
-
 def _can_reuse_native_anthropic_body(
     *,
     upstream_body: dict[str, Any],
@@ -2336,38 +2251,6 @@ def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
         for block in content:
             if isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}:
                 return True
-    return False
-
-
-def _anthropic_thinking_enabled(body: dict[str, Any] | None) -> bool:
-    if not isinstance(body, dict):
-        return False
-    thinking = body.get("thinking")
-    if not isinstance(thinking, dict):
-        return False
-    thinking_type = str(thinking.get("type") or "").strip().lower()
-    return bool(thinking_type and thinking_type != "disabled")
-
-
-def _supports_anthropic_thinking_payload(model: str) -> bool:
-    value = str(model or "").strip().lower()
-    provider, _, core = value.partition("/")
-    if not core:
-        core = provider
-        provider = ""
-    core = re.sub(r"(\d)\.(\d)", r"\1-\2", core)
-
-    if provider == "anthropic":
-        if "haiku" in core:
-            return False
-        return (
-            "claude-opus-4" in core
-            or "claude-sonnet-4" in core
-            or "claude-3-7-sonnet" in core
-            or "claude-sonnet-3-7" in core
-        )
-    if provider == "minimax":
-        return "minimax-m2-7" in core or "minimax-m2-5" in core
     return False
 
 
@@ -2405,90 +2288,6 @@ def _latest_successful_session_model(
     if not previous_model or _is_virtual_model_name(previous_model):
         return None
     return previous_model
-
-
-def _raise_anthropic_thinking_affinity_error(
-    *,
-    previous_model: str,
-    reason: str,
-    available_models: list[str],
-) -> None:
-    raise RoutingInfeasibleError(
-        RoutingInfeasibility(
-            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
-            message=(
-                "Anthropic thinking blocks require the same model that created "
-                f"the prior signed thinking context ({previous_model}); {reason}."
-            ),
-            available_model_count=len(available_models),
-            candidate_count=0,
-            constraint_tags=("anthropic-thinking-context",),
-            failed_constraints=("anthropic-thinking-model-affinity",),
-            missing_capabilities=("signed-thinking-continuity",),
-        )
-    )
-
-
-def _filter_anthropic_thinking_context(
-    *,
-    available_models: list[str],
-    api_format: str,
-    endpoint_name: str,
-    session_id: str | None,
-    source_body: dict[str, Any] | None,
-    trace_store: TraceStore,
-) -> tuple[list[str], str]:
-    if not available_models:
-        return [], ""
-    if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
-        return list(available_models), ""
-    thinking_blocks_present = _contains_anthropic_thinking_blocks(source_body)
-    if not (_anthropic_thinking_enabled(source_body) or thinking_blocks_present):
-        return list(available_models), ""
-
-    previous_note = ""
-    previous_trace = trace_store.latest_for_session(
-        session_id,
-        step_types=("tool-selection", "tool-result-followup", "general"),
-    ) if session_id else None
-    if (
-        previous_trace is not None
-        and previous_trace.status_code < 400
-        and previous_trace.api_format == "anthropic"
-        and previous_trace.transport == "anthropic-messages"
-    ):
-        previous_model = str(previous_trace.model or "").strip()
-        if previous_model:
-            if thinking_blocks_present:
-                if previous_model not in available_models:
-                    _raise_anthropic_thinking_affinity_error(
-                        previous_model=previous_model,
-                        reason="that model is not available in the current route pool",
-                        available_models=available_models,
-                    )
-                if not _supports_anthropic_thinking_payload(previous_model):
-                    _raise_anthropic_thinking_affinity_error(
-                        previous_model=previous_model,
-                        reason="that model is not compatible with Anthropic thinking payloads",
-                        available_models=available_models,
-                    )
-                return [previous_model], f"thinking-context=locked-to-previous={previous_model}"
-            if previous_model in available_models:
-                previous_note = f";previous={previous_model}"
-            else:
-                previous_note = f";previous-unavailable={previous_model}"
-
-    compatible_models = [
-        model for model in available_models if _supports_anthropic_thinking_payload(model)
-    ]
-    if not compatible_models:
-        return list(available_models), f"thinking-context=no-compatible-pool{previous_note}"
-    if len(compatible_models) == len(available_models):
-        return list(available_models), f"thinking-context=compatible-pool{previous_note}"
-    return compatible_models, (
-        f"thinking-context=compatible-pool({len(compatible_models)}/{len(available_models)})"
-        f"{previous_note}"
-    )
 
 
 def _should_use_session_sticky_model(features: RoutingFeatures) -> bool:
@@ -3234,19 +3033,9 @@ def create_app(
         session_id: str | None,
         has_tools: bool,
     ) -> RoutingFeatures:
-        transport_safe_lane = _requires_transport_safe_candidates(
-            api_format=api_format,
-            endpoint_name=endpoint_name,
-            step_type=features.step_type,
-            has_tools=has_tools,
-            has_tool_results=features.has_tool_results,
-        )
         capability_lane = features.capability_lane
         if capability_lane is None:
-            if transport_safe_lane:
-                capability_lane = CapabilityLane.ANTHROPIC_TOOL_SAFE
-            else:
-                capability_lane = request_capability_lane(features)
+            capability_lane = request_capability_lane(features)
 
         previous_served_quality: ServedQuality | None = None
         continuity_quality_floor: ServedQuality | None = None
@@ -3304,18 +3093,6 @@ def create_app(
         if user_keyed:
             base_available_models = _merge_available_models(base_available_models, sorted(user_keyed))
         available_models = _circuit_breaker.filter_available(base_available_models)
-        available_models, transport_pool_note = _filter_transport_compatible_models(
-            available_models=available_models,
-            api_format="openai",
-            endpoint_name="chat_completions",
-            upstream_provider=_mapper.provider,
-            upstream_base=upstream,
-            step_type=step_type,
-            has_tools=bool(body.get("tools") or body.get("customTools")),
-            has_tool_results=routing_features.has_tool_results,
-            anthropic_beta_present=False,
-            providers_config=_providers,
-        )
         decision = route(
             prompt,
             system_prompt,
@@ -3334,8 +3111,6 @@ def create_app(
             record_lifecycle=False,
         )
         reasoning = decision.reasoning
-        if transport_pool_note:
-            reasoning = f"{reasoning} | {transport_pool_note}"
 
         effective_requirements = decision.routing_features.request_requirements()
         effective_hints = decision.routing_features.workload_hints()
@@ -4353,30 +4128,6 @@ def create_app(
                     scene_pool = _active_scene.model_pool()
                     available_scene_models = [m for m in scene_pool if m in route_available_models]
                     route_available_models = available_scene_models or scene_pool
-                route_available_models, transport_pool_note = _filter_transport_compatible_models(
-                    available_models=route_available_models,
-                    api_format=api_format,
-                    endpoint_name=endpoint_name,
-                    upstream_provider=_mapper.provider,
-                    upstream_base=upstream,
-                    step_type=step_type,
-                    has_tools=bool(body.get("tools") or body.get("customTools")),
-                    has_tool_results=routing_features.has_tool_results,
-                    anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
-                    providers_config=_providers,
-                )
-                if transport_pool_note:
-                    route_pool_notes.append(transport_pool_note)
-                route_available_models, thinking_lock_note = _filter_anthropic_thinking_context(
-                    available_models=route_available_models,
-                    api_format=api_format,
-                    endpoint_name=endpoint_name,
-                    session_id=session_id,
-                    source_body=source_body,
-                    trace_store=_traces,
-                )
-                if thinking_lock_note:
-                    route_pool_notes.append(thinking_lock_note)
                 route_available_models, session_sticky_note = _filter_session_sticky_context(
                     available_models=route_available_models,
                     session_id=session_id,

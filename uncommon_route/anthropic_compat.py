@@ -108,23 +108,8 @@ def _preserve_text_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return preserved
 
 
-def _preserve_passthrough_block(block: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(block, dict):
-        return None
-    if block.get("type") not in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
-        return None
-    return deepcopy(block)
-
-
 def _should_preserve_block_content(blocks: list[dict[str, Any]]) -> bool:
-    return any(
-        isinstance(block, dict)
-        and (
-            "cache_control" in block
-            or block.get("type") in _PASSTHROUGH_CONTENT_BLOCK_TYPES
-        )
-        for block in blocks
-    )
+    return any(isinstance(block, dict) and "cache_control" in block for block in blocks)
 
 
 def anthropic_to_openai_request(body: dict[str, Any]) -> dict[str, Any]:
@@ -322,10 +307,6 @@ def _convert_user_message(
             if "cache_control" in block:
                 item["cache_control"] = block["cache_control"]
             preserved_blocks.append(item)
-        elif btype in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
-            preserved = _preserve_passthrough_block(block)
-            if preserved is not None:
-                preserved_blocks.append(preserved)
         elif btype == "tool_result":
             tool_results.append(block)
 
@@ -367,10 +348,6 @@ def _convert_assistant_message(
             if "cache_control" in block:
                 item["cache_control"] = block["cache_control"]
             preserved_blocks.append(item)
-        elif btype in _PASSTHROUGH_CONTENT_BLOCK_TYPES:
-            preserved = _preserve_passthrough_block(block)
-            if preserved is not None:
-                preserved_blocks.append(preserved)
         elif btype == "tool_use":
             tool_calls.append({
                 "id": block.get("id", ""),
@@ -380,6 +357,9 @@ def _convert_assistant_message(
                     "arguments": json.dumps(block.get("input", {})),
                 },
             })
+
+    if not text_parts and not preserved_blocks and not tool_calls:
+        return
 
     assistant_msg: dict[str, Any] = {
         "role": "assistant",

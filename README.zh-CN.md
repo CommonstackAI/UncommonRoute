@@ -162,6 +162,24 @@ resp = client.chat.completions.create(
 
 ---
 
+## 工作原理
+
+每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
+
+| Signal | 看什么 | 典型开销 |
+|---|---|---:|
+| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
+| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
+| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
+
+三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
+
+路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
+
+UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
+
+---
+
 ## Benchmark
 
 UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench) 上评测。该评测包含 SWE-Bench、BFCL、mtRAG、QMSum、PinchBench 的 520 个实例，共 970 条路由器可见的任务前缀，并带有执行验证过的目标档位标签。端到端验证使用一组 100 个 held-out SWE-bench Verified case。
@@ -199,39 +217,13 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ---
 
-## 工作原理
+## 适合谁
 
-每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
-
-| Signal | 看什么 | 典型开销 |
-|---|---|---:|
-| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
-| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
-| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
-
-三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
-
-路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
-
-UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
-
----
-
-## 隐私
-
-路由在本地完成。**prompt 不会经过额外的云端路由器；它只会发给你配置的 upstream provider。**
-
-```bash
-uncommon-route telemetry status
-```
-
-诊断文件也默认保存在本机：
-
-```bash
-uncommon-route support bundle
-```
-
-脱敏后的 support bundle 会写到 `~/.uncommon-route/support/`。只有你主动分享时，它才会离开本机。
+- 你每天都在用 Claude Code、Cursor、Codex 或类似 agent 写代码。
+- 你的账单主要花在最强模型上，但很多请求并不需要同一档模型。
+- 你想省 API 成本，但不想把 prompt 发给一个额外的云端路由器。
+- 你需要按请求粒度路由，而不是整个会话只选一次模型。
+- 你希望有可解释、可调整、可反馈的路由，而不只是一个黑盒代理。
 
 ---
 
@@ -245,24 +237,6 @@ uncommon-route spend status
 ```
 
 Dashboard 里也可以设置请求级、小时级或每日预算。达到上限后，请求会回退到当前可用的最低成本档位，而不是直接失败。
-
----
-
-## 适合谁
-
-- 你每天都在用 Claude Code、Cursor、Codex 或类似 agent 写代码。
-- 你的账单主要花在最强模型上，但很多请求并不需要同一档模型。
-- 你想省 API 成本，但不想把 prompt 发给一个额外的云端路由器。
-- 你需要按请求粒度路由，而不是整个会话只选一次模型。
-- 你希望有可解释、可调整、可反馈的路由，而不只是一个黑盒代理。
-
----
-
-## 不适合谁
-
-- 你只偶尔调用 LLM，账单本来就很低。
-- 你希望路由器提升低成本模型本身的能力。UncommonRoute 不做这个承诺。
-- 你所有任务都必须无条件使用最强模型。那可以直接用 `uncommon-route/best`，但省钱空间会小很多。
 
 ---
 
@@ -317,6 +291,24 @@ uncommon-route provider remove <name>
 | `UNCOMMON_ROUTE_PORT` | 本地 proxy 端口，默认 8403 |
 
 </details>
+
+---
+
+## 隐私
+
+路由在本地完成。**prompt 不会经过额外的云端路由器；它只会发给你配置的 upstream provider。**
+
+```bash
+uncommon-route telemetry status
+```
+
+诊断文件也默认保存在本机：
+
+```bash
+uncommon-route support bundle
+```
+
+脱敏后的 support bundle 会写到 `~/.uncommon-route/support/`。只有你主动分享时，它才会离开本机。
 
 ---
 

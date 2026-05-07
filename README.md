@@ -162,6 +162,24 @@ resp = client.chat.completions.create(
 
 ---
 
+## How It Works
+
+Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
+
+| Signal | What it looks at | Typical overhead |
+|---|---|---:|
+| Metadata | Conversation structure, tool use, context depth | <1ms |
+| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
+| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
+
+The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
+
+Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
+
+UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
+
+---
+
 ## Benchmark
 
 UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. The end-to-end validation below uses a 100-case held-out SWE-bench Verified split.
@@ -199,39 +217,13 @@ Cold start loads the embedding model and can take a few seconds. After warm-up, 
 
 ---
 
-## How It Works
+## Who It's For
 
-Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
-
-| Signal | What it looks at | Typical overhead |
-|---|---|---:|
-| Metadata | Conversation structure, tool use, context depth | <1ms |
-| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
-| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
-
-The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
-
-Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
-
-UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
-
----
-
-## Privacy
-
-Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
-
-```bash
-uncommon-route telemetry status
-```
-
-Diagnostic exports are local by default:
-
-```bash
-uncommon-route support bundle
-```
-
-The redacted support bundle is written to `~/.uncommon-route/support/`. It leaves your machine only if you choose to share it.
+- You use Claude Code, Cursor, Codex, or another coding agent every day.
+- Most of your spend goes to frontier models, but many requests don't need that tier.
+- You want lower API cost without sending prompts to an extra hosted router.
+- You need routing at request granularity, not one model choice for the entire session.
+- You want routing that is explainable, adjustable, and feedback-driven.
 
 ---
 
@@ -245,24 +237,6 @@ uncommon-route spend status
 ```
 
 You can also configure per-request, hourly, or daily limits in the Dashboard. Once a limit is reached, requests fall back to the lowest-cost available tier instead of failing outright.
-
----
-
-## Who It's For
-
-- You use Claude Code, Cursor, Codex, or another coding agent every day.
-- Most of your spend goes to frontier models, but many requests don't need that tier.
-- You want lower API cost without sending prompts to an extra hosted router.
-- You need routing at request granularity, not one model choice for the entire session.
-- You want routing that is explainable, adjustable, and feedback-driven.
-
----
-
-## Who It's Not For
-
-- You only call LLMs occasionally and your bill is already small.
-- You expect a router to make low-cost models fundamentally more capable. UncommonRoute doesn't make that claim.
-- You want every request to use the strongest model, no matter what. You can use `uncommon-route/best`, but the savings will be smaller.
 
 ---
 
@@ -317,6 +291,24 @@ Supported providers: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `min
 | `UNCOMMON_ROUTE_PORT` | Local proxy port, default 8403 |
 
 </details>
+
+---
+
+## Privacy
+
+Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
+
+```bash
+uncommon-route telemetry status
+```
+
+Diagnostic exports are local by default:
+
+```bash
+uncommon-route support bundle
+```
+
+The redacted support bundle is written to `~/.uncommon-route/support/`. It leaves your machine only if you choose to share it.
 
 ---
 

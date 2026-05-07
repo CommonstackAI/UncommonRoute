@@ -23,15 +23,6 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs
 <a href="#benchmark">Benchmark</a> ·
 <a href="#privacy">Privacy</a>
 
-<br><br>
-
-```bash
-pipx install uncommon-route
-uncommon-route init
-```
-
-<br>
-
 | | Opus-only | UncommonRoute | Saved |
 |---|:---:|:---:|:---:|
 | Tasks solved | 74 / 100 | **75 / 100** | Matched |

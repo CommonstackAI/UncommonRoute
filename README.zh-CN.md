@@ -23,15 +23,6 @@ UncommonRoute 接入 Claude Code、Cursor、Codex 和 OpenAI SDK，本地分析�
 <a href="#benchmark">Benchmark</a> ·
 <a href="#隐私">Privacy</a>
 
-<br><br>
-
-```bash
-pipx install uncommon-route
-uncommon-route init
-```
-
-<br>
-
 | 全程 Opus | UncommonRoute | 省下 |
 |---:|---:|---:|
 | 74 / 100 任务通过 | **75 / 100 任务通过** | 质量持平 |

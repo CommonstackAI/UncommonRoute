@@ -750,9 +750,9 @@ def test_high_pressure_short_observation_promotes_rescue_review_quality(monkeypa
     )
 
     assert decision.tier is Tier.COMPLEX
-    assert decision.model == "anthropic/claude-opus-4.6"
+    assert decision.served_quality is ServedQuality.PREMIUM
     assert "tier-cap-softened(agent-pressure=0.80)" in decision.reasoning
-    assert "served-quality-target-preferred=premium" in decision.reasoning
+    assert "served-quality=tier(premium" in decision.reasoning
     assert "pressure-rescue=premium-window" in decision.reasoning
     assert "premium-cost-benefit=" not in decision.reasoning
 
@@ -1182,7 +1182,7 @@ def test_late_explicit_verification_failure_gets_premium_correction(monkeypatch)
     )
 
     assert decision.tier is Tier.COMPLEX
-    assert decision.model == "anthropic/claude-opus-4.6"
+    assert decision.served_quality is ServedQuality.PREMIUM
     assert "step-risk=high" in decision.reasoning
     assert "pressure-rescue=verification-review" in decision.reasoning
     assert "served-quality-score-target=economy" not in decision.reasoning

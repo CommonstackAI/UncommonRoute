@@ -262,12 +262,12 @@ def test_route_adapts_to_model_experience() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
     for _ in range(6):
         store.observe(
-            "moonshot/kimi-k2.5",
+            "nvidia/gpt-oss-120b",
             RoutingMode.AUTO,
             Tier.SIMPLE,
             success=False,
         )
-        store.record_feedback("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE, "weak")
+        store.record_feedback("nvidia/gpt-oss-120b", RoutingMode.AUTO, Tier.SIMPLE, "weak")
         store.observe(
             "google/gemini-2.5-flash-lite",
             RoutingMode.AUTO,
@@ -283,10 +283,10 @@ def test_route_adapts_to_model_experience() -> None:
         for _ in range(10):
             decision = route("hello", model_experience=store)
             gemini_score = next((s for s in decision.candidate_scores if s.model == "google/gemini-2.5-flash-lite"), None)
-            kimi_score = next((s for s in decision.candidate_scores if s.model == "moonshot/kimi-k2.5"), None)
-            if gemini_score and kimi_score and gemini_score.predicted_quality > kimi_score.predicted_quality:
+            gpt_oss_score = next((s for s in decision.candidate_scores if s.model == "nvidia/gpt-oss-120b"), None)
+            if gemini_score and gpt_oss_score and gemini_score.predicted_quality > gpt_oss_score.predicted_quality:
                 gemini_wins += 1
-        assert gemini_wins >= 5, f"Gemini (positive experience) should beat kimi (negative) majority of the time, got {gemini_wins}/10"
+        assert gemini_wins >= 5, f"Gemini (positive experience) should beat gpt-oss (negative) majority of the time, got {gemini_wins}/10"
     finally:
         selector._rng.setstate(rng_state)
 

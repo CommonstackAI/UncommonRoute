@@ -136,6 +136,11 @@ ROUTING_SUPERSEDED_MODELS: dict[str, tuple[str, ...]] = {
     "google/gemini-2.5-pro": (
         "google/gemini-3.1-pro-preview",
         "google/gemini-3-pro-preview",
+        "google/gemini-3.1-pro",
+    ),
+    "google/gemini-3-pro-preview": (
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-pro",
     ),
 }
 
@@ -220,6 +225,14 @@ def _superseded_routing_models(model_ids: set[str]) -> set[str]:
         for model_id, successors in ROUTING_SUPERSEDED_MODELS.items()
         if model_id in model_ids and any(successor in model_ids for successor in successors)
     }
+
+
+def filter_superseded_routing_models(model_ids: list[str]) -> list[str]:
+    """Remove older model IDs when a configured successor is also available."""
+    superseded = _superseded_routing_models(set(model_ids))
+    if not superseded:
+        return model_ids
+    return [model_id for model_id in model_ids if model_id not in superseded]
 
 
 def infer_capabilities(
@@ -550,12 +563,12 @@ class ModelMapper:
     @property
     def routable_models(self) -> list[str]:
         """Chat-routable upstream model IDs, sorted."""
-        superseded = _superseded_routing_models(set(self.available_models))
-        return [
+        routable = [
             model
             for model in self.available_models
-            if model not in superseded and is_routable_chat_model(model)
+            if is_routable_chat_model(model)
         ]
+        return filter_superseded_routing_models(routable)
 
     def get_pricing(self, model_id: str) -> ModelPricing | None:
         """Look up pricing for a single model (internal or upstream ID)."""

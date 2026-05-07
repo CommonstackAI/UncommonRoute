@@ -14,6 +14,7 @@ from uncommon_route.providers import (
     remove_provider,
     select_preferred_model,
 )
+from uncommon_route.router.types import RoutingFeatures, Tier
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +146,11 @@ class TestRouteWithBYOK:
     def test_route_byok_reasoning_tier(self) -> None:
         from uncommon_route import route
         keyed = {"deepseek/deepseek-reasoner"}
-        decision = route("prove that sqrt(2) is irrational", user_keyed_models=keyed)
+        decision = route(
+            "prove that sqrt(2) is irrational",
+            routing_features=RoutingFeatures(prefers_reasoning=True, tier_floor=Tier.COMPLEX),
+            user_keyed_models=keyed,
+        )
         assert decision.model == "deepseek/deepseek-reasoner"
         assert "byok-preferred" in decision.method
 

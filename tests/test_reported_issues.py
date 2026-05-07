@@ -562,6 +562,7 @@ def test_superseded_gemini_pro_is_not_routed_when_successor_exists():
     mapper = ModelMapper("https://api.commonstack.ai/v1")
     for model_id in [
         "google/gemini-2.5-pro",
+        "google/gemini-3-pro-preview",
         "google/gemini-3.1-pro-preview",
         "zai-org/glm-4.7",
     ]:
@@ -579,6 +580,7 @@ def test_superseded_gemini_pro_is_not_routed_when_successor_exists():
 
     assert "google/gemini-2.5-pro" in mapper.available_models
     assert "google/gemini-2.5-pro" not in mapper.routable_models
+    assert "google/gemini-3-pro-preview" not in mapper.routable_models
     assert "google/gemini-3.1-pro-preview" in mapper.routable_models
 
 

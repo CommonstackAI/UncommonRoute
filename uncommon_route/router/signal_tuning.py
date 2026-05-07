@@ -46,6 +46,10 @@ _STRUCTURED_DIRECTIVE_RE = re.compile(
     r"\b(?:respond|output|return|format|structured|valid|matching)\b",
     re.IGNORECASE,
 )
+_CLIENT_WRAPPER_BLOCK_RE = re.compile(
+    r"<(?P<tag>system-reminder|assistant-reminder|user-prompt-submit-hook)>\s*.*?\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _clamp01(value: float) -> float:
@@ -54,6 +58,11 @@ def _clamp01(value: float) -> float:
 
 def word_count(text: str) -> int:
     return len(_TOKEN_RE.findall(text or ""))
+
+
+def strip_client_wrapper_blocks(text: str) -> str:
+    """Remove client-injected wrapper blocks from user-visible prompt text."""
+    return " ".join(_CLIENT_WRAPPER_BLOCK_RE.sub(" ", str(text or "")).split())
 
 
 def text_substance_score(text: str) -> float:
@@ -163,11 +172,26 @@ def system_prompt_has_structured_output_constraint(system_prompt: str) -> bool:
     normalized = " ".join(str(system_prompt or "").split())
     if not normalized:
         return False
+    if system_prompt_is_title_generation_sidechannel(normalized):
+        return False
     if not _STRUCTURED_FORMAT_RE.search(normalized):
         return False
     if _STRUCTURED_DIRECTIVE_RE.search(normalized):
         return True
     return any(ch in normalized for ch in "{}[]<>|")
+
+
+def system_prompt_is_title_generation_sidechannel(system_prompt: str) -> bool:
+    """Detect Claude Code's session-title side-channel request."""
+    normalized = " ".join(str(system_prompt or "").lower().split())
+    if not normalized:
+        return False
+    return (
+        "generate a concise" in normalized
+        and "title" in normalized
+        and "return json" in normalized
+        and '"title"' in normalized
+    )
 
 
 def compact_structural_system_prompt(
@@ -196,8 +220,8 @@ def contextual_followup_floor_from_text(
     tuning: RoutingSignalTuning = DEFAULT_SIGNAL_TUNING,
 ) -> Tier | None:
     """Infer a follow-up floor from prior/latest text-shape scores."""
-    prior = str(prior_text or "").strip()
-    latest = str(latest_text or "").strip()
+    prior = strip_client_wrapper_blocks(str(prior_text or "")).strip()
+    latest = strip_client_wrapper_blocks(str(latest_text or "")).strip()
     if not prior or not latest:
         return None
 

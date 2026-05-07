@@ -8,6 +8,7 @@ Supports two selection modes:
 
 from __future__ import annotations
 from dataclasses import replace
+from uncommon_route.model_map import filter_superseded_routing_models
 from uncommon_route.model_experience import CandidateExperience
 from uncommon_route.router.config import BASELINE_MODEL, DEFAULT_MODEL_PRICING
 from uncommon_route.router.quality import (
@@ -351,6 +352,10 @@ def select_model(
             failed_constraint=failed_constraint,
             applied_constraints=applied_constraints,
         )
+    active_candidates = filter_superseded_routing_models(candidates)
+    if active_candidates and len(active_candidates) < len(candidates):
+        reasoning = f"{reasoning} | superseded-filter={len(candidates) - len(active_candidates)}"
+        candidates = active_candidates
 
     capability_notes: list[str] = []
     if excluded:
@@ -1312,6 +1317,10 @@ def select_from_pool(
             failed_constraint=failed_constraint,
             applied_constraints=applied_constraints,
         )
+    active_candidates = filter_superseded_routing_models(candidates)
+    superseded_filtered = len(candidates) - len(active_candidates)
+    if active_candidates:
+        candidates = active_candidates
 
     difficulty_tier_label = tier.value
     budget = estimate_output_budget(prompt, difficulty_tier_label)
@@ -1657,6 +1666,8 @@ def select_from_pool(
         reasoning_parts.append(f"constraints={','.join(constraint_tags)}")
     if hint_tags:
         reasoning_parts.append(f"hints={','.join(hint_tags)}")
+    if superseded_filtered:
+        reasoning_parts.append(f"superseded-filter={superseded_filtered}")
     if step_stable:
         reasoning_parts.append("step-stable=no-bandit")
     pressure_rescue_note = _pressure_rescue_note(

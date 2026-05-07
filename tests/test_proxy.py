@@ -785,6 +785,65 @@ class TestSelectorEndpoint:
         assert data["step_type"] == "tool-selection"
         assert data["served_tier"] == "MEDIUM"
 
+    def test_selector_preview_caps_claude_code_title_sidechannel_to_simple(self, client: TestClient) -> None:
+        resp = client.post("/v1/selector", json={
+            "model": "uncommon-route/auto",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Claude Code. Generate a concise, sentence-case title "
+                        'for this coding session. Return JSON with a single "title" field.'
+                    ),
+                },
+                {"role": "user", "content": "帮我创建一个新的 Python 项目目录，叫 weather-cli"},
+            ],
+            "stream": True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["served_tier"] == "SIMPLE"
+        assert data["served_quality"] == "economy"
+        assert "tier-cap-preserved(title-generation)" in data["reasoning"]
+
+    def test_selector_preview_ignores_wrapper_context_for_followup_floor(self, client: TestClient) -> None:
+        resp = client.post("/v1/selector", json={
+            "model": "uncommon-route/auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "<system-reminder>\n"
+                                "Design a distributed platform with CRDTs, websocket fanout, "
+                                "permission boundaries, audit logging, and rollout plans.\n"
+                                "</system-reminder>"
+                            ),
+                        },
+                        {"type": "text", "text": "hello"},
+                    ],
+                },
+                {"role": "assistant", "content": "Hi."},
+                {"role": "user", "content": "帮我创建一个新的 Python 项目目录，叫 weather-cli"},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run shell commands",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "context-followup-floor=COMPLEX" not in data["reasoning"]
+        assert data["served_tier"] in {"SIMPLE", "MEDIUM"}
+
     def test_route_preview_uses_live_selector_router(self, client: TestClient) -> None:
         resp = client.post("/v1/route-preview", json={
             "prompt": "Create a Python CLI that fetches weather and add tests.",

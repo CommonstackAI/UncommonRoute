@@ -37,6 +37,7 @@ def _caps() -> dict[str, ModelCapabilities]:
         "anthropic/claude-opus-4-7": ModelCapabilities(tool_calling=True, vision=True, reasoning=True),
         "anthropic/claude-sonnet-4-6": ModelCapabilities(tool_calling=True, vision=True),
         "anthropic/claude-haiku-4-5": ModelCapabilities(tool_calling=True, vision=True),
+        "minimax/minimax-m2.5": ModelCapabilities(tool_calling=True),
         "minimax/minimax-m2.7": ModelCapabilities(tool_calling=True),
         "minimax/minimax-m2": ModelCapabilities(tool_calling=True),
         "openai/gpt-5.4-pro-2026-03-05": ModelCapabilities(tool_calling=True, vision=True, reasoning=True),
@@ -48,8 +49,45 @@ def test_target_served_quality_respects_mode_and_complexity() -> None:
     assert target_served_quality(RoutingMode.AUTO, Tier.SIMPLE) is ServedQuality.ECONOMY
     assert target_served_quality(RoutingMode.AUTO, Tier.MEDIUM) is ServedQuality.BALANCED
     assert target_served_quality(RoutingMode.AUTO, Tier.COMPLEX) is ServedQuality.PREMIUM
-    assert target_served_quality(RoutingMode.FAST, Tier.COMPLEX) is ServedQuality.BALANCED
-    assert target_served_quality(RoutingMode.BEST, Tier.SIMPLE) is ServedQuality.BALANCED
+    assert target_served_quality(RoutingMode.FAST, Tier.COMPLEX) is ServedQuality.PREMIUM
+    assert target_served_quality(RoutingMode.BEST, Tier.SIMPLE) is ServedQuality.ECONOMY
+
+
+def test_quality_guards_keep_public_tier_model_pools_disjoint() -> None:
+    caps = _caps()
+    models = [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-opus-4-7",
+    ]
+
+    simple = apply_quality_guards(
+        models,
+        mode=RoutingMode.AUTO,
+        tier=Tier.SIMPLE,
+        lane=CapabilityLane.GENERAL,
+        capabilities=caps,
+    )
+    medium = apply_quality_guards(
+        models,
+        mode=RoutingMode.AUTO,
+        tier=Tier.MEDIUM,
+        lane=CapabilityLane.GENERAL,
+        capabilities=caps,
+    )
+    complex_guard = apply_quality_guards(
+        models,
+        mode=RoutingMode.AUTO,
+        tier=Tier.COMPLEX,
+        lane=CapabilityLane.GENERAL,
+        capabilities=caps,
+    )
+
+    assert simple.allowed_models == ["anthropic/claude-haiku-4-5"]
+    assert medium.allowed_models == ["anthropic/claude-sonnet-4-6"]
+    assert complex_guard.allowed_models == ["anthropic/claude-opus-4-7"]
+    assert not (set(simple.allowed_models) & set(medium.allowed_models))
+    assert not (set(medium.allowed_models) & set(complex_guard.allowed_models))
 
 
 def test_quality_prior_exact_match_keeps_full_confidence() -> None:
@@ -264,7 +302,8 @@ def test_bandit_sampling_uses_quality_prior_evidence_strength(monkeypatch) -> No
 def test_model_served_quality_anchors_anthropic_tool_safe_lane() -> None:
     caps = _caps()
     assert model_served_quality("minimax/minimax-m2", CapabilityLane.ANTHROPIC_TOOL_SAFE, caps["minimax/minimax-m2"]) is ServedQuality.ECONOMY
-    assert model_served_quality("minimax/minimax-m2.7", CapabilityLane.ANTHROPIC_TOOL_SAFE, caps["minimax/minimax-m2.7"]) is ServedQuality.BALANCED
+    assert model_served_quality("minimax/minimax-m2.5", CapabilityLane.ANTHROPIC_TOOL_SAFE, caps["minimax/minimax-m2.5"]) is ServedQuality.BALANCED
+    assert model_served_quality("minimax/minimax-m2.7", CapabilityLane.ANTHROPIC_TOOL_SAFE, caps["minimax/minimax-m2.7"]) is ServedQuality.PREMIUM
     assert model_served_quality("anthropic/claude-opus-4-7", CapabilityLane.ANTHROPIC_TOOL_SAFE, caps["anthropic/claude-opus-4-7"]) is ServedQuality.PREMIUM
 
 
@@ -295,12 +334,27 @@ def test_non_reasoning_model_name_is_not_reasoning_premium() -> None:
     ) is ServedQuality.ECONOMY
 
 
-def test_quality_guards_keep_auto_complex_at_balanced_floor_without_opus_only_pool() -> None:
+def test_model_served_quality_anchors_google_flash_family() -> None:
+    caps = ModelCapabilities(tool_calling=True, vision=True, reasoning=True)
+
+    assert model_served_quality("google/gemini-2.5-flash-lite", CapabilityLane.GENERAL, caps) is ServedQuality.ECONOMY
+    assert model_served_quality("google/gemini-3-flash-preview", CapabilityLane.GENERAL, caps) is ServedQuality.BALANCED
+    assert model_served_quality("google/gemini-3.1-pro", CapabilityLane.GENERAL, caps) is ServedQuality.PREMIUM
+
+
+def test_model_served_quality_anchors_deepseek_chat_and_reasoner() -> None:
+    caps = ModelCapabilities(tool_calling=True)
+
+    assert model_served_quality("deepseek/deepseek-chat", CapabilityLane.GENERAL, caps) is ServedQuality.ECONOMY
+    assert model_served_quality("deepseek/deepseek-reasoner", CapabilityLane.GENERAL, caps) is ServedQuality.PREMIUM
+
+
+def test_quality_guards_keep_auto_complex_in_premium_pool() -> None:
     caps = _caps()
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
-            "minimax/minimax-m2.7",
+            "minimax/minimax-m2.5",
             "anthropic/claude-opus-4-7",
         ],
         mode=RoutingMode.AUTO,
@@ -311,11 +365,8 @@ def test_quality_guards_keep_auto_complex_at_balanced_floor_without_opus_only_po
 
     assert guard.target is ServedQuality.PREMIUM
     assert "minimax/minimax-m2" not in guard.allowed_models
-    assert set(guard.allowed_models) == {
-        "minimax/minimax-m2.7",
-        "anthropic/claude-opus-4-7",
-    }
-    assert "served-quality-target-preferred=premium(1/3)" in guard.notes
+    assert guard.allowed_models == ["anthropic/claude-opus-4-7"]
+    assert "served-quality=tier(premium,1/3)" in guard.notes
 
 
 def test_quality_guards_raise_explicit_complex_reasoning_floor_to_premium() -> None:
@@ -338,13 +389,13 @@ def test_quality_guards_raise_explicit_complex_reasoning_floor_to_premium() -> N
     assert "lane-floor=premium" in guard.notes
 
 
-def test_scoring_target_uses_balanced_floor_for_auto_complex() -> None:
+def test_scoring_target_keeps_public_tier_target_when_floor_is_lower() -> None:
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
         Tier.COMPLEX,
         ServedQuality.PREMIUM,
         ServedQuality.BALANCED,
-    ) is ServedQuality.BALANCED
+    ) is ServedQuality.PREMIUM
     assert scoring_served_quality_target(
         RoutingMode.BEST,
         Tier.COMPLEX,
@@ -353,7 +404,7 @@ def test_scoring_target_uses_balanced_floor_for_auto_complex() -> None:
     ) is ServedQuality.PREMIUM
 
 
-def test_scoring_target_does_not_use_pressure_alone_for_complex_rescue() -> None:
+def test_scoring_target_keeps_complex_premium_regardless_of_pressure() -> None:
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
         Tier.COMPLEX,
@@ -363,7 +414,7 @@ def test_scoring_target_does_not_use_pressure_alone_for_complex_rescue() -> None
         confidence=0.70,
         step_risk="normal",
         agent_pressure=0.70,
-    ) is ServedQuality.BALANCED
+    ) is ServedQuality.PREMIUM
 
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
@@ -377,7 +428,7 @@ def test_scoring_target_does_not_use_pressure_alone_for_complex_rescue() -> None
     ) is ServedQuality.PREMIUM
 
 
-def test_scoring_target_uses_premium_for_initial_complex_planning() -> None:
+def test_scoring_target_uses_premium_for_complex_planning_and_followups() -> None:
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
         Tier.COMPLEX,
@@ -408,17 +459,17 @@ def test_scoring_target_uses_premium_for_initial_complex_planning() -> None:
         session_present=False,
         agent_step_count=3,
         agent_pressure=0.0,
-    ) is ServedQuality.BALANCED
+    ) is ServedQuality.PREMIUM
 
 
-def test_scoring_target_uses_economy_for_low_risk_auto_medium() -> None:
+def test_scoring_target_keeps_medium_target_for_low_risk_auto_medium() -> None:
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
         Tier.MEDIUM,
         ServedQuality.BALANCED,
         ServedQuality.ECONOMY,
         step_risk="low",
-    ) is ServedQuality.ECONOMY
+    ) is ServedQuality.BALANCED
     assert scoring_served_quality_target(
         RoutingMode.AUTO,
         Tier.SIMPLE,
@@ -442,7 +493,10 @@ def test_quality_guards_keep_best_complex_premium_only_when_available() -> None:
     )
 
     assert guard.target is ServedQuality.PREMIUM
-    assert guard.allowed_models == ["anthropic/claude-opus-4-7"]
+    assert set(guard.allowed_models) == {
+        "minimax/minimax-m2.7",
+        "anthropic/claude-opus-4-7",
+    }
 
 
 def test_quality_guards_filter_high_risk_medium_flow_to_balanced_or_higher() -> None:
@@ -450,7 +504,7 @@ def test_quality_guards_filter_high_risk_medium_flow_to_balanced_or_higher() -> 
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
-            "minimax/minimax-m2.7",
+            "minimax/minimax-m2.5",
             "anthropic/claude-sonnet-4-6",
         ],
         mode=RoutingMode.AUTO,
@@ -464,18 +518,18 @@ def test_quality_guards_filter_high_risk_medium_flow_to_balanced_or_higher() -> 
     assert guard.floor is ServedQuality.BALANCED
     assert "minimax/minimax-m2" not in guard.allowed_models
     assert set(guard.allowed_models) == {
-        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
         "anthropic/claude-sonnet-4-6",
     }
     assert "step-risk=high" in guard.notes
 
 
-def test_quality_guards_keep_auto_high_risk_complex_as_scored_floor_pool() -> None:
+def test_quality_guards_keep_auto_high_risk_complex_premium_only() -> None:
     caps = _caps()
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
-            "minimax/minimax-m2.7",
+            "minimax/minimax-m2.5",
             "anthropic/claude-opus-4-7",
         ],
         mode=RoutingMode.AUTO,
@@ -486,16 +540,12 @@ def test_quality_guards_keep_auto_high_risk_complex_as_scored_floor_pool() -> No
     )
 
     assert guard.target is ServedQuality.PREMIUM
-    assert guard.floor is ServedQuality.BALANCED
-    assert set(guard.allowed_models) == {
-        "minimax/minimax-m2.7",
-        "anthropic/claude-opus-4-7",
-    }
-    assert "served-quality-target-preferred=premium(1/3)" in guard.notes
-    assert "served-quality>=floor(2/3)" in guard.notes
+    assert guard.floor is ServedQuality.PREMIUM
+    assert guard.allowed_models == ["anthropic/claude-opus-4-7"]
+    assert "served-quality=tier(premium,1/3)" in guard.notes
 
 
-def test_quality_guards_keep_economy_available_for_current_low_risk_step() -> None:
+def test_quality_guards_keep_complex_low_risk_inside_premium_pool() -> None:
     caps = _caps()
     guard = apply_quality_guards(
         [
@@ -515,15 +565,13 @@ def test_quality_guards_keep_economy_available_for_current_low_risk_step() -> No
     )
 
     assert guard.target is ServedQuality.PREMIUM
-    assert guard.floor is ServedQuality.ECONOMY
+    assert guard.floor is ServedQuality.PREMIUM
     assert set(guard.allowed_models) == {
-        "deepseek/deepseek-v3.2",
-        "google/gemini-3-flash-preview",
         "minimax/minimax-m2.7",
         "anthropic/claude-opus-4-7",
     }
     assert "agent-pressure-floor=balanced" not in guard.notes
-    assert "served-quality>=floor(4/4)" in guard.notes
+    assert "served-quality=tier(premium,2/4)" in guard.notes
 
 
 def test_quality_guards_enforce_high_risk_floor_even_when_target_is_economy() -> None:
@@ -531,6 +579,7 @@ def test_quality_guards_enforce_high_risk_floor_even_when_target_is_economy() ->
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
+            "minimax/minimax-m2.5",
             "minimax/minimax-m2.7",
             "anthropic/claude-haiku-4-5",
         ],
@@ -543,7 +592,7 @@ def test_quality_guards_enforce_high_risk_floor_even_when_target_is_economy() ->
 
     assert guard.target is ServedQuality.ECONOMY
     assert guard.floor is ServedQuality.BALANCED
-    assert guard.allowed_models == ["minimax/minimax-m2.7"]
+    assert guard.allowed_models == ["minimax/minimax-m2.5"]
     assert "step-risk-floor=balanced" in guard.notes
 
 
@@ -552,7 +601,7 @@ def test_quality_guards_enforce_high_risk_floor_in_fast_mode() -> None:
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
-            "minimax/minimax-m2.7",
+            "minimax/minimax-m2.5",
             "anthropic/claude-haiku-4-5",
         ],
         mode=RoutingMode.FAST,
@@ -562,17 +611,17 @@ def test_quality_guards_enforce_high_risk_floor_in_fast_mode() -> None:
         step_risk="high",
     )
 
-    assert guard.target is ServedQuality.ECONOMY
+    assert guard.target is ServedQuality.BALANCED
     assert guard.floor is ServedQuality.BALANCED
-    assert guard.allowed_models == ["minimax/minimax-m2.7"]
+    assert guard.allowed_models == ["minimax/minimax-m2.5"]
 
 
-def test_quality_guards_allow_low_risk_medium_economy_to_compete() -> None:
+def test_quality_guards_keep_low_risk_medium_in_balanced_pool() -> None:
     caps = _caps()
     guard = apply_quality_guards(
         [
             "minimax/minimax-m2",
-            "minimax/minimax-m2.7",
+            "minimax/minimax-m2.5",
             "anthropic/claude-sonnet-4-6",
         ],
         mode=RoutingMode.AUTO,
@@ -583,10 +632,9 @@ def test_quality_guards_allow_low_risk_medium_economy_to_compete() -> None:
     )
 
     assert guard.target is ServedQuality.BALANCED
-    assert guard.floor is ServedQuality.ECONOMY
+    assert guard.floor is ServedQuality.BALANCED
     assert set(guard.allowed_models) == {
-        "minimax/minimax-m2",
-        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
         "anthropic/claude-sonnet-4-6",
     }
     assert "step-risk=low" in guard.notes
@@ -607,10 +655,7 @@ def test_quality_guards_keep_auto_continuity_soft_to_avoid_premium_lock() -> Non
     )
 
     assert guard.continuity_floor is None
-    assert set(guard.allowed_models) == {
-        "anthropic/claude-sonnet-4-6",
-        "anthropic/claude-opus-4-7",
-    }
+    assert guard.allowed_models == ["anthropic/claude-sonnet-4-6"]
     assert "continuity-soft=premium" in guard.notes
 
 
@@ -647,7 +692,7 @@ def test_quality_guards_keep_auto_continuity_soft_when_floor_unavailable() -> No
     assert "continuity-soft=premium" in guard.notes
 
 
-def test_auto_complex_prefers_balanced_floor_when_quality_is_tied() -> None:
+def test_auto_complex_can_choose_cheaper_premium_when_quality_is_tied() -> None:
     pricing = {
         "minimax/minimax-m2.7-test": ModelPricing(0.30, 1.20),
         "anthropic/claude-opus-test": ModelPricing(5.00, 25.00),
@@ -688,11 +733,12 @@ def test_auto_complex_prefers_balanced_floor_when_quality_is_tied() -> None:
     )
 
     assert decision.model == "minimax/minimax-m2.7-test"
-    assert "served-quality-score-target=balanced" in decision.reasoning
+    assert decision.served_quality is ServedQuality.PREMIUM
+    assert "served-quality-score-target=balanced" not in decision.reasoning
     minimax = next(score for score in decision.candidate_scores if score.model.startswith("minimax/"))
     opus = next(score for score in decision.candidate_scores if score.model.startswith("anthropic/"))
     assert minimax.quality_alignment == 1.0
-    assert opus.quality_alignment == 0.82
+    assert opus.quality_alignment == 1.0
 
 
 def test_missing_pricing_is_not_treated_as_free() -> None:
@@ -737,6 +783,37 @@ def test_missing_pricing_is_not_treated_as_free() -> None:
     unknown = next(score for score in decision.candidate_scores if score.model == "unknown/mystery")
     known = next(score for score in decision.candidate_scores if score.model == "known/cheap")
     assert unknown.predicted_cost > known.predicted_cost
+
+
+def test_pool_selection_filters_superseded_gemini_pro_when_successor_exists() -> None:
+    pricing = {
+        "google/gemini-2.5-pro": ModelPricing(1.25, 10.00),
+        "google/gemini-3-pro-preview": ModelPricing(2.00, 12.00),
+        "google/gemini-3.1-pro": ModelPricing(2.00, 12.00),
+    }
+    caps = {
+        model: ModelCapabilities(tool_calling=True, vision=True)
+        for model in pricing
+    }
+
+    decision = select_from_pool(
+        complexity=0.90,
+        mode=RoutingMode.AUTO,
+        confidence=0.90,
+        reasoning_text="test-superseded-gemini",
+        available_models=list(pricing),
+        estimated_input_tokens=4_000,
+        max_output_tokens=1_000,
+        prompt="Design a complex coding architecture.",
+        pricing=pricing,
+        capabilities=caps,
+        requirements=RequestRequirements(),
+        bandit_config=BanditConfig(enabled=False),
+    )
+
+    assert decision.model == "google/gemini-3.1-pro"
+    assert [score.model for score in decision.candidate_scores] == ["google/gemini-3.1-pro"]
+    assert "superseded-filter=2" in decision.reasoning
 
 
 def test_agentic_step_disables_random_bandit_sampling_without_model_lock() -> None:
@@ -826,9 +903,10 @@ def test_agentic_step_disables_random_bandit_sampling_without_session_id() -> No
     assert "step-stable=no-bandit" in last_reasoning
 
 
-def test_low_risk_medium_step_can_select_economy_when_cost_dominates() -> None:
+def test_low_risk_medium_step_stays_in_balanced_pool_when_cost_dominates() -> None:
     pricing = {
         "minimax/minimax-m2-test": ModelPricing(0.05, 0.20),
+        "minimax/minimax-m2.5-test": ModelPricing(0.30, 1.20),
         "minimax/minimax-m2.7-test": ModelPricing(3.00, 12.00),
     }
     caps = {
@@ -873,7 +951,7 @@ def test_low_risk_medium_step_can_select_economy_when_cost_dominates() -> None:
         bandit_config=BanditConfig(enabled=False),
     )
 
-    assert decision.model == "minimax/minimax-m2-test"
+    assert decision.model == "minimax/minimax-m2.5-test"
     assert "step-risk=low" in decision.reasoning
 
 
@@ -919,7 +997,7 @@ def test_auto_simple_low_risk_prefers_adequate_economy_model(monkeypatch) -> Non
     assert "served-quality-fit-weight=0.22" in decision.reasoning
 
 
-def test_auto_low_risk_medium_can_select_adequate_economy_model(monkeypatch) -> None:
+def test_auto_low_risk_medium_selects_balanced_flash_model(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -956,12 +1034,12 @@ def test_auto_low_risk_medium_can_select_adequate_economy_model(monkeypatch) -> 
         bandit_config=BanditConfig(enabled=False),
     )
 
-    assert decision.model == "deepseek/deepseek-v3.2"
-    assert "served-quality-score-target=economy" in decision.reasoning
-    assert "economy-fit=cost-aware(q=0.50)" in decision.reasoning
+    assert decision.model == "google/gemini-3-flash-preview"
+    assert decision.served_quality is ServedQuality.BALANCED
+    assert "served-quality-score-target=economy" not in decision.reasoning
 
 
-def test_auto_low_risk_complex_step_can_use_economy_despite_high_agent_pressure(monkeypatch) -> None:
+def test_auto_low_risk_complex_step_stays_in_premium_pool(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -1003,13 +1081,13 @@ def test_auto_low_risk_complex_step_can_use_economy_despite_high_agent_pressure(
         bandit_config=BanditConfig(enabled=False),
     )
 
-    assert decision.model == "deepseek/deepseek-v3.2"
-    assert decision.served_quality_floor is ServedQuality.ECONOMY
+    assert decision.model == "minimax/minimax-m2.7"
+    assert decision.served_quality_floor is ServedQuality.PREMIUM
     assert "agent-pressure-floor=balanced" not in decision.reasoning
-    assert "served-quality-score-target=economy" in decision.reasoning
+    assert "served-quality-score-target=economy" not in decision.reasoning
 
 
-def test_auto_low_risk_standalone_complex_keeps_balanced_floor(monkeypatch) -> None:
+def test_auto_low_risk_standalone_complex_keeps_premium_floor(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -1042,11 +1120,11 @@ def test_auto_low_risk_standalone_complex_keeps_balanced_floor(monkeypatch) -> N
         bandit_config=BanditConfig(enabled=False),
     )
 
-    assert decision.served_quality_floor is ServedQuality.BALANCED
+    assert decision.served_quality_floor is ServedQuality.PREMIUM
     assert decision.model == "minimax/minimax-m2.7"
 
 
-def test_auto_high_risk_complex_low_confidence_prefers_balanced_model(monkeypatch) -> None:
+def test_auto_high_risk_complex_low_confidence_stays_in_premium_pool(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -1092,8 +1170,9 @@ def test_auto_high_risk_complex_low_confidence_prefers_balanced_model(monkeypatc
     )
 
     assert decision.model == "minimax/minimax-m2.7"
-    assert "served-quality-score-target=balanced" in decision.reasoning
-    assert "served-quality>=floor(2/4)" in decision.reasoning
+    assert decision.served_quality is ServedQuality.PREMIUM
+    assert "served-quality-score-target=balanced" not in decision.reasoning
+    assert "served-quality=tier(premium,2/4)" in decision.reasoning
 
 
 def test_auto_medium_blocks_premium_bandit_exploration_for_routine_steps(monkeypatch) -> None:
@@ -1137,17 +1216,16 @@ def test_auto_medium_blocks_premium_bandit_exploration_for_routine_steps(monkeyp
         bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.MEDIUM,)),
     )
 
-    opus = next(score for score in decision.candidate_scores if score.model == "anthropic/claude-opus-4.6")
-    assert decision.model == "minimax/minimax-m2.7"
-    assert opus.predicted_quality == pytest.approx(0.832)
+    assert decision.model == "google/gemini-3-flash-preview"
+    assert all(score.served_quality == "balanced" for score in decision.candidate_scores)
+    assert all(score.model != "anthropic/claude-opus-4.6" for score in decision.candidate_scores)
     assert "routine-exploration=base-prior" in decision.reasoning
     assert "premium-exploration=base-prior" not in decision.reasoning
     fallback_models = [item.model for item in decision.fallback_chain]
-    assert fallback_models[0] == "minimax/minimax-m2.7"
-    assert fallback_models.index("anthropic/claude-opus-4.6") > fallback_models.index("deepseek/deepseek-v3.2")
+    assert fallback_models == ["google/gemini-3-flash-preview"]
 
 
-def test_auto_medium_allows_premium_exploration_for_high_risk_steps(monkeypatch) -> None:
+def test_auto_medium_high_risk_stays_in_balanced_pool(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
     import uncommon_route.router.selector as selector
 
@@ -1188,11 +1266,12 @@ def test_auto_medium_allows_premium_exploration_for_high_risk_steps(monkeypatch)
         bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.MEDIUM,)),
     )
 
-    assert decision.model == "anthropic/claude-opus-4.6"
+    assert decision.model == "google/gemini-3-flash-preview"
+    assert all(score.served_quality == "balanced" for score in decision.candidate_scores)
     assert "premium-exploration=base-prior" not in decision.reasoning
 
 
-def test_auto_high_confidence_hard_complex_can_select_opus(monkeypatch) -> None:
+def test_auto_high_confidence_hard_complex_can_select_minimax_premium(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -1237,11 +1316,12 @@ def test_auto_high_confidence_hard_complex_can_select_opus(monkeypatch) -> None:
         bandit_config=BanditConfig(enabled=True, enabled_tiers=(Tier.COMPLEX,)),
     )
 
-    assert decision.model == "anthropic/claude-opus-4.6"
+    assert decision.model == "minimax/minimax-m2.7"
+    assert decision.served_quality is ServedQuality.PREMIUM
     assert "served-quality-fit-weight=" in decision.reasoning
 
 
-def test_auto_complex_uses_balanced_near_peer_when_premium_margin_is_too_expensive(monkeypatch) -> None:
+def test_auto_complex_can_use_lower_cost_premium_near_peer(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
     class DummyBenchmarkCache:
@@ -1289,7 +1369,8 @@ def test_auto_complex_uses_balanced_near_peer_when_premium_margin_is_too_expensi
     )
 
     assert decision.model == "minimax/minimax-m2.7"
-    assert "premium-cost-benefit=anthropic/claude-opus-4.6->minimax/minimax-m2.7" in decision.reasoning
+    assert decision.served_quality is ServedQuality.PREMIUM
+    assert "premium-cost-benefit=anthropic/claude-opus-4.6->minimax/minimax-m2.7" not in decision.reasoning
 
 
 def test_auto_complex_keeps_premium_when_scoring_advantage_is_material(monkeypatch) -> None:
@@ -2470,4 +2551,4 @@ def test_auto_continuity_does_not_force_expensive_premium_only_pool() -> None:
     ]
     assert decision.continuity_quality_floor is None
     assert "continuity-soft=premium" in decision.reasoning
-    assert "served-quality-floor=balanced" in decision.reasoning
+    assert "served-quality-floor=premium" in decision.reasoning

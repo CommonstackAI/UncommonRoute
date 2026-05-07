@@ -1,5 +1,7 @@
 from uncommon_route.router.signal_tuning import (
     contextual_followup_floor_from_text,
+    strip_client_wrapper_blocks,
+    system_prompt_is_title_generation_sidechannel,
     system_prompt_has_structured_output_constraint,
     text_high_substance_score,
     text_substance_score,
@@ -52,6 +54,22 @@ def test_contextual_followup_can_escalate_dense_latest_request() -> None:
     assert floor is Tier.COMPLEX
 
 
+def test_contextual_followup_ignores_client_wrapper_blocks() -> None:
+    floor = contextual_followup_floor_from_text(
+        prior_text=(
+            "<system-reminder>\n"
+            "Design a distributed platform with CRDTs, websocket fanout, "
+            "permission boundaries, audit logging, and rollout plans.\n"
+            "</system-reminder>\n"
+            "hello"
+        ),
+        latest_text="帮我创建一个新的 Python 项目目录，叫 weather-cli",
+    )
+
+    assert strip_client_wrapper_blocks("<system-reminder>hidden</system-reminder> hello") == "hello"
+    assert floor is None
+
+
 def test_short_run_followup_does_not_inherit_complex_floor() -> None:
     floor = contextual_followup_floor_from_text(
         prior_text="就按这个方案，帮我把所有代码写出来",
@@ -86,6 +104,11 @@ def test_short_dense_build_followup_can_inherit_complex_floor() -> None:
 def test_protocol_structured_system_prompt_is_not_a_domain_whitelist() -> None:
     assert system_prompt_has_structured_output_constraint("Respond in JSON format.")
     assert not system_prompt_has_structured_output_constraint("You are Claude Code.")
+    title_prompt = (
+        'Generate a concise, sentence-case title. Return JSON with a single "title" field.'
+    )
+    assert system_prompt_is_title_generation_sidechannel(title_prompt)
+    assert not system_prompt_has_structured_output_constraint(title_prompt)
 
 
 def test_vision_floor_depends_on_modality_and_prompt_shape() -> None:

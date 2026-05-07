@@ -36,6 +36,7 @@ from uncommon_route.router.structural import estimate_tokens
 from uncommon_route.router.signal_tuning import (
     DEFAULT_SIGNAL_TUNING,
     contextual_followup_floor_from_text,
+    strip_client_wrapper_blocks,
     system_prompt_has_structured_output_constraint,
     text_high_substance_score,
     text_substance_score,
@@ -188,6 +189,10 @@ def _message_text(value: Any) -> str:
             if value.get(key) is not None
         )
     return str(value)
+
+
+def _user_context_text(value: Any) -> str:
+    return strip_client_wrapper_blocks(_message_text(value))
 
 
 def _message_has_tool_result(value: Any) -> bool:
@@ -576,6 +581,8 @@ def _soften_tier_cap_for_agent_state(
         return tier_cap, f"tier-cap-preserved({cap_reason})"
     elif cap_reason == "invocation-recovery":
         return tier_cap, f"tier-cap-preserved({cap_reason})"
+    elif cap_reason in {"suggestion-mode", "title-generation"}:
+        return tier_cap, f"tier-cap-preserved({cap_reason})"
     elif cap_reason == "low-risk":
         standalone_complex_support = (
             not features.has_tool_results
@@ -753,9 +760,13 @@ def _messages_contextual_followup_floor(
         return None
 
     latest_index = user_indexes[-1]
-    latest = _message_text(messages[latest_index].get("content"))
+    latest = _user_context_text(messages[latest_index].get("content"))
     prior_context = "\n".join(
-        _message_text(message.get("content"))
+        (
+            _user_context_text(message.get("content"))
+            if isinstance(message, dict) and message.get("role") == "user"
+            else _message_text(message.get("content"))
+        )
         for message in messages[:latest_index]
         if isinstance(message, dict) and message.get("role") != "system"
     )

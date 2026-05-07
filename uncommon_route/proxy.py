@@ -71,6 +71,7 @@ from uncommon_route.router.quality import (
 from uncommon_route.router.signal_tuning import (
     DEFAULT_SIGNAL_TUNING,
     contextual_followup_floor_from_text,
+    system_prompt_is_title_generation_sidechannel,
     system_prompt_has_structured_output_constraint,
     text_substance_score,
     vision_prompt_needs_medium_floor,
@@ -1093,6 +1094,15 @@ def _body_has_structured_output_directive(messages: list[Any]) -> bool:
     return False
 
 
+def _body_has_title_generation_sidechannel(messages: list[Any]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        if system_prompt_is_title_generation_sidechannel(_content_text(message.get("content", ""))):
+            return True
+    return False
+
+
 def _contextual_followup_floor(messages: list[Any], prompt: str) -> Tier | None:
     user_indexes = [
         index
@@ -1104,11 +1114,17 @@ def _contextual_followup_floor(messages: list[Any], prompt: str) -> Tier | None:
 
     latest_index = user_indexes[-1]
     latest = prompt or _extract_user_prompt_text(messages[latest_index].get("content", ""))
-    prior_context = "\n".join(
-        _content_text(message.get("content", ""))
-        for message in messages[:latest_index]
-        if isinstance(message, dict) and message.get("role") != "system"
-    )
+    prior_parts: list[str] = []
+    for message in messages[:latest_index]:
+        if not isinstance(message, dict) or message.get("role") == "system":
+            continue
+        if message.get("role") == "user":
+            text = _extract_user_prompt_text(message.get("content", ""))
+        else:
+            text = _content_text(message.get("content", ""))
+        if text.strip():
+            prior_parts.append(text)
+    prior_context = "\n".join(prior_parts)
     return contextual_followup_floor_from_text(
         prior_text=prior_context,
         latest_text=latest,
@@ -1695,6 +1711,7 @@ def _extract_routing_features(
     needs_tool_calling = bool(raw_tools)
     has_tool_results = step_type == "tool-result-followup"
     suggestion_mode = _is_suggestion_mode_prompt(prompt)
+    title_generation_sidechannel = _body_has_title_generation_sidechannel(messages)
 
     response_format = body.get("response_format")
     response_format_name: str | None = None
@@ -1705,19 +1722,31 @@ def _extract_routing_features(
     elif isinstance(response_format, str):
         response_format_name = response_format.strip().lower() or None
         wants_structured_output = response_format_name in {"json", "json_schema"}
-    if not wants_structured_output and _body_has_structured_output_directive(messages):
+    if (
+        not title_generation_sidechannel
+        and not wants_structured_output
+        and _body_has_structured_output_directive(messages)
+    ):
         response_format_name = "system"
         wants_structured_output = True
 
-    step_risk = _estimate_step_risk(
-        messages=messages,
-        step_type=step_type,
-        tool_names=normalized_tool_names,
-        prompt=prompt,
-        needs_tool_calling=needs_tool_calling,
-        wants_structured_output=wants_structured_output,
+    step_risk = (
+        "low"
+        if title_generation_sidechannel
+        else _estimate_step_risk(
+            messages=messages,
+            step_type=step_type,
+            tool_names=normalized_tool_names,
+            prompt=prompt,
+            needs_tool_calling=needs_tool_calling,
+            wants_structured_output=wants_structured_output,
+        )
     )
-    contextual_floor = None if suggestion_mode else _contextual_followup_floor(messages, prompt)
+    contextual_floor = (
+        None
+        if suggestion_mode or title_generation_sidechannel
+        else _contextual_followup_floor(messages, prompt)
+    )
     if contextual_floor is not None and step_risk == "low":
         step_risk = "normal"
     tier_floor = Tier.MEDIUM if step_risk == "high" or wants_structured_output else None
@@ -1750,7 +1779,7 @@ def _extract_routing_features(
     )
     tier_cap = (
         Tier.SIMPLE
-        if suggestion_mode
+        if suggestion_mode or title_generation_sidechannel
         else (
             Tier.MEDIUM
             if step_risk == "low"
@@ -1765,6 +1794,8 @@ def _extract_routing_features(
     if tier_cap is not None:
         if suggestion_mode:
             tier_cap_reason = "suggestion-mode"
+        elif title_generation_sidechannel:
+            tier_cap_reason = "title-generation"
         elif environment_recovery:
             tier_cap_reason = "environment-recovery"
         elif invocation_recovery:

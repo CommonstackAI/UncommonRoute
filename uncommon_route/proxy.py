@@ -2269,61 +2269,6 @@ def _merge_available_models(
     return merged
 
 
-def _latest_successful_session_model(
-    *,
-    session_id: str | None,
-    trace_store: TraceStore,
-    step_types: tuple[str, ...] = ("tool-selection", "tool-result-followup", "general"),
-) -> str | None:
-    previous_trace = trace_store.latest_for_session(
-        session_id,
-        step_types=step_types,
-    ) if session_id else None
-    if (
-        previous_trace is None
-        or previous_trace.status_code >= 400
-    ):
-        return None
-    previous_model = str(previous_trace.model or "").strip()
-    if not previous_model or _is_virtual_model_name(previous_model):
-        return None
-    return previous_model
-
-
-def _should_use_session_sticky_model(features: RoutingFeatures) -> bool:
-    if not features.session_present:
-        return False
-    if features.step_type in {"tool-selection", "tool-result-followup"}:
-        return True
-    if features.has_tool_results:
-        return True
-    if features.agent_step_count >= 2:
-        return True
-    return bool(features.is_agentic and (features.needs_tool_calling or features.is_coding))
-
-
-def _filter_session_sticky_context(
-    *,
-    available_models: list[str],
-    session_id: str | None,
-    routing_features: RoutingFeatures,
-    trace_store: TraceStore,
-) -> tuple[list[str], str]:
-    if len(available_models) <= 1:
-        return list(available_models), ""
-    if not _should_use_session_sticky_model(routing_features):
-        return list(available_models), ""
-    previous_model = _latest_successful_session_model(
-        session_id=session_id,
-        trace_store=trace_store,
-    )
-    if not previous_model:
-        return list(available_models), ""
-    if previous_model in available_models:
-        return [previous_model], f"session-sticky=previous-model={previous_model}"
-    return list(available_models), f"session-sticky=previous-unavailable={previous_model}"
-
-
 def _reuse_anthropic_source_body(
     *,
     source_body: dict[str, Any],
@@ -2481,6 +2426,8 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
         "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
         "continuity_quality_floor": features.continuity_quality_floor.value if features.continuity_quality_floor is not None else None,
+        "verification_failed": features.verification_failed,
+        "failure_kind": features.failure_kind,
         "tags": list(features.tags()),
     }
 
@@ -4118,7 +4065,6 @@ def create_app(
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
-            route_pool_notes: list[str] = []
             try:
                 base_available_models = _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
                 if user_keyed:
@@ -4128,14 +4074,6 @@ def create_app(
                     scene_pool = _active_scene.model_pool()
                     available_scene_models = [m for m in scene_pool if m in route_available_models]
                     route_available_models = available_scene_models or scene_pool
-                route_available_models, session_sticky_note = _filter_session_sticky_context(
-                    available_models=route_available_models,
-                    session_id=session_id,
-                    routing_features=routing_features,
-                    trace_store=_traces,
-                )
-                if session_sticky_note:
-                    route_pool_notes.append(session_sticky_note)
 
                 if _active_scene and _active_scene.hard_pin:
                     from uncommon_route.router.types import (
@@ -4351,9 +4289,6 @@ def create_app(
                 )
             reasoning = decision.reasoning
             route_reasoning = decision.reasoning
-            if route_pool_notes:
-                route_reasoning = f"{route_reasoning} | {' | '.join(route_pool_notes)}"
-                reasoning = route_reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence

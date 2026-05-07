@@ -973,7 +973,7 @@ class TestFallbackAttribution:
 
 
 class TestRoutingContinuity:
-    def test_agent_tool_session_locks_route_pool_to_previous_model(
+    def test_agent_tool_session_keeps_full_route_pool(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -993,7 +993,7 @@ class TestRoutingContinuity:
                 mode=RoutingMode.AUTO,
                 confidence=0.9,
                 method="pool",
-                reasoning="sticky session route",
+                reasoning="session route",
                 cost_estimate=0.001,
                 baseline_cost=0.002,
                 savings=0.5,
@@ -1064,11 +1064,147 @@ class TestRoutingContinuity:
             )
 
             assert resp.status_code == 200
-            assert routed["available_models"] == ["anthropic/claude-opus-4-5"]
+            assert routed["available_models"] == [
+                "anthropic/claude-opus-4-5",
+                "anthropic/claude-sonnet-4-6",
+            ]
             assert captured["body"]["model"] == "anthropic/claude-opus-4-5"
             trace = traces.find(resp.headers["x-uncommon-route-request-id"])
             assert trace is not None
-            assert "session-sticky=previous-model=anthropic/claude-opus-4-5" in trace["route_reasoning"]
+            assert "session-sticky" not in trace["route_reasoning"]
+            assert "previous-model" not in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_semantic_tool_failure_keeps_full_route_pool_and_records_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            available_models = list(kwargs.get("available_models") or [])
+            routed["available_models"] = available_models
+            selected_model = available_models[0]
+            return RoutingDecision(
+                model=selected_model,
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.BALANCED,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="semantic failure route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_semantic_retry",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": captured["body"].get("model", "google/gemini-2.5-pro"),
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "retrying"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="google/gemini-2.5-pro",
+            status_code=200,
+            api_format="openai",
+            endpoint="chat_completions",
+            is_virtual=True,
+            session_id="agent-session",
+            step_type="tool-result-followup",
+            transport="openai-chat",
+            served_quality="premium",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                model_mapper=_build_test_mapper(
+                    "google/gemini-2.5-pro",
+                    "anthropic/claude-opus-4-6",
+                    "openai/gpt-5.4-2026-03-05",
+                ),
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [
+                        {"role": "user", "content": "Run the tests and fix the bug."},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_tests",
+                                    "arguments": json.dumps({"command": "pytest"}),
+                                },
+                            }],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_1",
+                            "content": (
+                                "pytest verification failed: 1 failed\n"
+                                "AssertionError: expected 2 actual 3\n"
+                                "<returncode>1</returncode>"
+                            ),
+                        },
+                    ],
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "run_tests", "parameters": {"type": "object"}},
+                    }],
+                },
+                headers={"x-session-id": "agent-session"},
+            )
+
+            assert resp.status_code == 200
+            assert set(routed["available_models"]) == {
+                "google/gemini-2.5-pro",
+                "anthropic/claude-opus-4-6",
+                "openai/gpt-5.4-2026-03-05",
+            }
+            assert "google/gemini-2.5-pro" in routed["available_models"]
+            assert captured["body"]["model"] == routed["available_models"][0]
+            trace = traces.find(resp.headers["x-uncommon-route-request-id"])
+            assert trace is not None
+            assert "session-sticky" not in trace["route_reasoning"]
+            assert "session-retry" not in trace["route_reasoning"]
+            assert trace["routing_features_payload"]["verification_failed"] is True
+            assert trace["routing_features_payload"]["failure_kind"] == "semantic"
         finally:
             asyncio.run(async_client.aclose())
 

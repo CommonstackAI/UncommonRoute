@@ -10,6 +10,7 @@
 import { useEffect, useRef } from "react";
 import { type Stats } from "../api";
 import { useLiveData, type LiveRecent } from "../state/LiveDataContext";
+import { useT } from "../i18n";
 
 interface Props {
   stats: Stats | null;
@@ -89,6 +90,7 @@ function turnDotClass(g: TurnGroup): string {
 }
 
 export default function Home({ stats }: Props) {
+  const t = useT();
   const { recent } = useLiveData();
   const turns = groupTurns(recent).slice(0, 8);
 
@@ -128,9 +130,9 @@ export default function Home({ stats }: Props) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-64px)] animate-fadeIn">
         <div className="font-display text-[64px] text-n-display tracking-tight">0</div>
-        <div className="label mt-4">REQUESTS ROUTED</div>
+        <div className="label mt-4">{t.home.requestsRouted}</div>
         <p className="mt-6 text-[14px] text-n-secondary max-w-sm text-center">
-          Send a request through the proxy to see routing in action.
+          {t.home.emptyHint}
         </p>
         <div className="mt-8 bg-n-surface border border-n-border rounded-compact p-5 font-mono text-[12px] text-n-secondary leading-relaxed max-w-lg w-full">
           <span className="text-n-disabled">$</span> curl localhost:8403/v1/chat/completions \{"\n"}
@@ -145,12 +147,12 @@ export default function Home({ stats }: Props) {
     <div className="flex flex-col min-h-[calc(100vh-64px)] pt-4 animate-fadeIn">
       {/* ─── ZONE A: Hero Savings ─── */}
       <div className="mb-10">
-        <div className="label mb-2">TOTAL SAVED</div>
+        <div className="label mb-2">{t.home.totalSaved}</div>
         <div className="font-display text-[64px] leading-none text-n-display tracking-tight">
           ${totalSaved.toFixed(2)}
         </div>
         <div className="mt-3 font-mono text-[13px] text-n-secondary">
-          saving <span className="text-n-success">{(savingsRatio * 100).toFixed(0)}%</span> vs ${baselineCost.toFixed(2)} baseline
+          {t.home.savingBefore(baselineCost.toFixed(2))}<span className="text-n-success">{(savingsRatio * 100).toFixed(0)}%</span>{t.home.savingAfter(baselineCost.toFixed(2))}
         </div>
       </div>
 
@@ -158,18 +160,18 @@ export default function Home({ stats }: Props) {
       <div className="grid grid-cols-4 gap-px bg-n-border mb-10">
         {/* Requests */}
         <div className="bg-n-black p-5">
-          <div className="label mb-2">REQUESTS</div>
+          <div className="label mb-2">{t.home.requests}</div>
           <div className="font-mono text-[32px] text-n-display leading-none tracking-tight">
             {totalRequests.toLocaleString()}
           </div>
           <div className="mt-3 font-mono text-[11px] text-n-disabled">
-            routed through proxy
+            {t.home.routedThroughProxy}
           </div>
         </div>
 
         {/* LOW tier */}
         <div className="bg-n-black p-5">
-          <div className="label mb-2">LOW TIER</div>
+          <div className="label mb-2">{t.home.lowTier}</div>
           <div className="font-mono text-[28px] text-n-display leading-none">
             {lowCount}
           </div>
@@ -190,7 +192,7 @@ export default function Home({ stats }: Props) {
 
         {/* MID tier */}
         <div className="bg-n-black p-5">
-          <div className="label mb-2">MID TIER</div>
+          <div className="label mb-2">{t.home.midTier}</div>
           <div className="font-mono text-[28px] text-n-display leading-none">
             {midCount}
           </div>
@@ -211,7 +213,7 @@ export default function Home({ stats }: Props) {
 
         {/* HIGH tier */}
         <div className="bg-n-black p-5">
-          <div className="label mb-2">HIGH TIER</div>
+          <div className="label mb-2">{t.home.highTier}</div>
           <div className="font-mono text-[28px] text-n-display leading-none">
             {highCount}
           </div>
@@ -234,8 +236,8 @@ export default function Home({ stats }: Props) {
       {/* ─── ZONE C: Live Traffic (fills remaining viewport) ─── */}
       <div className="flex-1 flex flex-col">
         <div className="flex items-center justify-between mb-3">
-          <div className="label">LIVE TRAFFIC</div>
-          <div className="label">{turns.length} LATEST</div>
+          <div className="label">{t.home.liveTraffic}</div>
+          <div className="label">{t.home.latest(turns.length)}</div>
         </div>
 
         <div className="flex-1 border-t border-n-border">
@@ -255,7 +257,7 @@ export default function Home({ stats }: Props) {
                   <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${turnDotClass(g)} ${dotFlashClass}`} />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] text-n-primary truncate">
-                      {rep.prompt_preview || (g.hasPending ? "…" : "[no preview]")}
+                      {rep.prompt_preview || (g.hasPending ? "…" : t.common.noPreview)}
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[12px] tracking-[0.04em] text-n-disabled">
                       {g.tierCounts.length > 0 ? (
@@ -263,12 +265,12 @@ export default function Home({ stats }: Props) {
                           <span key={tier} className="flex items-center gap-3">
                             {i > 0 ? <span>/</span> : null}
                             <span className={calls > 1 ? (TIER_TEXT[tier] ?? "") : ""}>
-                              {calls > 1 ? `${n} ${tier} tool ${n === 1 ? "call" : "calls"}` : tier}
+                              {calls > 1 ? t.home.toolCalls(n, t.common.tierLabel(tier)) : t.common.tierLabel(tier)}
                             </span>
                           </span>
                         ))
                       ) : (
-                        <span>{g.hasPending ? "ROUTING" : "—"}</span>
+                        <span>{g.hasPending ? t.common.routing : "—"}</span>
                       )}
                       <span>·</span>
                       <span>{rep.transport || "openai"}</span>
@@ -288,7 +290,7 @@ export default function Home({ stats }: Props) {
           ) : (
             <div className="flex-1 flex items-center justify-center dot-grid-subtle min-h-[300px]">
               <span className="font-mono text-[11px] text-n-disabled tracking-[0.1em]">
-                AWAITING FIRST REQUEST
+                {t.common.awaitingFirstRequest}
               </span>
             </div>
           )}

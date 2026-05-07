@@ -3,6 +3,8 @@
  * Space Mono ALL CAPS labels, dot indicator for active, OLED black
  */
 
+import { useI18n } from "../i18n";
+
 interface Props {
   current: string;
   onChange: (page: string) => void;
@@ -13,25 +15,33 @@ interface Props {
 }
 
 type NavEntry =
-  | { kind: "item"; id: string; label: string }
-  | { kind: "divider"; label: string };
+  | { kind: "item"; id: string; labelKey: string }
+  | { kind: "divider"; labelKey: string };
 
 const NAV: NavEntry[] = [
-  { kind: "divider", label: "MONITOR" },
-  { kind: "item", id: "home", label: "HOME" },
-  { kind: "item", id: "playground", label: "PLAYGROUND" },
-  { kind: "item", id: "explain_new", label: "EXPLAIN" },
-  { kind: "item", id: "activity", label: "ACTIVITY" },
-  { kind: "divider", label: "CONFIGURE" },
-  { kind: "item", id: "routing", label: "ROUTING" },
-  { kind: "item", id: "models", label: "MODELS" },
-  { kind: "item", id: "connections", label: "CONNECTIONS" },
-  { kind: "item", id: "budget", label: "BUDGET" },
-  { kind: "divider", label: "INTERACT" },
-  { kind: "item", id: "feedback", label: "FEEDBACK" },
+  { kind: "divider", labelKey: "monitor" },
+  { kind: "item", id: "home", labelKey: "home" },
+  { kind: "item", id: "playground", labelKey: "playground" },
+  { kind: "item", id: "explain_new", labelKey: "explain" },
+  { kind: "item", id: "activity", labelKey: "activity" },
+  { kind: "divider", labelKey: "configure" },
+  { kind: "item", id: "routing", labelKey: "routing" },
+  { kind: "item", id: "models", labelKey: "models" },
+  { kind: "item", id: "connections", labelKey: "connections" },
+  { kind: "item", id: "budget", labelKey: "budget" },
+  { kind: "divider", labelKey: "interact" },
+  { kind: "item", id: "feedback", labelKey: "feedback" },
 ];
 
 export default function Sidebar({ current, onChange, upstream, isUp, version, feedbackPending }: Props) {
+  const { t, locale, setLocale, isZh } = useI18n();
+  const sidebar = t.sidebar as unknown as Record<string, string>;
+  // CJK glyphs don't render well with the latin tracking baked into the design system.
+  const trackTight = isZh ? "tracking-normal" : "tracking-[0.12em]";
+  const trackItem = isZh ? "tracking-normal" : "tracking-[0.08em]";
+  const trackStatus = isZh ? "tracking-normal" : "tracking-[0.06em]";
+  const trackVersion = isZh ? "tracking-normal" : "tracking-[0.1em]";
+
   return (
     <aside className="fixed top-0 left-0 h-full w-[200px] bg-n-black border-r border-n-border flex flex-col z-50">
       {/* Logo — Doto hero + mono label */}
@@ -45,8 +55,8 @@ export default function Sidebar({ current, onChange, upstream, isUp, version, fe
         {NAV.map((entry, i) => {
           if (entry.kind === "divider") {
             return (
-              <div key={`divider-${entry.label}`} className={`font-mono text-[10px] text-n-disabled tracking-[0.12em] ${i === 0 ? "" : "mt-6"} mb-1 px-4`}>
-                {entry.label}
+              <div key={`divider-${entry.labelKey}`} className={`font-mono text-[10px] text-n-disabled ${trackTight} ${i === 0 ? "" : "mt-6"} mb-1 px-4`}>
+                {sidebar[entry.labelKey]}
               </div>
             );
           }
@@ -55,14 +65,14 @@ export default function Sidebar({ current, onChange, upstream, isUp, version, fe
             <button
               key={entry.id}
               onClick={() => onChange(entry.id)}
-              className={`relative w-full text-left px-4 py-2.5 font-mono text-[11px] tracking-[0.08em] transition-colors duration-150 ${
+              className={`relative w-full text-left px-4 py-2.5 font-mono text-[11px] ${trackItem} transition-colors duration-150 ${
                 active ? "text-n-display" : "text-n-disabled hover:text-n-secondary"
               }`}
             >
               {active && (
                 <span className="absolute left-1 top-1/2 -translate-y-1/2 w-1 h-1 rounded-full bg-n-accent animate-pulse" style={{ animationDuration: '2s' }} />
               )}
-              {entry.label}
+              {sidebar[entry.labelKey]}
               {entry.id === "feedback" && feedbackPending > 0 && (
                 <span className="ml-2 font-mono text-[11px] text-n-accent">
                   {feedbackPending}
@@ -73,13 +83,33 @@ export default function Sidebar({ current, onChange, upstream, isUp, version, fe
         })}
       </nav>
 
+      {/* Language toggle */}
+      <div className="px-4 pb-3">
+        <div className="inline-flex items-center gap-[2px] rounded-pill border border-n-border bg-n-surface p-[2px] font-mono text-[10px]">
+          {(["en", "zh"] as const).map((code) => {
+            const isActive = locale === code;
+            return (
+              <button
+                key={code}
+                onClick={() => setLocale(code)}
+                className={`rounded-pill px-2 py-0.5 transition-colors ${
+                  isActive ? "bg-n-display text-n-black" : "text-n-disabled hover:text-n-secondary"
+                }`}
+              >
+                {code === "en" ? "EN" : "中文"}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Status */}
       <div className="px-6 py-5 border-t border-n-border">
-        <div className="flex items-center gap-2 font-mono text-[12px] tracking-[0.06em] text-n-disabled">
+        <div className={`flex items-center gap-2 font-mono text-[12px] ${trackStatus} text-n-disabled`}>
           <span className={`h-1.5 w-1.5 rounded-full ${isUp ? "bg-n-success" : "bg-n-disabled"}`} />
-          <span className="truncate">{(upstream || "NO UPSTREAM").toUpperCase()}</span>
+          <span className="truncate">{upstream ? upstream.toUpperCase() : t.sidebar.noUpstream}</span>
         </div>
-        <div className="mt-2 font-mono text-[12px] tracking-[0.1em] text-n-disabled">
+        <div className={`mt-2 font-mono text-[12px] ${trackVersion} text-n-disabled`}>
           V{version}
         </div>
       </div>

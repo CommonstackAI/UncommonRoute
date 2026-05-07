@@ -1,20 +1,7 @@
 import type { DecisionCard, TraceAttempt } from "../../api";
 import RouteReasoning from "./RouteReasoning";
-
-const TIER_NAMES: Record<string, string> = {
-  SIMPLE: "LOW",
-  MEDIUM: "MID",
-  COMPLEX: "HIGH",
-  REASONING: "HIGH",
-  low: "LOW",
-  mid: "MID",
-  mid_high: "MID_HIGH",
-  high: "HIGH",
-};
-
-function normTier(t?: string) {
-  return TIER_NAMES[t || ""] || (t || "—").toUpperCase();
-}
+import { useT } from "../../i18n";
+import type { Dictionary } from "../../i18n/types";
 
 function shortModel(model?: string) {
   return (model || "").split("/").pop() || model || "—";
@@ -44,48 +31,49 @@ function prettyLane(value?: string) {
 }
 
 export default function DecisionDetail({ decision }: { decision: DecisionCard }) {
+  const t = useT();
   return (
     <div className="mt-2 space-y-4 rounded-compact border border-n-border bg-n-raised px-4 py-3">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <div className="label">ROUTED TO</div>
+          <div className="label">{t.conversation.routedTo}</div>
           <div className="mt-1 font-display text-[20px] leading-none tracking-tight text-n-display">
             {shortModel(decision.model)}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-n-secondary">
-          <Badge>{normTier(decision.decision_tier)}</Badge>
+          <Badge>{t.common.tierLabel(decision.decision_tier || "")}</Badge>
           {decision.served_quality ? <Badge>{prettyQuality(decision.served_quality)}</Badge> : null}
           {decision.capability_lane ? <Badge>{prettyLane(decision.capability_lane)}</Badge> : null}
         </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <Mini label="CONFIDENCE" value={decision.raw_confidence ? `${Math.round(decision.raw_confidence * 100)}%` : "—"} />
-        <Mini label="LATENCY" value={`${(decision.latency_us / 1000).toFixed(1)}ms`} />
-        <Mini label="COST" value={`$${decision.estimated_cost.toFixed(4)}`} />
+        <Mini label={t.explainer.confidence} value={decision.raw_confidence ? `${Math.round(decision.raw_confidence * 100)}%` : "—"} />
+        <Mini label={t.explainer.latency} value={`${(decision.latency_us / 1000).toFixed(1)}ms`} />
+        <Mini label={t.explainer.cost} value={`$${decision.estimated_cost.toFixed(4)}`} />
       </div>
 
       <div>
         <RouteReasoning text={decision.route_reasoning || ""} />
         {decision.fallback_reason ? (
           <div className="mt-1 font-mono text-[11px] text-n-warning">
-            Fallback: {decision.fallback_reason}
+            {t.conversation.fallback(decision.fallback_reason)}
           </div>
         ) : null}
       </div>
 
       <div>
         <div className="flex items-center justify-between gap-3">
-          <div className="label">TRANSPORT</div>
+          <div className="label">{t.conversation.transport}</div>
         </div>
         <div className="mt-2 grid grid-cols-12 gap-2">
           <div className="col-span-5 rounded-compact border border-n-border px-2 py-2">
-            <div className="label">SELECTED</div>
+            <div className="label">{t.explainer.selected}</div>
             <div className="mt-1 font-mono text-[12px] font-semibold text-n-display">{prettyTransport(decision.transport)}</div>
           </div>
           <div className="col-span-7 rounded-compact border border-n-border px-2 py-2">
-            <div className="label">REASON</div>
+            <div className="label">{t.conversation.reason}</div>
             <div className="mt-1 text-[11px] text-n-primary">
               {decision.transport_reason || "—"}
             </div>
@@ -95,10 +83,10 @@ export default function DecisionDetail({ decision }: { decision: DecisionCard })
 
       {decision.attempts_payload && decision.attempts_payload.length > 0 ? (
         <div>
-          <div className="label mb-1">ATTEMPT CHAIN ({decision.attempts_payload.length})</div>
+          <div className="label mb-1">{t.conversation.attemptChainN(decision.attempts_payload.length)}</div>
           <div className="space-y-1">
             {decision.attempts_payload.map((a, i) => (
-              <AttemptRow key={`${i}-${a.selected_model}`} attempt={a} />
+              <AttemptRow key={`${i}-${a.selected_model}`} attempt={a} t={t} />
             ))}
           </div>
         </div>
@@ -106,17 +94,17 @@ export default function DecisionDetail({ decision }: { decision: DecisionCard })
 
       {(decision.feature_tags?.length || decision.constraint_tags?.length || decision.hint_tags?.length) ? (
         <div>
-          <div className="label mb-1">TAGS</div>
-          <TagRow title="FEATURE" items={decision.feature_tags} />
-          <TagRow title="CONSTRAINT" items={decision.constraint_tags} />
-          <TagRow title="HINT" items={decision.hint_tags} />
+          <div className="label mb-1">{t.explainer.tags}</div>
+          <TagRow title={t.explainer.feature} items={decision.feature_tags} />
+          <TagRow title={t.explainer.constraint} items={decision.constraint_tags} format={t.tags.constraint} />
+          <TagRow title={t.explainer.hint} items={decision.hint_tags} format={t.tags.hint} />
         </div>
       ) : null}
     </div>
   );
 }
 
-function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
+function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
   const dot = attempt.success ? "bg-n-success" : attempt.blocked ? "bg-n-warning" : "bg-n-accent";
   return (
     <div className="rounded-compact border border-n-border px-2 py-1.5">
@@ -126,20 +114,20 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
           <span className="font-mono text-[11px] text-n-display">{shortModel(attempt.selected_model)}</span>
         </div>
         <span className="font-mono text-[11px] text-n-secondary">
-          {attempt.success ? "OK" : attempt.blocked ? "BLOCKED" : `HTTP ${attempt.status_code || "—"}`}
+          {attempt.success ? t.common.ok : attempt.blocked ? t.common.blocked : `HTTP ${attempt.status_code || "—"}`}
         </span>
       </div>
     </div>
   );
 }
 
-function TagRow({ title, items }: { title: string; items: string[] | undefined }) {
+function TagRow({ title, items, format }: { title: string; items: string[] | undefined; format?: (raw: string) => string }) {
   if (!items || items.length === 0) return null;
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1.5">
       <span className="font-mono text-[10px] text-n-secondary">{title}</span>
       {items.map((it) => (
-        <Badge key={`${title}-${it}`}>{it}</Badge>
+        <Badge key={`${title}-${it}`}>{format ? format(it) : it}</Badge>
       ))}
     </div>
   );

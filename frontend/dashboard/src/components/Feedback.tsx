@@ -5,6 +5,8 @@ import {
   type FeedbackResult,
 } from "../api";
 import { useLiveData } from "../state/LiveDataContext";
+import { useT } from "../i18n";
+import type { Dictionary } from "../i18n/types";
 
 const TIER_COLOR: Record<string, string> = {
   SIMPLE: "text-n-success",
@@ -39,10 +41,10 @@ function storedFeedback(request: RecentRequest): FeedbackResult | null {
   };
 }
 
-function feedbackLabel(result: FeedbackResult): string {
-  if (result.action === "updated") return `${result.from_tier} \u2192 ${result.to_tier}`;
-  if (result.action === "reinforced" || result.action === "no_change") return "confirmed";
-  if (result.action === "rate_limited") return "rate limited";
+function feedbackLabel(result: FeedbackResult, t: Dictionary): string {
+  if (result.action === "updated") return `${t.common.tierLabel(result.from_tier)} \u2192 ${t.common.tierLabel(result.to_tier)}`;
+  if (result.action === "reinforced" || result.action === "no_change") return t.common.confirmed;
+  if (result.action === "rate_limited") return t.common.rateLimited;
   return result.action;
 }
 
@@ -54,6 +56,7 @@ function feedbackTone(result: FeedbackResult): string {
 }
 
 export default function Feedback() {
+  const t = useT();
   const { recent } = useLiveData();
   const requests = useMemo(
     () =>
@@ -93,15 +96,15 @@ export default function Feedback() {
     <div className="space-y-6 animate-fadeIn">
       <div>
         <div className="flex items-baseline gap-3 mb-1">
-          <h1 className="font-display text-[36px] text-n-display tracking-tight">FEEDBACK</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.feedback.title}</h1>
           {pendingCount > 0 && (
             <span className="rounded-pill border border-n-warning px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-warning">
-              {pendingCount} AWAITING
+              {t.feedback.awaiting(pendingCount)}
             </span>
           )}
         </div>
         <p className="text-[13px] text-n-secondary">
-          Rate routing decisions to improve the classifier. All training happens locally.
+          {t.feedback.subtitle}
         </p>
       </div>
 
@@ -109,16 +112,16 @@ export default function Feedback() {
         <table className="w-full">
           <thead>
             <tr className="border-b border-n-border">
-              <th className="label px-6 py-4 text-left w-24">TIME</th>
-              <th className="label px-6 py-4 text-left">REQUEST</th>
-              <th className="label px-6 py-4 text-left">MODEL</th>
-              <th className="label px-6 py-4 text-right w-24">COST</th>
-              <th className="label px-6 py-4 text-right pl-4 pr-8 w-[320px]">FEEDBACK</th>
+              <th className="label px-6 py-4 text-left w-24">{t.feedback.time}</th>
+              <th className="label px-6 py-4 text-left">{t.feedback.request}</th>
+              <th className="label px-6 py-4 text-left">{t.feedback.model}</th>
+              <th className="label px-6 py-4 text-right w-24">{t.feedback.cost}</th>
+              <th className="label px-6 py-4 text-right pl-4 pr-8 w-[320px]">{t.feedback.feedback}</th>
             </tr>
           </thead>
           <tbody>
             {visibleRequests.length === 0 ? (
-              <tr><td colSpan={5} className="py-16 text-center font-mono text-[14px] text-n-disabled">No pending or rated requests yet. Send requests through the proxy to start collecting feedback.</td></tr>
+              <tr><td colSpan={5} className="py-16 text-center font-mono text-[14px] text-n-disabled">{t.feedback.empty}</td></tr>
             ) : (
               visibleRequests.map((r) => {
                 const fb = submitted[r.request_id] ?? storedFeedback(r);
@@ -134,24 +137,24 @@ export default function Feedback() {
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <span className={`rounded-pill border px-2 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wider ${TIER_BORDER[displayTier] ?? "border-n-border-vis"} ${TIER_COLOR[displayTier] ?? "text-n-secondary"}`}>
-                          {displayTier}
+                          {t.common.tierLabel(displayTier)}
                         </span>
                         <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                          {r.mode || "auto"}
+                          {t.tags.mode(r.mode || "auto")}
                         </span>
                         {r.answer_depth && r.answer_depth !== "standard" && (
                           <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                            {r.answer_depth.replace(/[-_]/g, " ")}
+                            {t.tags.answerDepth(r.answer_depth)}
                           </span>
                         )}
                         {r.constraint_tags?.map((tag) => (
                           <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                            {tag.replace(/[-_]/g, " ")}
+                            {t.tags.constraint(tag)}
                           </span>
                         ))}
                         {r.hint_tags?.map((tag) => (
                           <span key={`${r.request_id}-${tag}`} className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-n-secondary">
-                            {tag.replace(/[-_]/g, " ")}
+                            {t.tags.hint(tag)}
                           </span>
                         ))}
                       </div>
@@ -164,7 +167,7 @@ export default function Feedback() {
                           className={`font-mono text-[12px] font-medium ${feedbackTone(fb)}`}
                           title={fb.reason}
                         >
-                          {feedbackLabel(fb)}
+                          {feedbackLabel(fb, t)}
                         </span>
                       ) : (
                         <div className="flex justify-end gap-1.5">
@@ -173,21 +176,21 @@ export default function Feedback() {
                             onClick={() => handle(r.request_id, "strong")}
                             className="rounded-pill border border-n-border-vis px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
-                            TOO STRONG
+                            {t.feedback.tooStrong}
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "ok")}
                             className="rounded-pill bg-n-display px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
-                            JUST RIGHT
+                            {t.feedback.justRight}
                           </button>
                           <button
                             disabled={isBusy}
                             onClick={() => handle(r.request_id, "weak")}
                             className="rounded-pill border border-n-border-vis px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40 whitespace-nowrap"
                           >
-                            TOO WEAK
+                            {t.feedback.tooWeak}
                           </button>
                         </div>
                       )}

@@ -16,12 +16,14 @@ import Playground from "./components/Playground";
 import Explainer from "./components/Explainer";
 import ExplainerNew from "./components/ExplainerNew";
 import { LiveDataProvider, useLiveData } from "./state/LiveDataContext";
+import { I18nProvider, useI18n } from "./i18n";
 
 type Page = "home" | "playground" | "routing" | "models" | "activity" | "budget" | "feedback" | "connections" | "explain" | "explain_new";
 
 function AppShell() {
   const [page, setPage] = useState<Page>("home");
   const { health, stats, mapping, spend, feedbackPending, ready, refresh } = useLiveData();
+  const { t } = useI18n();
 
   const upstream = health?.upstream?.replace(/^https?:\/\//, "").replace(/\/v1$/, "") ?? "";
   const isUp = health?.model_mapper?.discovered ?? false;
@@ -31,7 +33,7 @@ function AppShell() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-n-black">
         <div className="font-mono text-[11px] tracking-[0.1em] text-n-disabled animate-pulse">
-          [CONNECTING...]
+          {t.common.loading}
         </div>
       </div>
     );
@@ -68,8 +70,10 @@ function AppShell() {
 
 export default function App() {
   return (
-    <LiveDataProvider>
-      <AppShell />
-    </LiveDataProvider>
+    <I18nProvider>
+      <LiveDataProvider>
+        <AppShell />
+      </LiveDataProvider>
+    </I18nProvider>
   );
 }

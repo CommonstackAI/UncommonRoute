@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchConversation, type Conversation } from "../../api";
 import TerminalView from "./TerminalView";
 import TurnListView, { type Session } from "./TurnListView";
+import { useT } from "../../i18n";
 
 export default function ConversationView({
   sessionId,
@@ -10,6 +11,7 @@ export default function ConversationView({
   sessionId: string;
   fallbackSession: Session | null;
 }) {
+  const t = useT();
   const [data, setData] = useState<Conversation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,7 +29,7 @@ export default function ConversationView({
       const payload = await fetchConversation(sessionId);
       if (cancelled) return;
       if (!payload) {
-        setError("[ERROR: CONVERSATION ENDPOINT UNREACHABLE]");
+        setError(t.explainer.errConversationEndpoint);
         setData(null);
       } else {
         setError(null);
@@ -41,6 +43,7 @@ export default function ConversationView({
       cancelled = true;
       window.clearInterval(id);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   useEffect(() => {
@@ -86,7 +89,7 @@ export default function ConversationView({
     }
     return (
       <div className="font-mono text-[11px] text-n-disabled">
-        [NO CONTENT CAPTURED FOR THIS SESSION]
+        {t.explainer.noContent}
       </div>
     );
   }

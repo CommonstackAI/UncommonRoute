@@ -19,10 +19,10 @@ UncommonRoute 接入 Claude Code、Cursor、Codex 和 OpenAI SDK，本地分析�
 
 <a href="#30-秒跑起来">Quickstart</a> ·
 <a href="#uncommonroute-如何帮你省钱">省钱逻辑</a> ·
-<a href="#为什么需要-uncommonroute">为什么需要</a> ·
 <a href="#可视化路由">Dashboard</a> ·
 <a href="#benchmark">Benchmark</a> ·
-<a href="#隐私">Privacy</a>
+<a href="#工作原理">工作原理</a> ·
+<a href="#faq">FAQ</a>
 
 | 全程 Opus | UncommonRoute | 省下 |
 |---:|---:|---:|
@@ -199,6 +199,24 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ---
 
+## 工作原理
+
+每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
+
+| Signal | 看什么 | 典型开销 |
+|---|---|---:|
+| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
+| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
+| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
+
+三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
+
+路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
+
+UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
+
+---
+
 ## 隐私
 
 路由在本地完成。**prompt 不会经过额外的云端路由器；它只会发给你配置的 upstream provider。**
@@ -230,24 +248,6 @@ Dashboard 里也可以设置请求级、小时级或每日预算。达到上限�
 
 ---
 
-## 工作原理
-
-每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
-
-| Signal | 看什么 | 典型开销 |
-|---|---|---:|
-| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
-| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
-| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
-
-三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
-
-路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
-
-UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
-
----
-
 ## 适合谁
 
 - 你每天都在用 Claude Code、Cursor、Codex 或类似 agent 写代码。
@@ -256,39 +256,13 @@ UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进
 - 你需要按请求粒度路由，而不是整个会话只选一次模型。
 - 你希望有可解释、可调整、可反馈的路由，而不只是一个黑盒代理。
 
+---
+
 ## 不适合谁
 
 - 你只偶尔调用 LLM，账单本来就很低。
 - 你希望路由器提升低成本模型本身的能力。UncommonRoute 不做这个承诺。
 - 你所有任务都必须无条件使用最强模型。那可以直接用 `uncommon-route/best`，但省钱空间会小很多。
-
----
-
-## FAQ
-
-**会影响任务质量吗？**
-
-UncommonRoute 不是一味追求便宜。不确定或风险高的请求会向更强模型升档，上面的 held-out SWE-bench Verified 结果也显示，在那组任务上任务完成质量持平。
-
-**我的 prompt 会发到哪里？**
-
-路由在本地完成。prompt 会发给你配置的 upstream provider，不会额外经过一个托管的云端路由服务。
-
-**路由器不确定时怎么办？**
-
-默认保守处理：低置信度请求会升档，而不是悄悄把复杂任务发给能力不足的模型。
-
-**我可以手动覆盖路由吗？**
-
-可以。你可以用 `auto`、`fast`、`best`，也可以按 simple / medium / complex 配置 primary 和 fallback model。
-
-**可以用自己的 API key 吗？**
-
-可以。你可以用 Commonstack 托管 upstream，也可以用 BYOK 注册自己的 provider key。
-
-**Feedback 真的会训练东西吗？**
-
-会。Feedback 会更新本地模型覆盖层，带标注的本地 trace 也可以用于校准运行时置信度。基础模型不会被覆盖，模型覆盖层可以随时回滚。
 
 ---
 
@@ -400,6 +374,52 @@ cd UncommonRoute
 pip install -e ".[dev]"
 python -m pytest tests -v
 ```
+
+---
+
+## FAQ
+
+<details>
+<summary><strong>会影响任务质量吗？</strong></summary>
+
+UncommonRoute 不是一味追求便宜。不确定或风险高的请求会向更强模型升档，上面的 held-out SWE-bench Verified 结果也显示，在那组任务上任务完成质量持平。
+
+</details>
+
+<details>
+<summary><strong>我的 prompt 会发到哪里？</strong></summary>
+
+路由在本地完成。prompt 会发给你配置的 upstream provider，不会额外经过一个托管的云端路由服务。
+
+</details>
+
+<details>
+<summary><strong>路由器不确定时怎么办？</strong></summary>
+
+默认保守处理：低置信度请求会升档，而不是悄悄把复杂任务发给能力不足的模型。
+
+</details>
+
+<details>
+<summary><strong>我可以手动覆盖路由吗？</strong></summary>
+
+可以。你可以用 `auto`、`fast`、`best`，也可以按 simple / medium / complex 配置 primary 和 fallback model。
+
+</details>
+
+<details>
+<summary><strong>可以用自己的 API key 吗？</strong></summary>
+
+可以。你可以用 Commonstack 托管 upstream，也可以用 BYOK 注册自己的 provider key。
+
+</details>
+
+<details>
+<summary><strong>Feedback 真的会训练东西吗？</strong></summary>
+
+会。Feedback 会更新本地模型覆盖层，带标注的本地 trace 也可以用于校准运行时置信度。基础模型不会被覆盖，模型覆盖层可以随时回滚。
+
+</details>
 
 ---
 

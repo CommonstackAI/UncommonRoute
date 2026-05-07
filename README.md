@@ -19,10 +19,10 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs
 
 <a href="#quick-start">Quick Start</a> ·
 <a href="#how-uncommonroute-saves-money">Savings</a> ·
-<a href="#why-uncommonroute">Why</a> ·
 <a href="#visual-routing">Dashboard</a> ·
 <a href="#benchmark">Benchmark</a> ·
-<a href="#privacy">Privacy</a>
+<a href="#how-it-works">How It Works</a> ·
+<a href="#faq">FAQ</a>
 
 | | Opus-only | UncommonRoute | Saved |
 |---|:---:|:---:|:---:|
@@ -199,6 +199,24 @@ Cold start loads the embedding model and can take a few seconds. After warm-up, 
 
 ---
 
+## How It Works
+
+Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
+
+| Signal | What it looks at | Typical overhead |
+|---|---|---:|
+| Metadata | Conversation structure, tool use, context depth | <1ms |
+| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
+| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
+
+The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
+
+Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
+
+UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
+
+---
+
 ## Privacy
 
 Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
@@ -230,24 +248,6 @@ You can also configure per-request, hourly, or daily limits in the Dashboard. On
 
 ---
 
-## How It Works
-
-Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
-
-| Signal | What it looks at | Typical overhead |
-|---|---|---:|
-| Metadata | Conversation structure, tool use, context depth | <1ms |
-| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
-| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
-
-The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
-
-Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
-
-UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
-
----
-
 ## Who It's For
 
 - You use Claude Code, Cursor, Codex, or another coding agent every day.
@@ -256,39 +256,13 @@ UncommonRoute also learns from local feedback: high-confidence agreement grows t
 - You need routing at request granularity, not one model choice for the entire session.
 - You want routing that is explainable, adjustable, and feedback-driven.
 
+---
+
 ## Who It's Not For
 
 - You only call LLMs occasionally and your bill is already small.
 - You expect a router to make low-cost models fundamentally more capable. UncommonRoute doesn't make that claim.
 - You want every request to use the strongest model, no matter what. You can use `uncommon-route/best`, but the savings will be smaller.
-
----
-
-## FAQ
-
-**Will this hurt quality?**
-
-UncommonRoute doesn't blindly chase the cheapest model. Uncertain or high-risk requests escalate to stronger models, and the held-out SWE-bench Verified result above shows matched task quality on that split.
-
-**Where do my prompts go?**
-
-Routing runs locally. Your prompt is sent to the upstream provider you configure, not to a separate hosted routing service.
-
-**What happens when the router is unsure?**
-
-It falls back conservatively: low-confidence decisions escalate instead of quietly sending complex work to an underpowered model.
-
-**Can I override the routing?**
-
-Yes. Use `auto`, `fast`, or `best`, or configure primary and fallback models for simple / medium / complex requests.
-
-**Can I use my own API keys?**
-
-Yes. You can use Commonstack as a managed upstream or register your own provider keys with BYOK.
-
-**Does feedback train anything?**
-
-Yes. Feedback updates a local model overlay and labeled traces can calibrate runtime confidence. The base model is never overwritten, and you can roll back the overlay.
 
 ---
 
@@ -400,6 +374,52 @@ cd UncommonRoute
 pip install -e ".[dev]"
 python -m pytest tests -v
 ```
+
+---
+
+## FAQ
+
+<details>
+<summary><strong>Will this hurt quality?</strong></summary>
+
+UncommonRoute doesn't blindly chase the cheapest model. Uncertain or high-risk requests escalate to stronger models, and the held-out SWE-bench Verified result above shows matched task quality on that split.
+
+</details>
+
+<details>
+<summary><strong>Where do my prompts go?</strong></summary>
+
+Routing runs locally. Your prompt is sent to the upstream provider you configure, not to a separate hosted routing service.
+
+</details>
+
+<details>
+<summary><strong>What happens when the router is unsure?</strong></summary>
+
+It falls back conservatively: low-confidence decisions escalate instead of quietly sending complex work to an underpowered model.
+
+</details>
+
+<details>
+<summary><strong>Can I override the routing?</strong></summary>
+
+Yes. Use `auto`, `fast`, or `best`, or configure primary and fallback models for simple / medium / complex requests.
+
+</details>
+
+<details>
+<summary><strong>Can I use my own API keys?</strong></summary>
+
+Yes. You can use Commonstack as a managed upstream or register your own provider keys with BYOK.
+
+</details>
+
+<details>
+<summary><strong>Does feedback train anything?</strong></summary>
+
+Yes. Feedback updates a local model overlay and labeled traces can calibrate runtime confidence. The base model is never overwritten, and you can roll back the overlay.
+
+</details>
 
 ---
 

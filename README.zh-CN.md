@@ -1,22 +1,43 @@
-<p align="right"><a href="https://github.com/CommonstackAI/UncommonRoute/blob/main/README.md">English</a> | <strong>简体中文</strong></p>
+<p align="right"><a href="README.md">English</a> | <strong>简体中文</strong></p>
 
 <div align="center">
 
 <h1>UncommonRoute</h1>
 
-**自动模型路由，降低 LLM 开销。**
+**任务完成质量不变，API 花费减少一半。**
 
-大部分 LLM 预算都花在了不需要顶配模型的简单任务上。
-UncommonRoute 自动选最便宜、又能完成任务的模型。
+UncommonRoute 接入 Claude Code、Cursor、Codex 和 OpenAI SDK，本地分析任务复杂度、上下文结构、工具调用、可用模型池和预算限制，再把请求路由到最合适的模型。
 
-当前 held-out 评测：CommonRouterBench 上 **91.8% 任务完成率**，**81.9 成本节省分数**。
-
-<br>
+<strong>在 100 个 held-out SWE-bench Verified 任务上，UncommonRoute 任务通过数 75/100，对比全程 Opus 74/100。任务完成质量不变的同时，API 成本下降 53%。</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT"></a>
+
+<br><br>
+
+<a href="#30-秒跑起来">Quickstart</a> ·
+<a href="#可视化路由">Dashboard</a> ·
+<a href="#支持哪些客户端">Clients</a> ·
+<a href="#benchmark">Benchmark</a> ·
+<a href="#隐私">Privacy</a>
+
+<br><br>
+
+```bash
+pipx install uncommon-route
+uncommon-route init
+```
+
+<br>
+
+| 全程 Opus | UncommonRoute | 省下 |
+|---:|---:|---:|
+| 74 / 100 任务通过 | **75 / 100 任务通过** | 质量持平 |
+| $54.73 API 成本 | **$25.66 API 成本** | **−53%** |
+
+<sub>数据来自 <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a> 的 100 个 held-out SWE-bench Verified case。复现命令见下文。</sub>
 
 </div>
 
@@ -26,93 +47,240 @@ UncommonRoute 自动选最便宜、又能完成任务的模型。
   <img src="docs/assets/hero-home.png" alt="UncommonRoute Dashboard" width="800">
 </p>
 
-<div align="center">
-
-**[快速开始](#快速开始)** · **[工作原理](#工作原理)** · **[性能数据](#性能数据)** · **[Dashboard](#dashboard)** · **[配置](#配置)**
-
-</div>
-
 ---
 
-## 快速开始
-
-### 1. 安装
+## 30 秒跑起来
 
 ```bash
 pipx install uncommon-route
-```
-
-对大多数 CLI 用户来说，`pipx` 是更好的默认方案：它会把 UncommonRoute 安装到独立环境里，不污染系统 Python，卸载也更干净。
-
-普通安装已经包含训练好的 v2 runtime assets 和 embedding 依赖。生产路由不需要再额外安装 `[v2]`。
-
-如果你还没有安装 `pipx`，优先使用系统包管理器安装会更稳妥，比如 macOS 上用 `brew install pipx`，较新的 Ubuntu 用 `sudo apt install pipx`，Fedora 用 `sudo dnf install pipx`，然后执行 `pipx ensurepath`。
-
-如果系统里没有现成的 `pipx` 包，再参考 [pipx 官方安装文档](https://pipx.pypa.io/stable/installation/) 或直接运行：
-
-```bash
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
-```
-
-如果你本来就在虚拟环境里工作，用 `pip` 也完全可以：
-
-```bash
-python3 -m pip install uncommon-route
-```
-
-<details>
-<summary><strong>安装排障：什么时候用 pip，什么时候用 pipx</strong></summary>
-
-- 如果你是在安装一个平时直接在终端里用的 CLI 工具，优先用 `pipx install uncommon-route`。
-- 如果你已经在某个项目的虚拟环境里，直接在那个环境里运行 `python -m pip install uncommon-route`。
-- 如果你不确定 `pip` 指向哪个 Python，优先写成 `python3 -m pip ...`，这样不会装到错误的解释器里。
-- 如果你的系统 Python 报了 “externally managed environment” 之类的错误，不要强行往系统环境里装，改用 `pipx` 或虚拟环境。
-- 如果你必须绑定某个 Python 版本，`pipx` 也可以直接指定，比如：`pipx install --python python3.12 uncommon-route`。
-
-</details>
-
-### 2. 运行引导式配置
-
-```bash
 uncommon-route init
 ```
 
-这个向导会一步步帮你：
-
-- 选择接入方式：Commonstack、BYOK，或者本地 / 自定义 upstream
-- 把 upstream 凭据保存到本地
-- 配置 Claude Code、Codex、OpenAI SDK / Cursor
-- 可选地直接把代理以后台方式启动起来
-
-如果你想在启动前先检查一遍：
+`init` 会引导你选择连接方式、保存凭证，并自动配置 Claude Code、Codex、Cursor 或 OpenAI SDK。配置完成后可以随时做健康检查：
 
 ```bash
 uncommon-route doctor
 ```
 
-### 3. 把客户端指向代理
+<details>
+<summary>没有 <code>pipx</code>？在 venv 里？</summary>
 
-| 客户端 | 改动 |
-|---|---|
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` 和 `export ANTHROPIC_AUTH_TOKEN="not-needed"` |
-| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
-| OpenClaw | 插件接入——详见 [openclaw.ai](https://openclaw.ai) |
+- **macOS**：`brew install pipx && pipx ensurepath`
+- **Ubuntu**：`sudo apt install pipx && pipx ensurepath`
+- **Fedora**：`sudo dnf install pipx && pipx ensurepath`
+- **已经在 virtualenv 里**：`python3 -m pip install uncommon-route`
+- **遇到 "externally managed environment"**：用 `pipx` 或 venv，不要强装到系统 Python。
+- **指定 Python 版本**：`pipx install --python python3.12 uncommon-route`
 
-然后把模型 ID 设为 `uncommon-route/auto`：
+</details>
 
-```python
-client = OpenAI(base_url="http://localhost:8403/v1")
-resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs)
-# → 简单任务走便宜模型，复杂任务走顶配模型
+---
+
+## 可视化路由
+
+UncommonRoute 不只是转发请求的代理。Dashboard 会记录并展示每次路由决策：请求被判定为 simple、medium 还是 complex，最终选择哪个模型，预计或实际成本是多少，以及后续可以如何调整策略。
+
+```bash
+uncommon-route serve
+# -> http://localhost:8403/dashboard/
 ```
 
-支持 **Claude Code**、**Codex**、**Cursor**、**OpenAI SDK** 和 **OpenClaw**。
+| 页面 | 功能 |
+|---|---|
+| Home | 实时请求、复杂度分布、模型选择、成本变化 |
+| Playground | 输入 prompt，预览复杂度分类、置信度、成本估算和信号读数 |
+| Explain | 按会话查看每一步路由决策、模型、延迟和成本 |
+| Activity | 请求复杂度、服务档位、传输路径、能力通道、模型使用和成本分布 |
+| Routing | 配置 `auto` / `fast` / `best`，也可以按复杂度档位指定 primary / fallback model |
+| Models | 查看当前模型池、provider、能力标签和输入 / 输出价格 |
+| Connections | 管理托管 upstream 或 BYOK provider key，并验证连接状态 |
+| Budget | 设置请求级、小时级或每日预算上限 |
+| Feedback | 标记路由 `too strong` / `just right` / `too weak`，用本地反馈改进分类器 |
 
-<details>
-<summary><strong>手动配置（进阶）</strong></summary>
+推荐的演示路径是：先在 Playground 输入一个 prompt，看路由器给出的复杂度分类、置信度和成本估算；再到 Explain / Activity 里查看真实请求的路由轨迹。
 
-**方式 A — Commonstack 托管（推荐，一把 key 覆盖所有 provider）**
+---
+
+## 支持哪些客户端
+
+| 你在用 | 最短配置 | 说明 |
+|---|---|---|
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` | 通过 Anthropic-compatible proxy 接入 |
+| OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | 模型 ID 用 `uncommon-route/auto` |
+| Codex | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | 通过 OpenAI-compatible 接口接入 |
+| Cursor | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | 不需要改业务代码 |
+| OpenClaw | 安装插件 | 见 [openclaw.ai](https://openclaw.ai) |
+
+Claude Code 还需要设置一个占位 token：
+
+```bash
+export ANTHROPIC_AUTH_TOKEN="not-needed"
+```
+
+OpenAI SDK 示例：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8403/v1")
+resp = client.chat.completions.create(
+    model="uncommon-route/auto",
+    messages=msgs,
+)
+```
+
+---
+
+## UncommonRoute 如何帮你省钱
+
+省钱不是靠少用 AI，而是避免把简单请求默认交给最强模型。
+
+```text
+"hello"                         -> simple
+"修一下 README 里的错字"          -> simple
+"定位这个失败测试并修复"            -> medium
+"重构这个 500 行模块"             -> medium / complex
+"设计一个分布式调度器"             -> complex
+```
+
+simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的模型，complex 请求再调用你配置里的最强模型。所有判断都按请求独立完成，不会把整个会话固定在同一个模型上。
+
+---
+
+## 为什么需要 UncommonRoute
+
+如果你每天用 AI agent 写代码，很容易遇到一种浪费：改错字、补注释、运行简单测试，也默认调用最贵的模型。
+
+UncommonRoute 的边界很清楚：它不替代 Claude Code、Cursor 或 Codex，也不改变模型本身的能力。它专注于一件事：为每次请求选择最匹配的模型。
+
+> 这个请求，最适合交给哪个模型？
+
+路由在本地完成，请求按 agent step 独立判断，不会把整个会话固定在同一个复杂度分类或模型档位上。你也可以在 Dashboard 里看到每一步决策，而不是只能相信一个黑盒结果。
+
+---
+
+## 为什么选 UncommonRoute
+
+| 能力 | 结果 |
+|---|---|
+| 本地路由 | prompt、completion 和路由决策不需要发送给额外的云端路由器 |
+| 按请求路由 | 每个 agent step 独立判断，不把整个会话固定在同一个复杂度分类或模型档位上 |
+| 自动选择模型 | 根据任务难度、上下文结构、工具调用和 provider 可用性选择路由结果 |
+| 可解释决策 | 每次路由都能看到复杂度分类、置信度、信号读数、模型和成本 |
+| 可调整策略 | 支持 `auto` / `fast` / `best`，也支持按 simple / medium / complex 配置 override 和 fallback |
+| 预算封顶 | 可以设置请求级、小时级或每日 API 花费上限 |
+| 本地反馈 | 标记路由太强、刚好或太弱，用本地反馈改进分类器 |
+| 即插即用 | Claude Code、Cursor、Codex、OpenAI SDK、OpenClaw 都不用改业务代码 |
+
+---
+
+## Benchmark
+
+UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench) 上评测。该评测包含 SWE-Bench、BFCL、mtRAG、QMSum、PinchBench 的 520 个实例，共 970 条路由器可见的任务前缀，并带有执行验证过的目标档位标签。端到端验证使用一组 100 个 held-out SWE-bench Verified case。
+
+### 任务通过率持平，API 成本少 53%
+
+| 策略 | 任务通过 | API 成本 | vs 全程 Opus |
+|---|:---:|:---:|:---:|
+| 全程 Opus 4.6 | 74 / 100 | $54.73 | — |
+| **UncommonRoute** | **75 / 100** | **$25.66** | **−53%** |
+
+也就是说，不是“少花钱但少做成任务”。在这组任务里，UncommonRoute 的任务通过数与全程 Opus 持平，实际 API 调用成本下降 53%。
+
+这里的“任务通过”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含 Table 4 里的 penalty cost。
+
+### 复现
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pip install "git+https://github.com/CommonstackAI/TwinRouterBench.git"
+python scripts/eval_v2.py --split holdout
+python scripts/bench_overhead.py --iterations 50 --json
+```
+
+### 路由开销
+
+本地 CPU，热进程：
+
+| 指标 | 延迟 |
+|---|:---:|
+| p50 | 25.6ms |
+| p90 | 32.1ms |
+
+冷启动需要加载 embedding 模型，可能要几秒；进程预热后，单次 `route()` 通常是几十毫秒。
+
+---
+
+## 隐私
+
+路由在本机完成。**prompt、completion 和路由决策都不会为了路由发送给额外服务。**
+
+```bash
+uncommon-route telemetry status
+```
+
+诊断文件也默认保存在本机：
+
+```bash
+uncommon-route support bundle
+```
+
+脱敏后的 support bundle 会写到 `~/.uncommon-route/support/`。只有你主动分享时，它才会离开本机。
+
+---
+
+## 预算封顶
+
+为 API 花费设置硬上限：
+
+```bash
+uncommon-route spend set daily 20.00
+uncommon-route spend status
+```
+
+Dashboard 里也可以设置请求级、小时级或每日预算。达到上限后，请求会回退到当前可用的最低成本档位，而不是直接失败。
+
+---
+
+## 工作原理
+
+每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
+
+| Signal | 看什么 | 典型开销 |
+|---|---|---:|
+| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
+| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
+| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
+
+三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
+
+路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
+
+UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
+
+---
+
+## 适合谁
+
+- 你每天都在用 Claude Code、Cursor、Codex 或类似 agent 写代码。
+- 你的账单主要花在最强模型上，但很多请求并不需要同一档模型。
+- 你想省 API 成本，但不想把 prompt 发给一个额外的云端路由器。
+- 你需要按请求粒度路由，而不是整个会话只选一次模型。
+- 你希望有可解释、可调整、可反馈的路由，而不只是一个黑盒代理。
+
+## 不适合谁
+
+- 你只偶尔调用 LLM，账单本来就很低。
+- 你希望路由器提升低成本模型本身的能力。UncommonRoute 不做这个承诺。
+- 你所有任务都必须无条件使用最强模型。那可以直接用 `uncommon-route/best`，但省钱空间会小很多。
+
+---
+
+## 高级配置
+
+### 连接 provider
+
+**Commonstack 托管 upstream**：一把 key 接入 OpenAI、Anthropic、Google、xAI、MiniMax、Moonshot、DeepSeek。
 
 ```bash
 export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
@@ -120,160 +288,24 @@ export UNCOMMON_ROUTE_API_KEY="csk-your-key"
 uncommon-route serve
 ```
 
-一把 key 打通 OpenAI、Anthropic、Google、xAI、MiniMax、Moonshot、DeepSeek 等所有主流 provider——统一账单，无需逐家申请。
-
-**方式 B — 自带 key（BYOK）**
+**BYOK，自带 provider key**：自动路由只会在你注册过的 provider 里选模型。
 
 ```bash
 uncommon-route provider add openai     sk-...
 uncommon-route provider add anthropic  sk-ant-...
 uncommon-route provider add google     AIza...
-# 同样支持：xai、minimax、moonshot、deepseek
 uncommon-route serve
 ```
 
-Auto 路由只会在已注册的 provider 范围内选模型。
-
-> **注意：** UncommonRoute **不会**自动读取 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 环境变量。请使用 `uncommon-route init`、本地保存的连接配置，或上面的手动方式。
-
-</details>
-
----
-
-## 工作原理
-
-每个请求会先经过多个本地信号分析，然后路由到你配置的 upstream 里最便宜的合适模型：
-
-```
-"你好"                     → economy tier
-"修一下第 3 行的拼写错误"   → economy / balanced tier
-"重构这个 500 行的模块"    → balanced / premium tier
-"设计一个分布式调度系统"    → premium tier
-```
-
-具体模型 ID 和价格来自当前 upstream 的模型目录以及你的本地配置。UncommonRoute 不依赖单一写死的模型列表。
-
-| 信号 | 分析内容 | 耗时 |
-|---|---|---|
-| **元数据信号** | 对话轮次、工具调用、上下文深度 | <1ms |
-| **语义信号** | 基于 BGE 的训练分类器，结合用户请求、最近 agent 状态和元数据；不确定时回退到 KNN | warm route 端到端约 ~25–35ms |
-| **结构信号** | 文本和对话复杂度；部分请求直接参与，其他请求以 shadow 方式追踪 | <1ms |
-
-warm process 上，端到端 `route()` 开销通常是 **~25–35ms**（CPU），主要来自语义信号。冷启动需要加载 embedding 模型，在全新进程或新机器上可能需要数秒；预热后路由都在本地完成。
-
-多个信号投票，集成模型决定 tier。随后路由器会在满足 tier、能力、协议和 upstream 可用性约束的模型中选择最低成本的模型。未知价格或动态价格会被保守处理，不会被当成真实负价格。
-
-路由是 **per request / per agent step** 的，不会把整个 session 锁死在同一个模型上。只有协议本身要求连续性的场景才会加约束，比如 Anthropic thinking continuation。
-
-**越用越准。** 本地反馈可以调整信号权重，高置信度一致判断可以扩展 embedding index，低置信度预测会升级，而不是静默降到不合适的模型。
-
----
-
-## 为什么做 v2
-
-v1 分类器在干净的 benchmark 上跑出了 88.5% 的准确率，我们直接上了线。
-
-然后拿真实的 Agent 对话一测——多轮交互、工具调用、上下文乱七八糟——准确率直接掉到 43%。超过一半的路由决策是错的。
-
-我们没有选择打补丁，而是从零开始重写。
-
-| | v1 | v2 |
-|---|---|---|
-| **Tier match 准确率** | 43% | **74.0%** held-out |
-| **任务完成率** | 100%（作弊——永远选最贵的） | **91.8%**（真正的路由决策） |
-| **成本节省分数** | 0% | **81.9** |
-
-我们把这些数据告诉你，是因为比起让你被数字震撼到，我们更希望你能信任它。
-
----
-
-## 性能数据
-
-基于 [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) 测试——970 条真实 Agent 任务轨迹，覆盖 SWE-Bench、BFCL、MT-RAG、QMSum 和 PinchBench。下面的公开数字使用 196 条 held-out split，不包含训练集和 calibration 集。
-
-| 指标 | 数值 |
-|---|---|
-| **任务完成率** | **91.8%** |
-| **Tier match 准确率** | **74.0%** |
-| **成本节省分数** | **81.9**（对比全程顶配 baseline） |
-| **综合分数** | **76.7** |
-| **warm 路由延迟** | 本地 CPU 运行 **p50 25.6ms / p90 32.1ms** |
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pip install "git+https://github.com/CommonstackAI/CommonRouterBench.git"
-python scripts/eval_v2.py --split holdout
-python scripts/bench_overhead.py --iterations 50 --json
-```
-
----
-
-## Dashboard
-
-```bash
-uncommon-route serve
-# → http://localhost:8403/dashboard/
-```
-
-实时监控、交互式 Playground、成本追踪、路由配置——采用 Nothing Design 风格的深色界面。
-
----
-
-## 诊断与排障
-
-如果用户遇到路由异常、上游报错，或者某次请求行为不对，现在可以直接导出本地诊断包，不需要先猜该收集哪些日志：
-
-```bash
-uncommon-route support bundle
-uncommon-route support request <request_id>
-```
-
-诊断包会包含最近请求 trace、最近错误、统计摘要、provider / 配置快照，以及脱敏后的本地状态。默认只写到你的本机，只有你主动分享时才会离开电脑。
-
----
-
-## 停用与卸载
-
-停止代理服务：
-
-- 前台运行时：在运行 `uncommon-route serve` 的终端里按 `Ctrl+C`
-- 后台 daemon：运行 `uncommon-route stop`
-- 查看后台日志：运行 `uncommon-route logs --follow`
-
-如果你不想让客户端继续走 UncommonRoute，把 `uncommon-route init` 写进 shell rc 的那段配置删掉或注释掉即可。这个文件通常是 `~/.zshrc`、`~/.bashrc` 或 `~/.config/fish/config.fish`。改完后重开终端；如果只想让当前 shell 立刻失效，也可以直接执行：
-
-```bash
-unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
-```
-
-卸载包本身：
-
-```bash
-pipx uninstall uncommon-route
-# 如果你是用 pip 装到某个特定环境里的：
-python3 -m pip uninstall uncommon-route
-```
-
-如果你还想把本地状态一起删掉，再移除 `~/.uncommon-route/` 即可。这个目录里包含保存的连接信息、provider key、日志、trace 和诊断包。
-
----
-
-## 配置
+> UncommonRoute **不会**自动读取 `OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`。请用 `init`、已保存连接，或上面的手动配置方式。
 
 ### 路由模式
 
-| 模式 | 模型 ID | 行为 |
+| Mode | Model ID | 行为 |
 |---|---|---|
-| **auto** | `uncommon-route/auto` | 平衡——最佳性价比 |
-| **fast** | `uncommon-route/fast` | 省钱优先——最便宜的能用的 |
-| **best** | `uncommon-route/best` | 质量优先——用最强模型 |
-
-### 花费控制
-
-```bash
-uncommon-route spend set daily 20.00
-uncommon-route spend status
-```
+| auto | `uncommon-route/auto` | 默认模式，优先质量 / 成本比 |
+| fast | `uncommon-route/fast` | 成本优先，在可接受质量下优先低成本模型 |
+| best | `uncommon-route/best` | 质量优先，尽量用最强可用模型 |
 
 ### Provider 管理
 
@@ -283,30 +315,64 @@ uncommon-route provider add <name> <api-key>
 uncommon-route provider remove <name>
 ```
 
-支持的 provider 名：`commonstack`、`openai`、`anthropic`、`google`、`xai`、`minimax`、`moonshot`、`deepseek`。两种接入模式（托管上游 vs. BYOK）详见 [快速开始](#快速开始)。
+支持：`commonstack`、`openai`、`anthropic`、`google`、`xai`、`minimax`、`moonshot`、`deepseek`。
 
 <details>
-<summary><strong>所有环境变量</strong></summary>
+<summary><strong>环境变量</strong></summary>
 
 | 变量 | 含义 |
 |---|---|
-| `UNCOMMON_ROUTE_UPSTREAM` | 托管上游模式的 base URL（例如 `https://api.commonstack.ai/v1`）。BYOK 模式下忽略。 |
-| `UNCOMMON_ROUTE_API_KEY` | 与 `UNCOMMON_ROUTE_UPSTREAM` 配对的 API key。不会作为各 provider key 的兜底。 |
-| `UNCOMMON_ROUTE_PORT` | 本地代理端口（默认 8403） |
+| `UNCOMMON_ROUTE_UPSTREAM` | 托管路径的 upstream 地址，例如 `https://api.commonstack.ai/v1`；BYOK 模式下忽略 |
+| `UNCOMMON_ROUTE_API_KEY` | 配合 `UNCOMMON_ROUTE_UPSTREAM` 使用的 key，不是 per-provider key 的兜底 |
+| `UNCOMMON_ROUTE_PORT` | 本地 proxy 端口，默认 8403 |
 
 </details>
 
 ---
 
-## 隐私
+## 诊断
 
-完全在本地运行，除非你主动选择分享，否则不会有任何数据离开你的电脑。
+遇到路由异常、上游报错，或者准备提交 issue 时，可以一条命令导出脱敏诊断包：
 
 ```bash
-uncommon-route telemetry status
+uncommon-route support bundle
+uncommon-route support request <request_id>
 ```
 
-`uncommon-route support bundle` 生成的诊断包默认也只会保存在 `~/.uncommon-route/support/`。
+诊断包包含近期 traces、errors、stats、provider/config 快照和脱敏后的本地状态，默认保存在本机。
+
+---
+
+## 停止与卸载
+
+前台运行时按 `Ctrl+C`。如果是后台 daemon：
+
+```bash
+uncommon-route stop
+uncommon-route logs --follow
+```
+
+如果你想让客户端停止走 UncommonRoute，删除 `init` 写入 shell rc 的那段配置，然后重启终端。常见位置包括 `~/.zshrc`、`~/.bashrc`、`~/.config/fish/config.fish`。
+
+只对当前 shell 临时恢复：
+
+```bash
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+```
+
+卸载：
+
+```bash
+pipx uninstall uncommon-route
+# 如果你装在 venv 里：
+python3 -m pip uninstall uncommon-route
+```
+
+删除本地状态，包括连接、provider key、日志和 trace：
+
+```bash
+rm -rf ~/.uncommon-route/
+```
 
 ---
 
@@ -314,7 +380,8 @@ uncommon-route telemetry status
 
 ```bash
 git clone https://github.com/CommonstackAI/UncommonRoute.git
-cd UncommonRoute && pip install -e ".[dev]"
+cd UncommonRoute
+pip install -e ".[dev]"
 python -m pytest tests -v
 ```
 
@@ -322,4 +389,4 @@ python -m pytest tests -v
 
 ## 许可证
 
-MIT——详见 [LICENSE](LICENSE)。
+MIT，见 [LICENSE](LICENSE)。

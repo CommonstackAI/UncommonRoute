@@ -1,22 +1,43 @@
-<p align="right"><strong>English</strong> | <a href="https://github.com/CommonstackAI/UncommonRoute/blob/main/README.zh-CN.md">简体中文</a></p>
+<p align="right"><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a></p>
 
 <div align="center">
 
 <h1>UncommonRoute</h1>
 
-**Automatic model routing for lower LLM spend.**
+**Cut your API bill in half without giving up performance.**
 
-Most of your LLM budget goes to simple tasks that don't need a premium model.
-UncommonRoute picks the cheapest model that still gets the job done — automatically.
+UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs locally, analyzes task complexity, conversation structure, tool use, available models, and budget constraints, then routes each request to the right model for the job.
 
-Current held-out eval: **91.8% task pass rate** with an **81.9 cost-savings score** on CommonRouterBench.
-
-<br>
+<strong>On a held-out 100-case SWE-bench Verified split, UncommonRoute solved 75/100 tasks vs 74/100 for Opus-only. With task quality matched, API cost dropped by 53%.</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT"></a>
+
+<br><br>
+
+<a href="#quick-start">Quick Start</a> ·
+<a href="#visual-routing">Dashboard</a> ·
+<a href="#supported-clients">Clients</a> ·
+<a href="#benchmark">Benchmark</a> ·
+<a href="#privacy">Privacy</a>
+
+<br><br>
+
+```bash
+pipx install uncommon-route
+uncommon-route init
+```
+
+<br>
+
+| | Opus-only | UncommonRoute | Saved |
+|---|:---:|:---:|:---:|
+| Tasks solved | 74 / 100 | **75 / 100** | Matched |
+| API cost | $54.73 | **$25.66** | **-53%** |
+
+<sub>Numbers from a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Reproduction commands below.</sub>
 
 </div>
 
@@ -26,93 +47,240 @@ Current held-out eval: **91.8% task pass rate** with an **81.9 cost-savings scor
   <img src="docs/assets/hero-home.png" alt="UncommonRoute Dashboard" width="800">
 </p>
 
-<div align="center">
-
-**[Quick Start](#quick-start)** · **[How It Works](#how-it-works)** · **[Benchmarks](#benchmarks)** · **[Dashboard](#dashboard)** · **[Configuration](#configuration)**
-
-</div>
-
 ---
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
 pipx install uncommon-route
-```
-
-`pipx` is the best default for most CLI users: it installs UncommonRoute into its own isolated environment, keeps your system Python clean, and gives you a clean uninstall path.
-
-A normal install includes the trained v2 runtime assets and embedding dependencies. You do not need a separate `[v2]` install for production routing.
-
-If you do not have `pipx` yet, prefer your OS package manager when it is available (`brew install pipx` on macOS, `sudo apt install pipx` on recent Ubuntu, `sudo dnf install pipx` on Fedora), then run `pipx ensurepath`.
-
-If that is not available, see the [pipx installation guide](https://pipx.pypa.io/stable/installation/) or install it with:
-
-```bash
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
-```
-
-If you already work inside a virtual environment, `pip` is still fine:
-
-```bash
-python3 -m pip install uncommon-route
-```
-
-<details>
-<summary><strong>Install troubleshooting: pip vs. pipx</strong></summary>
-
-- If you are installing a command-line app for everyday use, prefer `pipx install uncommon-route`.
-- If you are already inside a project virtual environment, use `python -m pip install uncommon-route` inside that environment.
-- Prefer `python3 -m pip ...` over bare `pip ...` when you are unsure which Python interpreter `pip` points at.
-- If your OS Python reports an "externally managed environment" error, use `pipx` or a virtual environment instead of forcing a system-wide install.
-- If you need a specific interpreter, `pipx` can target it directly, for example: `pipx install --python python3.12 uncommon-route`.
-
-</details>
-
-### 2. Run the guided setup
-
-```bash
 uncommon-route init
 ```
 
-The wizard walks you through:
-
-- choosing a connection path: Commonstack, local/custom upstream, or BYOK
-- saving upstream credentials locally
-- configuring Claude Code, Codex, or OpenAI SDK / Cursor
-- optionally starting the proxy in background
-
-If you prefer to sanity-check before starting the proxy:
+`init` walks you through connection setup, saves credentials, and configures Claude Code, Codex, Cursor, or the OpenAI SDK. After setup, run a health check anytime:
 
 ```bash
 uncommon-route doctor
 ```
 
-### 3. Point your client at the proxy
+<details>
+<summary>No <code>pipx</code>? Inside a venv?</summary>
 
-| Client | Change |
-|---|---|
-| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` and `export ANTHROPIC_AUTH_TOKEN="not-needed"` |
-| Codex / Cursor / OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` |
-| OpenClaw | Plugin — see [openclaw.ai](https://openclaw.ai) |
+- **macOS**: `brew install pipx && pipx ensurepath`
+- **Ubuntu**: `sudo apt install pipx && pipx ensurepath`
+- **Fedora**: `sudo dnf install pipx && pipx ensurepath`
+- **Already inside a virtualenv**: `python3 -m pip install uncommon-route`
+- **Seeing an "externally managed environment" error**: use `pipx` or a venv instead of forcing a system install.
+- **Need a specific Python version**: `pipx install --python python3.12 uncommon-route`
 
-Then use `uncommon-route/auto` as the model ID:
+</details>
 
-```python
-client = OpenAI(base_url="http://localhost:8403/v1")
-resp = client.chat.completions.create(model="uncommon-route/auto", messages=msgs)
-# → simple tasks → cheap model, complex tasks → premium model
+---
+
+## Visual Routing
+
+UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, its actual or estimated cost, and how to tune the policy.
+
+```bash
+uncommon-route serve
+# -> http://localhost:8403/dashboard/
 ```
 
-Works with **Claude Code**, **Codex**, **Cursor**, the **OpenAI SDK**, and **OpenClaw**.
+| Page | What it does |
+|---|---|
+| Home | Live requests, complexity distribution, model choices, and cost changes |
+| Playground | Type a prompt and preview complexity, confidence, estimated cost, and signal readout |
+| Explain | Inspect each routing decision per session, including model, latency, and cost |
+| Activity | See request complexity, served quality, transport paths, capability lanes, model usage, and cost distribution |
+| Routing | Configure `auto` / `fast` / `best`, or set primary and fallback models per complexity tier |
+| Models | Browse the active model pool, providers, capability tags, and input / output prices |
+| Connections | Manage the primary upstream and BYOK provider keys, and verify connection status |
+| Budget | Set per-request, hourly, or daily spend limits |
+| Feedback | Mark routes as `too strong`, `just right`, or `too weak` to improve the local classifier |
 
-<details>
-<summary><strong>Manual setup (advanced)</strong></summary>
+To kick the tires: type a prompt in Playground, inspect the predicted complexity, confidence, and cost estimate, then open Explain / Activity to trace real routing decisions.
 
-**Commonstack managed upstream**
+---
+
+## Supported Clients
+
+| Client | Minimal setup | Notes |
+|---|---|---|
+| Claude Code | `export ANTHROPIC_BASE_URL="http://localhost:8403"` | Uses the Anthropic-compatible proxy |
+| OpenAI SDK | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | Use `uncommon-route/auto` as the model ID |
+| Codex | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | Uses the OpenAI-compatible API |
+| Cursor | `export OPENAI_BASE_URL="http://localhost:8403/v1"` | No application code changes |
+| OpenClaw | Install the plugin | See [openclaw.ai](https://openclaw.ai) |
+
+Claude Code also needs a placeholder token:
+
+```bash
+export ANTHROPIC_AUTH_TOKEN="not-needed"
+```
+
+OpenAI SDK example:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8403/v1")
+resp = client.chat.completions.create(
+    model="uncommon-route/auto",
+    messages=msgs,
+)
+```
+
+---
+
+## How UncommonRoute Saves Money
+
+The savings don't come from using less AI. They come from not sending easy requests to frontier models.
+
+```text
+"hello"                         -> simple
+"fix a typo in the README"       -> simple
+"find and fix this failing test" -> medium
+"refactor this 500-line module"  -> medium / complex
+"design a distributed scheduler" -> complex
+```
+
+Simple requests go to lightweight models. Medium requests go to capable mid-tier models. Complex requests escalate to the strongest model you've configured. Each decision is made per request, so a single conversation isn't tied to one model.
+
+---
+
+## Why UncommonRoute
+
+If you use AI agents for coding every day, a lot of that spend goes toward work that doesn't need the most expensive model: typo fixes, small edits, simple test runs, short explanations.
+
+UncommonRoute does one thing. It doesn't replace Claude Code, Cursor, or Codex, and doesn't try to make cheaper models smarter. It focuses on one decision:
+
+> Which model is the right fit for this request?
+
+Routing happens locally and independently for each agent step. You can inspect every decision in the Dashboard instead of trusting a black-box proxy.
+
+---
+
+## Highlights
+
+| Capability | Result |
+|---|---|
+| Local routing | The router runs locally; no extra hop through a cloud routing service |
+| Per-request routing | Each agent step is routed independently instead of pinning the whole session to one model tier |
+| Automatic model selection | Routes based on task difficulty, conversation structure, tool use, and provider availability |
+| Explainable decisions | See complexity, confidence, signal readout, selected model, and cost for each route |
+| Adjustable policy | Use `auto` / `fast` / `best`, or override simple / medium / complex with primary and fallback models |
+| Spend caps | Set per-request, hourly, or daily API spend limits |
+| Local feedback | Mark routes as too strong, just right, or too weak to improve the classifier locally |
+| Drop-in integration | Claude Code, Cursor, Codex, OpenAI SDK, and OpenClaw work without application code changes |
+
+---
+
+## Benchmark
+
+UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. The end-to-end validation below uses a 100-case held-out SWE-bench Verified split.
+
+### Matched task quality, 53% lower API cost
+
+| Policy | Tasks solved | API cost | vs Opus-only |
+|---|:---:|:---:|:---:|
+| Opus 4.6 only | 74 / 100 | $54.73 | — |
+| **UncommonRoute** | **75 / 100** | **$25.66** | **-53%** |
+
+Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, UncommonRoute matched Opus-only on tasks solved while cutting realized API spend by 53%.
+
+"Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 4.
+
+### Reproduce
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pip install "git+https://github.com/CommonstackAI/TwinRouterBench.git"
+python scripts/eval_v2.py --split holdout
+python scripts/bench_overhead.py --iterations 50 --json
+```
+
+### Routing Overhead
+
+Local CPU, warm process:
+
+| Metric | Latency |
+|---|:---:|
+| p50 | 25.6ms |
+| p90 | 32.1ms |
+
+Cold start loads the embedding model and can take a few seconds. After warm-up, a single `route()` call typically takes tens of milliseconds.
+
+---
+
+## Privacy
+
+Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
+
+```bash
+uncommon-route telemetry status
+```
+
+Diagnostic exports are local by default:
+
+```bash
+uncommon-route support bundle
+```
+
+The redacted support bundle is written to `~/.uncommon-route/support/`. It leaves your machine only if you choose to share it.
+
+---
+
+## Spend Caps
+
+Set a hard ceiling on API spend:
+
+```bash
+uncommon-route spend set daily 20.00
+uncommon-route spend status
+```
+
+You can also configure per-request, hourly, or daily limits in the Dashboard. Once a limit is reached, requests fall back to the lowest-cost available tier instead of failing outright.
+
+---
+
+## How It Works
+
+Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
+
+| Signal | What it looks at | Typical overhead |
+|---|---|---:|
+| Metadata | Conversation structure, tool use, context depth | <1ms |
+| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
+| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
+
+The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
+
+Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
+
+UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
+
+---
+
+## Who It's For
+
+- You use Claude Code, Cursor, Codex, or another coding agent every day.
+- Most of your spend goes to frontier models, but many requests don't need that tier.
+- You want lower API cost without sending prompts to an extra hosted router.
+- You need routing at request granularity, not one model choice for the entire session.
+- You want routing that is explainable, adjustable, and feedback-driven.
+
+## Who It's Not For
+
+- You only call LLMs occasionally and your bill is already small.
+- You expect a router to make low-cost models fundamentally more capable. UncommonRoute doesn't make that claim.
+- You want every request to use the strongest model, no matter what. You can use `uncommon-route/best`, but the savings will be smaller.
+
+---
+
+## Advanced Configuration
+
+### Connect Providers
+
+**Commonstack (managed)**: one key gets you OpenAI, Anthropic, Google, xAI, MiniMax, Moonshot, and DeepSeek.
 
 ```bash
 export UNCOMMON_ROUTE_UPSTREAM="https://api.commonstack.ai/v1"
@@ -120,162 +288,26 @@ export UNCOMMON_ROUTE_API_KEY="csk-your-key"
 uncommon-route serve
 ```
 
-One key gives you OpenAI, Anthropic, Google, xAI, MiniMax, Moonshot, DeepSeek, and more — consolidated billing, no per-provider setup.
-
-**Bring your own keys (BYOK)**
+**BYOK provider keys**: auto-routing only considers providers you've registered.
 
 ```bash
 uncommon-route provider add openai     sk-...
 uncommon-route provider add anthropic  sk-ant-...
 uncommon-route provider add google     AIza...
-# also supported: xai, minimax, moonshot, deepseek
 uncommon-route serve
 ```
 
-Auto-routing will only consider models backed by a registered provider.
+> UncommonRoute doesn't automatically read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Use `init`, a saved connection, or one of the manual setup paths above.
 
-> **Note:** UncommonRoute does **not** auto-read `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Use `uncommon-route init`, a saved connection, or one of the manual paths above.
-
-</details>
-
----
-
-## How It Works
-
-Every request is analyzed by multiple local signals, then routed to the cheapest capable model available from your configured upstream:
-
-```
-"hello"                              → economy tier
-"fix the typo on line 3"             → economy / balanced tier
-"refactor this 500-line module"      → balanced / premium tier
-"design a distributed scheduler"     → premium tier
-```
-
-Actual model IDs and prices come from the live upstream model catalog plus your local overrides. UncommonRoute does not rely on a single hardcoded model list.
-
-| Signal | What it does | Speed (CPU, warm) |
-|---|---|---|
-| **Metadata** | Conversation structure, tool usage, depth | <1ms |
-| **Embedding** | Trained BGE classifier over the user request, recent agent state, and metadata; KNN fallback when uncertain | ~25–35ms end-to-end warm route overhead |
-| **Structural** | Text and conversation complexity; active on selected requests, shadow-tracked otherwise | <1ms |
-
-End-to-end `route()` overhead on a warm process is typically **~25–35ms** on CPU and is dominated by the embedding signal. Cold start includes loading the embedding model and can take seconds on a fresh process or machine; after warmup, routing stays local.
-
-Signals vote. The ensemble picks the tier. The router then selects the cheapest model that satisfies tier, capability, transport, and upstream availability constraints. Unknown or dynamic upstream pricing is treated conservatively instead of being interpreted as a real negative price.
-
-Routing is **per request / per agent step**, not sticky for an entire session. Protocol-level constraints still apply when the request requires them, for example Anthropic thinking continuations.
-
-**It gets smarter over time.** Local feedback can adjust signal weights, high-confidence agreement can grow the embedding index, and low-confidence predictions escalate instead of silently under-routing.
-
----
-
-## Why v2
-
-Our v1 classifier hit 88.5% accuracy on clean benchmark data. We shipped it.
-
-Then we tested on real agent conversations — multi-turn, tool-calling, messy context — and accuracy dropped to 43%. More than half the routing decisions were wrong.
-
-We didn't patch it. We rebuilt from scratch.
-
-| | v1 | v2 |
-|---|---|---|
-| **Tier match accuracy** | 43% | **74.0%** held-out |
-| **Task pass rate** | 100% (cheated — always chose most expensive) | **91.8%** with real routing |
-| **Cost-savings score** | 0% | **81.9** |
-
-We're telling you this because we'd rather you trust our numbers than be impressed by them.
-
----
-
-## Benchmarks
-
-Tested on [CommonRouterBench](https://github.com/CommonstackAI/CommonRouterBench) — 970 real agent task traces across SWE-Bench, BFCL, MT-RAG, QMSum, and PinchBench. The public numbers below use the 196-row held-out split, not the training or calibration rows.
-
-| Metric | Value |
-|---|---|
-| **Task pass rate** | **91.8%** |
-| **Tier match accuracy** | **74.0%** |
-| **Cost-savings score** | **81.9** vs always-premium baseline |
-| **Overall score** | **76.7** |
-| **Warm routing overhead** | **p50 25.6ms / p90 32.1ms** on a local CPU run |
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pip install "git+https://github.com/CommonstackAI/CommonRouterBench.git"
-python scripts/eval_v2.py --split holdout
-python scripts/bench_overhead.py --iterations 50 --json
-```
-
----
-
-## Dashboard
-
-```bash
-uncommon-route serve
-# → http://localhost:8403/dashboard/
-```
-
-Real-time monitoring, interactive playground, cost tracking, and model routing configuration — all in a Nothing Design-inspired interface.
-
----
-
-## Diagnostics
-
-When a user hits a routing or upstream issue, you can export a local support bundle without guessing which logs to collect:
-
-```bash
-uncommon-route support bundle
-uncommon-route support request <request_id>
-```
-
-The bundle includes recent request traces, recent errors, stats summaries, provider/config snapshots, and redacted local state. It stays on your machine until you choose to share it.
-
----
-
-## Stopping and Uninstalling
-
-To stop the proxy:
-
-- foreground run: press `Ctrl+C` in the terminal running `uncommon-route serve`
-- background daemon: run `uncommon-route stop`
-- background logs: run `uncommon-route logs --follow`
-
-To stop routing your clients through UncommonRoute, remove or comment out the shell block that `uncommon-route init` added to your shell rc file (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`), then restart your terminal. For the current shell only, you can also unset the proxy variables:
-
-```bash
-unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
-```
-
-To uninstall the package:
-
-```bash
-pipx uninstall uncommon-route
-# or, if you installed it with pip in a specific environment:
-python3 -m pip uninstall uncommon-route
-```
-
-If you also want to remove local state, delete `~/.uncommon-route/`. That directory contains saved connections, provider keys, logs, traces, and support bundles.
-
----
-
-## Configuration
-
-### Routing modes
+### Routing Modes
 
 | Mode | Model ID | Behavior |
 |---|---|---|
-| **auto** | `uncommon-route/auto` | Balanced — best quality-per-dollar |
-| **fast** | `uncommon-route/fast` | Cost-first — cheapest acceptable |
-| **best** | `uncommon-route/best` | Quality-first — strongest available |
+| auto | `uncommon-route/auto` | Default mode; optimizes for quality per dollar |
+| fast | `uncommon-route/fast` | Cost-first; prefers lower-cost models when quality is acceptable |
+| best | `uncommon-route/best` | Quality-first; prefers the strongest available model |
 
-### Spend limits
-
-```bash
-uncommon-route spend set daily 20.00
-uncommon-route spend status
-```
-
-### Managing providers
+### Provider Management
 
 ```bash
 uncommon-route provider list
@@ -283,30 +315,64 @@ uncommon-route provider add <name> <api-key>
 uncommon-route provider remove <name>
 ```
 
-Supported names: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `minimax`, `moonshot`, `deepseek`. See [Quick Start](#quick-start) for the two setup paths (managed upstream vs. BYOK).
+Supported providers: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `minimax`, `moonshot`, `deepseek`.
 
 <details>
-<summary><strong>All environment variables</strong></summary>
+<summary><strong>Environment variables</strong></summary>
 
 | Variable | Meaning |
 |---|---|
-| `UNCOMMON_ROUTE_UPSTREAM` | Upstream base URL for the managed path (e.g. `https://api.commonstack.ai/v1`). Ignored in BYOK mode. |
-| `UNCOMMON_ROUTE_API_KEY` | API key paired with `UNCOMMON_ROUTE_UPSTREAM`. Not a fallback for per-provider keys. |
-| `UNCOMMON_ROUTE_PORT` | Local proxy port (default 8403) |
+| `UNCOMMON_ROUTE_UPSTREAM` | Upstream URL for the managed path, e.g. `https://api.commonstack.ai/v1`; ignored in BYOK mode |
+| `UNCOMMON_ROUTE_API_KEY` | API key used with `UNCOMMON_ROUTE_UPSTREAM`; not a fallback for per-provider keys |
+| `UNCOMMON_ROUTE_PORT` | Local proxy port, default 8403 |
 
 </details>
 
 ---
 
-## Privacy
+## Diagnostics
 
-Runs entirely on your machine. No data leaves unless you opt in.
+If you hit routing errors, upstream failures, or need to file an issue, export a redacted diagnostics bundle:
 
 ```bash
-uncommon-route telemetry status
+uncommon-route support bundle
+uncommon-route support request <request_id>
 ```
 
-Diagnostics exports are also local-first: `uncommon-route support bundle` writes a redacted zip under `~/.uncommon-route/support/` by default.
+The bundle includes recent traces, errors, stats, provider/config snapshots, and redacted local state. It's saved locally by default.
+
+---
+
+## Stop and Uninstall
+
+If it's running in the foreground, press `Ctrl+C`. If it's running as a daemon:
+
+```bash
+uncommon-route stop
+uncommon-route logs --follow
+```
+
+To stop routing clients through UncommonRoute, remove the shell block added by `init`, then restart your terminal. Common locations include `~/.zshrc`, `~/.bashrc`, and `~/.config/fish/config.fish`.
+
+For the current shell only:
+
+```bash
+unset OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+```
+
+Uninstall:
+
+```bash
+pipx uninstall uncommon-route
+# If installed inside a venv:
+python3 -m pip uninstall uncommon-route
+```
+
+Remove local state, including connections, provider keys, logs, and traces:
+
+```bash
+rm -rf ~/.uncommon-route/
+```
 
 ---
 
@@ -314,7 +380,8 @@ Diagnostics exports are also local-first: `uncommon-route support bundle` writes
 
 ```bash
 git clone https://github.com/CommonstackAI/UncommonRoute.git
-cd UncommonRoute && pip install -e ".[dev]"
+cd UncommonRoute
+pip install -e ".[dev]"
 python -m pytest tests -v
 ```
 
@@ -322,4 +389,4 @@ python -m pytest tests -v
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

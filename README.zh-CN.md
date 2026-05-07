@@ -18,8 +18,9 @@ UncommonRoute 接入 Claude Code、Cursor、Codex 和 OpenAI SDK，本地分析�
 <br><br>
 
 <a href="#30-秒跑起来">Quickstart</a> ·
+<a href="#uncommonroute-如何帮你省钱">省钱逻辑</a> ·
+<a href="#为什么需要-uncommonroute">为什么需要</a> ·
 <a href="#可视化路由">Dashboard</a> ·
-<a href="#支持哪些客户端">Clients</a> ·
 <a href="#benchmark">Benchmark</a> ·
 <a href="#隐私">Privacy</a>
 
@@ -64,6 +65,34 @@ uncommon-route doctor
 - **指定 Python 版本**：`pipx install --python python3.12 uncommon-route`
 
 </details>
+
+---
+
+## UncommonRoute 如何帮你省钱
+
+省钱不是靠少用 AI，而是避免把简单请求默认交给最强模型。
+
+```text
+"hello"                         -> simple
+"修一下 README 里的错字"          -> simple
+"定位这个失败测试并修复"            -> medium
+"重构这个 500 行模块"             -> medium / complex
+"设计一个分布式调度器"             -> complex
+```
+
+simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的模型，complex 请求再调用你配置里的最强模型。所有判断都按请求独立完成，不会把整个会话固定在同一个模型上。
+
+---
+
+## 为什么需要 UncommonRoute
+
+如果你每天用 AI agent 写代码，很容易遇到一种浪费：改错字、补注释、运行简单测试，也默认调用最贵的模型。
+
+UncommonRoute 的边界很清楚：它不替代 Claude Code、Cursor 或 Codex，也不改变模型本身的能力。它专注于一件事：为每次请求选择最匹配的模型。
+
+> 这个请求，最适合交给哪个模型？
+
+路由在本地完成，请求按 agent step 独立判断，不会把整个会话固定在同一个复杂度分类或模型档位上。你也可以在 Dashboard 里看到每一步决策，而不是只能相信一个黑盒结果。
 
 ---
 
@@ -119,34 +148,6 @@ resp = client.chat.completions.create(
     messages=msgs,
 )
 ```
-
----
-
-## UncommonRoute 如何帮你省钱
-
-省钱不是靠少用 AI，而是避免把简单请求默认交给最强模型。
-
-```text
-"hello"                         -> simple
-"修一下 README 里的错字"          -> simple
-"定位这个失败测试并修复"            -> medium
-"重构这个 500 行模块"             -> medium / complex
-"设计一个分布式调度器"             -> complex
-```
-
-simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的模型，complex 请求再调用你配置里的最强模型。所有判断都按请求独立完成，不会把整个会话固定在同一个模型上。
-
----
-
-## 为什么需要 UncommonRoute
-
-如果你每天用 AI agent 写代码，很容易遇到一种浪费：改错字、补注释、运行简单测试，也默认调用最贵的模型。
-
-UncommonRoute 的边界很清楚：它不替代 Claude Code、Cursor 或 Codex，也不改变模型本身的能力。它专注于一件事：为每次请求选择最匹配的模型。
-
-> 这个请求，最适合交给哪个模型？
-
-路由在本地完成，请求按 agent step 独立判断，不会把整个会话固定在同一个复杂度分类或模型档位上。你也可以在 Dashboard 里看到每一步决策，而不是只能相信一个黑盒结果。
 
 ---
 

@@ -18,8 +18,9 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs
 <br><br>
 
 <a href="#quick-start">Quick Start</a> ·
+<a href="#how-uncommonroute-saves-money">Savings</a> ·
+<a href="#why-uncommonroute">Why</a> ·
 <a href="#visual-routing">Dashboard</a> ·
-<a href="#supported-clients">Clients</a> ·
 <a href="#benchmark">Benchmark</a> ·
 <a href="#privacy">Privacy</a>
 
@@ -64,6 +65,34 @@ uncommon-route doctor
 - **Need a specific Python version**: `pipx install --python python3.12 uncommon-route`
 
 </details>
+
+---
+
+## How UncommonRoute Saves Money
+
+The savings don't come from using less AI. They come from not sending easy requests to frontier models.
+
+```text
+"hello"                         -> simple
+"fix a typo in the README"       -> simple
+"find and fix this failing test" -> medium
+"refactor this 500-line module"  -> medium / complex
+"design a distributed scheduler" -> complex
+```
+
+Simple requests go to lightweight models. Medium requests go to capable mid-tier models. Complex requests escalate to the strongest model you've configured. Each decision is made per request, so a single conversation isn't tied to one model.
+
+---
+
+## Why UncommonRoute
+
+If you use AI agents for coding every day, a lot of that spend goes toward work that doesn't need the most expensive model: typo fixes, small edits, simple test runs, short explanations.
+
+UncommonRoute does one thing. It doesn't replace Claude Code, Cursor, or Codex, and doesn't try to make cheaper models smarter. It focuses on one decision:
+
+> Which model is the right fit for this request?
+
+Routing happens locally and independently for each agent step. You can inspect every decision in the Dashboard instead of trusting a black-box proxy.
 
 ---
 
@@ -119,34 +148,6 @@ resp = client.chat.completions.create(
     messages=msgs,
 )
 ```
-
----
-
-## How UncommonRoute Saves Money
-
-The savings don't come from using less AI. They come from not sending easy requests to frontier models.
-
-```text
-"hello"                         -> simple
-"fix a typo in the README"       -> simple
-"find and fix this failing test" -> medium
-"refactor this 500-line module"  -> medium / complex
-"design a distributed scheduler" -> complex
-```
-
-Simple requests go to lightweight models. Medium requests go to capable mid-tier models. Complex requests escalate to the strongest model you've configured. Each decision is made per request, so a single conversation isn't tied to one model.
-
----
-
-## Why UncommonRoute
-
-If you use AI agents for coding every day, a lot of that spend goes toward work that doesn't need the most expensive model: typo fixes, small edits, simple test runs, short explanations.
-
-UncommonRoute does one thing. It doesn't replace Claude Code, Cursor, or Codex, and doesn't try to make cheaper models smarter. It focuses on one decision:
-
-> Which model is the right fit for this request?
-
-Routing happens locally and independently for each agent step. You can inspect every decision in the Dashboard instead of trusting a black-box proxy.
 
 ---
 

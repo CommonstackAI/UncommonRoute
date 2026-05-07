@@ -835,6 +835,80 @@ class TestSelectorEndpoint:
 
 
 class TestFallbackAttribution:
+    def test_transport_disconnect_tries_fallback_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            return RoutingDecision(
+                model="primary-model",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="test route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+                fallback_chain=[
+                    FallbackOption("primary-model", 0.001, 100),
+                    FallbackOption("fallback-model", 0.001, 100),
+                ],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            calls.append(str(body.get("model")))
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("server disconnected")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": body.get("model"),
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+                },
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage())
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+                model_mapper=_build_test_mapper("primary-model", "fallback-model"),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert calls == ["primary-model", "fallback-model"]
+            assert resp.headers["x-uncommon-route-model"] == "fallback-model"
+            assert resp.headers["x-uncommon-route-capability-lane"] == "general"
+            assert resp.headers["x-uncommon-route-lane"] == "general"
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert trace["model"] == "fallback-model"
+            assert trace["method"] == "fallback"
+            assert trace["attempts_payload"][0]["status_code"] == 502
+            assert trace["attempts_payload"][1]["status_code"] == 200
+        finally:
+            asyncio.run(async_client.aclose())
+
     def test_failed_fallback_response_is_attributed_to_fallback_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
 

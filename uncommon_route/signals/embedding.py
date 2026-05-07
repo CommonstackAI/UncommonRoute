@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,16 @@ logger = logging.getLogger("uncommon-route.embedding")
 
 K_NEIGHBORS = 7
 MIN_CONFIDENCE_TO_VOTE = 0.3
+
+_WRAPPER_BLOCK_RE = re.compile(
+    r"<(?P<tag>system-reminder|assistant-reminder|user-prompt-submit-hook)>\s*.*?\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_wrapper_blocks(text: str) -> str:
+    """Remove client-injected wrapper blocks from user-visible prompt text."""
+    return " ".join(_WRAPPER_BLOCK_RE.sub(" ", text).split())
 
 
 def _normalize_content(content: Any) -> str:
@@ -45,7 +56,9 @@ def _normalize_content(content: Any) -> str:
 def _extract_last_user_message(messages: list[dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            return _normalize_content(m.get("content", ""))
+            text = _normalize_content(m.get("content", ""))
+            stripped = _strip_wrapper_blocks(text)
+            return stripped if stripped else text
     return ""
 
 

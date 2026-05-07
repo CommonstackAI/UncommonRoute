@@ -12,6 +12,7 @@ from typing import Any
 from uncommon_route.signals.base import TierVote
 from uncommon_route.signals.embedding import _extract_last_user_message
 from uncommon_route.router.classifier import classify
+from uncommon_route.router.signal_tuning import compact_structural_system_prompt
 from uncommon_route.router.types import Tier
 
 
@@ -23,6 +24,11 @@ def _extract_latest_system_message(messages: list[dict[str, Any]]) -> str | None
         if isinstance(content, str) and content.strip():
             return content
     return None
+
+
+def _compact_system_prompt_for_classification(messages: list[dict[str, Any]]) -> str | None:
+    system_prompt = _extract_latest_system_message(messages)
+    return compact_structural_system_prompt(system_prompt)
 
 
 def _map_v1_to_v2_tier_id(tier: Tier | None, complexity: float) -> int | None:
@@ -44,10 +50,14 @@ class StructuralSignal:
     def predict(self, row: dict[str, Any]) -> TierVote:
         messages = row.get("messages", [])
         text = _extract_last_user_message(messages)
-        system_prompt = _extract_latest_system_message(messages)
         if not text.strip():
             return TierVote(tier_id=None, confidence=0.0)
 
+        # Signal B is intended to classify the current user ask. Claude Code
+        # injects a large system prompt and tool scaffold into every request;
+        # including all of that text makes trivial prompts like "hello" look
+        # complex. Short system constraints still matter, e.g. JSON output.
+        system_prompt = _compact_system_prompt_for_classification(messages)
         result = classify(text, system_prompt=system_prompt)
         tier_id = _map_v1_to_v2_tier_id(result.tier, result.complexity)
         confidence = max(0.0, min(1.0, result.confidence))
@@ -64,6 +74,8 @@ class StructuralSignal:
             confidence = min(confidence, 0.50)
         elif word_count <= 15:
             confidence = min(confidence, 0.70)
+        if system_prompt and tier_id is not None and tier_id >= 1:
+            confidence = max(confidence, 0.70)
 
         if tier_id is None:
             return TierVote(tier_id=None, confidence=confidence)

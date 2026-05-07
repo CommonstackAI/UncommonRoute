@@ -68,6 +68,13 @@ from uncommon_route.router.quality import (
     normalize_served_quality,
     request_capability_lane,
 )
+from uncommon_route.router.signal_tuning import (
+    DEFAULT_SIGNAL_TUNING,
+    contextual_followup_floor_from_text,
+    system_prompt_has_structured_output_constraint,
+    text_substance_score,
+    vision_prompt_needs_medium_floor,
+)
 from uncommon_route.router.structural import estimate_tokens, estimate_output_budget
 from uncommon_route.router.types import (
     CapabilityLane,
@@ -1080,6 +1087,43 @@ def _has_vision_content(value: Any) -> bool:
     return False
 
 
+def _body_has_structured_output_directive(messages: list[Any]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        if system_prompt_has_structured_output_constraint(_content_text(message.get("content", ""))):
+            return True
+    return False
+
+
+def _contextual_followup_floor(messages: list[Any], prompt: str) -> Tier | None:
+    user_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    if len(user_indexes) < 2:
+        return None
+
+    latest_index = user_indexes[-1]
+    latest = prompt or _extract_user_prompt_text(messages[latest_index].get("content", ""))
+    prior_context = "\n".join(
+        _content_text(message.get("content", ""))
+        for message in messages[:latest_index]
+        if isinstance(message, dict) and message.get("role") != "system"
+    )
+    return contextual_followup_floor_from_text(
+        prior_text=prior_context,
+        latest_text=latest,
+    )
+
+
+def _vision_analysis_floor(has_vision: bool, prompt: str) -> Tier | None:
+    if vision_prompt_needs_medium_floor(has_vision=has_vision, prompt=prompt):
+        return Tier.MEDIUM
+    return None
+
+
 _HIGH_RISK_TOOL_MARKERS = (
     "traceback",
     "exception",
@@ -1111,35 +1155,6 @@ _HIGH_RISK_TOOL_MARKERS = (
     "堆栈",
     "超时",
     "拒绝连接",
-)
-
-_HIGH_RISK_PROMPT_MARKERS = (
-    "fix",
-    "debug",
-    "root cause",
-    "regression",
-    "failing",
-    "failed test",
-    "implement",
-    "refactor",
-    "migrate",
-    "security",
-    "deploy",
-    "release",
-    "production",
-    "修复",
-    "调试",
-    "排查",
-    "定位",
-    "根因",
-    "回归",
-    "失败",
-    "实现",
-    "重构",
-    "迁移",
-    "安全",
-    "部署",
-    "发布",
 )
 
 _RETRY_PROMPT_MARKERS = (
@@ -1574,7 +1589,9 @@ def _reasoning_preference(body: dict[str, Any]) -> tuple[bool, Tier | None]:
         mark(thinking, floor_medium=True)
 
     if _contains_anthropic_thinking_blocks(body):
-        mark("medium", floor_medium=True)
+        # Prior signed thinking blocks are a transport/model-continuity
+        # constraint, not evidence that the latest user ask is complex.
+        pass
 
     return prefers_reasoning, tier_floor
 
@@ -1591,10 +1608,11 @@ def _estimate_step_risk(
     tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(messages, step_type)
     previous_tool_result_text, previous_tool_result_is_error = _latest_tool_result_signal(messages)
     prompt_text = str(prompt or "")
-    prompt_has_high_risk_marker = _contains_risk_marker(prompt_text, _HIGH_RISK_PROMPT_MARKERS)
-
-    if wants_structured_output:
-        return "high"
+    prompt_has_high_risk_shape = (
+        needs_tool_calling
+        and text_substance_score(prompt_text)
+        >= DEFAULT_SIGNAL_TUNING.tool_prompt_high_risk_substance_score
+    )
 
     if step_type == "tool-result-followup":
         if tool_result_is_error:
@@ -1614,7 +1632,7 @@ def _estimate_step_risk(
             or _contains_tool_failure_signal(previous_tool_result_text)
         )
     )
-    if retrying_previous_tool or prompt_has_high_risk_marker:
+    if retrying_previous_tool or prompt_has_high_risk_shape:
         return "high"
 
     if step_type == "tool-selection" and len(prompt_text) <= 40 and len(tool_names) <= 6:
@@ -1681,6 +1699,9 @@ def _extract_routing_features(
     elif isinstance(response_format, str):
         response_format_name = response_format.strip().lower() or None
         wants_structured_output = response_format_name in {"json", "json_schema"}
+    if not wants_structured_output and _body_has_structured_output_directive(messages):
+        response_format_name = "system"
+        wants_structured_output = True
 
     step_risk = _estimate_step_risk(
         messages=messages,
@@ -1690,7 +1711,12 @@ def _extract_routing_features(
         needs_tool_calling=needs_tool_calling,
         wants_structured_output=wants_structured_output,
     )
-    tier_floor = Tier.MEDIUM if step_risk == "high" else None
+    contextual_floor = _contextual_followup_floor(messages, prompt)
+    if contextual_floor is not None and step_risk == "low":
+        step_risk = "normal"
+    tier_floor = Tier.MEDIUM if step_risk == "high" or wants_structured_output else None
+    tier_floor = _max_tier(tier_floor, contextual_floor)
+    tier_floor = _max_tier(tier_floor, _vision_analysis_floor(has_vision, prompt))
     tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(
         messages,
         step_type,
@@ -5091,6 +5117,7 @@ def create_app(
                 _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
             if capability_lane_value:
                 _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
+                _set_header(debug_headers, "x-uncommon-route-lane", capability_lane_value)
             _set_header(debug_headers, "x-uncommon-route-step", step_type)
             _set_header(debug_headers, "x-uncommon-route-input-before", input_tokens_before)
             _set_header(debug_headers, "x-uncommon-route-input-after", input_tokens_after)
@@ -5128,6 +5155,7 @@ def create_app(
                 _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
             if capability_lane_value:
                 _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
+                _set_header(debug_headers, "x-uncommon-route-lane", capability_lane_value)
             _set_route_strategy_headers(
                 debug_headers,
                 transport_decision=transport_decision,
@@ -5205,6 +5233,33 @@ def create_app(
             if status_code in (500, 502, 503, 504):
                 return True
             return status_code in (400, 404, 422) and _is_model_error(content)
+
+        def _transport_error_response(exc: httpx.TransportError) -> httpx.Response:
+            status_code = 504 if isinstance(exc, httpx.TimeoutException) else 502
+            error_type = "timeout" if status_code == 504 else "proxy_error"
+            if status_code == 504:
+                message = "Upstream request timed out"
+            elif isinstance(exc, httpx.ConnectError):
+                message = f"Upstream unreachable: {upstream_chat}"
+            else:
+                message = "Upstream disconnected before sending a response"
+            detail = str(exc).strip()
+            if detail:
+                message = f"{message}: {detail}"
+            return httpx.Response(
+                status_code,
+                json={"error": {"message": message, "type": error_type}},
+            )
+
+        async def _post_non_stream_attempt(attempt_payload: dict[str, Any]) -> httpx.Response:
+            try:
+                return await _get_client().post(
+                    attempt_payload["target_chat_url"],
+                    json=attempt_payload["transport_body"],
+                    headers=attempt_payload["headers"],
+                )
+            except httpx.TransportError as exc:
+                return _transport_error_response(exc)
 
         def _build_proxy_response(
             *,
@@ -5780,9 +5835,8 @@ def create_app(
                     },
                 )
 
-            client = _get_client()
             _begin_attempt_trace(attempt)
-            resp = await client.post(target_chat_url, json=transport_body, headers=fwd_headers)
+            resp = await _post_non_stream_attempt(attempt)
             initial_error_code = ""
             initial_error_message = ""
             if resp.status_code < 400:
@@ -5805,11 +5859,7 @@ def create_app(
                         return spend_error
                     fb_attempt = _prepare_attempt(fb_model)
                     _begin_attempt_trace(fb_attempt, fallback_from=fallback_source_model)
-                    retry = await client.post(
-                        fb_attempt["target_chat_url"],
-                        json=fb_attempt["transport_body"],
-                        headers=fb_attempt["headers"],
-                    )
+                    retry = await _post_non_stream_attempt(fb_attempt)
                     retry_error_code = ""
                     retry_error_message = ""
                     if retry.status_code < 400:

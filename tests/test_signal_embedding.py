@@ -87,6 +87,23 @@ def test_extract_last_user_message():
     assert _extract_last_user_message(messages) == "Second question"
 
 
+def test_extract_last_user_message_strips_client_wrapper_blocks():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<system-reminder>\nThe following skills are available for use with the Skill tool.\n</system-reminder>",
+                },
+                {"type": "text", "text": "hello"},
+            ],
+        },
+    ]
+
+    assert _extract_last_user_message(messages) == "hello"
+
+
 def test_extract_last_user_message_empty():
     assert _extract_last_user_message([]) == ""
     assert _extract_last_user_message([{"role": "assistant", "content": "hi"}]) == ""

@@ -285,6 +285,16 @@ def test_openai_nano_is_not_premium_for_reasoning_lane() -> None:
     ) is ServedQuality.ECONOMY
 
 
+def test_non_reasoning_model_name_is_not_reasoning_premium() -> None:
+    caps = ModelCapabilities(tool_calling=True, reasoning=True)
+
+    assert model_served_quality(
+        "x-ai/grok-4-1-fast-non-reasoning",
+        CapabilityLane.REASONING,
+        caps,
+    ) is ServedQuality.ECONOMY
+
+
 def test_quality_guards_keep_auto_complex_at_balanced_floor_without_opus_only_pool() -> None:
     caps = _caps()
     guard = apply_quality_guards(
@@ -306,6 +316,26 @@ def test_quality_guards_keep_auto_complex_at_balanced_floor_without_opus_only_po
         "anthropic/claude-opus-4-7",
     }
     assert "served-quality-target-preferred=premium(1/3)" in guard.notes
+
+
+def test_quality_guards_raise_explicit_complex_reasoning_floor_to_premium() -> None:
+    caps = {
+        "x-ai/grok-4-1-fast-non-reasoning": ModelCapabilities(tool_calling=True),
+        "zai-org/glm-4.7": ModelCapabilities(tool_calling=True),
+        "moonshotai/kimi-k2-thinking": ModelCapabilities(tool_calling=True, reasoning=True),
+    }
+
+    guard = apply_quality_guards(
+        list(caps),
+        mode=RoutingMode.AUTO,
+        tier=Tier.COMPLEX,
+        lane=CapabilityLane.REASONING,
+        capabilities=caps,
+    )
+
+    assert guard.floor is ServedQuality.PREMIUM
+    assert guard.allowed_models == ["moonshotai/kimi-k2-thinking"]
+    assert "lane-floor=premium" in guard.notes
 
 
 def test_scoring_target_uses_balanced_floor_for_auto_complex() -> None:
@@ -480,6 +510,8 @@ def test_quality_guards_keep_economy_available_for_current_low_risk_step() -> No
         capabilities=caps,
         step_risk="low",
         agent_pressure=0.90,
+        is_agentic=True,
+        has_tool_results=True,
     )
 
     assert guard.target is ServedQuality.PREMIUM
@@ -977,6 +1009,43 @@ def test_auto_low_risk_complex_step_can_use_economy_despite_high_agent_pressure(
     assert "served-quality-score-target=economy" in decision.reasoning
 
 
+def test_auto_low_risk_standalone_complex_keeps_balanced_floor(monkeypatch) -> None:
+    import uncommon_route.benchmark as benchmark
+
+    class DummyBenchmarkCache:
+        def get_all_qualities(self, models):
+            return {
+                "minimax/minimax-m2.7": 0.749,
+                "deepseek/deepseek-v3.2": 0.743,
+            }
+
+    monkeypatch.setattr(benchmark, "get_benchmark_cache", lambda: DummyBenchmarkCache())
+    pricing = {
+        "minimax/minimax-m2.7": ModelPricing(0.3, 1.2),
+        "deepseek/deepseek-v3.2": ModelPricing(0.252, 0.378),
+    }
+    caps = {model: ModelCapabilities() for model in pricing}
+
+    decision = select_from_pool(
+        complexity=0.68,
+        mode=RoutingMode.AUTO,
+        confidence=0.61,
+        reasoning_text="test-standalone-complex-low-risk",
+        available_models=list(pricing),
+        estimated_input_tokens=2_000,
+        max_output_tokens=1_000,
+        prompt="Design a large collaboration system.",
+        pricing=pricing,
+        capabilities=caps,
+        requirements=RequestRequirements(),
+        routing_features=RoutingFeatures(step_risk="low"),
+        bandit_config=BanditConfig(enabled=False),
+    )
+
+    assert decision.served_quality_floor is ServedQuality.BALANCED
+    assert decision.model == "minimax/minimax-m2.7"
+
+
 def test_auto_high_risk_complex_low_confidence_prefers_balanced_model(monkeypatch) -> None:
     import uncommon_route.benchmark as benchmark
 
@@ -1073,6 +1142,9 @@ def test_auto_medium_blocks_premium_bandit_exploration_for_routine_steps(monkeyp
     assert opus.predicted_quality == pytest.approx(0.832)
     assert "routine-exploration=base-prior" in decision.reasoning
     assert "premium-exploration=base-prior" not in decision.reasoning
+    fallback_models = [item.model for item in decision.fallback_chain]
+    assert fallback_models[0] == "minimax/minimax-m2.7"
+    assert fallback_models.index("anthropic/claude-opus-4.6") > fallback_models.index("deepseek/deepseek-v3.2")
 
 
 def test_auto_medium_allows_premium_exploration_for_high_risk_steps(monkeypatch) -> None:
@@ -1435,6 +1507,79 @@ def test_normal_tool_selection_does_not_force_medium_floor() -> None:
     assert features.tier_cap is None
 
 
+def test_system_json_directive_sets_structured_output_floor() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "system", "content": "Respond in JSON format."},
+            {"role": "user", "content": "list 3 colors"},
+        ],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="list 3 colors",
+    )
+
+    assert features.needs_structured_output is True
+    assert features.tier_floor is Tier.MEDIUM
+
+
+def test_contextual_followup_can_floor_operational_risk_question_to_medium() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "Design a real-time collaboration backend with CRDTs and websocket fanout."},
+            {"role": "assistant", "content": "Use CRDT documents and websocket sessions."},
+            {"role": "user", "content": "What are the top three operational risks?"},
+        ],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="What are the top three operational risks?",
+    )
+
+    assert features.step_risk == "normal"
+    assert features.tier_floor is Tier.MEDIUM
+    assert features.tier_cap is None
+
+
+def test_vision_chart_analysis_sets_medium_floor() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this chart and extract the trend."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                ],
+            }
+        ],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="Describe this chart and extract the trend.",
+    )
+
+    assert features.needs_vision is True
+    assert features.tier_floor is Tier.MEDIUM
+
+
 def test_reasoning_effort_sets_reasoning_preference_and_medium_floor() -> None:
     from uncommon_route.proxy import _classify_step, _extract_routing_features
 
@@ -1475,6 +1620,36 @@ def test_anthropic_thinking_sets_reasoning_preference_and_medium_floor() -> None
 
     assert features.prefers_reasoning is True
     assert features.tier_floor is Tier.MEDIUM
+
+
+def test_prior_anthropic_thinking_blocks_do_not_force_medium_floor() -> None:
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "This was prior hidden reasoning."},
+                    {"type": "text", "text": "Hello."},
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="hello",
+    )
+
+    assert features.prefers_reasoning is False
+    assert features.tier_floor is None
+    assert features.request_requirements().prefers_reasoning is False
 
 
 def test_low_reasoning_effort_prefers_reasoning_without_forcing_tier_floor() -> None:

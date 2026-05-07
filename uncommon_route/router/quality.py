@@ -19,6 +19,14 @@ _QUALITY_RANK = {
     ServedQuality.BALANCED: 1,
     ServedQuality.PREMIUM: 2,
 }
+_REASONING_NEGATIVE_MARKERS = (
+    "non-reason",
+    "non_reason",
+    "nonreason",
+    "no-reason",
+    "no_reason",
+    "non-thinking",
+)
 
 
 def _provider_and_core(model_id: str) -> tuple[str, str]:
@@ -104,6 +112,7 @@ def model_served_quality(
 ) -> ServedQuality:
     provider, core = _provider_and_core(model_id)
     caps = capabilities or ModelCapabilities()
+    explicitly_non_reasoning = _contains_any(core, _REASONING_NEGATIVE_MARKERS)
 
     if lane is CapabilityLane.ANTHROPIC_TOOL_SAFE:
         if provider == "anthropic":
@@ -118,13 +127,15 @@ def model_served_quality(
             return ServedQuality.ECONOMY
 
     if lane is CapabilityLane.REASONING:
+        if explicitly_non_reasoning:
+            return ServedQuality.ECONOMY
         if provider == "anthropic" and "opus" in core:
             return ServedQuality.PREMIUM
         if provider == "deepseek" and "r1" in core:
             return ServedQuality.PREMIUM
-        if provider in {"xai", "x-ai"} and "reason" in core:
+        if provider in {"xai", "x-ai"} and "reason" in core and not explicitly_non_reasoning:
             return ServedQuality.PREMIUM
-        if "thinking" in core or "reason" in core:
+        if ("thinking" in core or "reason" in core) and not explicitly_non_reasoning:
             return ServedQuality.PREMIUM
         if provider == "openai" and _contains_any(core, ("pro", "o3", "gpt-5.4", "gpt-5.2", "gpt-5")):
             if "nano" in core:
@@ -134,7 +145,7 @@ def model_served_quality(
             return ServedQuality.PREMIUM
         if provider == "google" and "pro" in core:
             return ServedQuality.PREMIUM
-        if caps.reasoning:
+        if caps.reasoning and not explicitly_non_reasoning:
             return ServedQuality.BALANCED
 
     if lane is CapabilityLane.VISION:
@@ -313,6 +324,8 @@ def apply_quality_guards(
     continuity_floor: ServedQuality | None = None,
     step_risk: str = "normal",
     agent_pressure: float = 0.0,
+    is_agentic: bool = False,
+    has_tool_results: bool = False,
 ) -> QualityGuardResult:
     quality_by_model = {
         model: model_served_quality(model, lane, capabilities.get(model))
@@ -324,18 +337,23 @@ def apply_quality_guards(
     if (
         mode is RoutingMode.AUTO
         and normalized_step_risk == "low"
+        and (tier is not Tier.COMPLEX or is_agentic or has_tool_results)
     ):
         # The public tier describes the whole request, but served-quality is a
         # per-step guard. A routine/successful agent step should not exclude
         # economy candidates just because the surrounding issue is complex.
         floor = ServedQuality.ECONOMY
+    if lane is CapabilityLane.REASONING and tier is Tier.COMPLEX:
+        lane_floor = ServedQuality.PREMIUM
+    else:
+        lane_floor = None
     if normalized_step_risk == "high":
         risk_floor = ServedQuality.BALANCED
     else:
         risk_floor = None
     hard_continuity_floor = continuity_floor if mode is RoutingMode.BEST else None
     effective_floor = stronger_quality(
-        stronger_quality(floor, risk_floor),
+        stronger_quality(stronger_quality(floor, lane_floor), risk_floor),
         hard_continuity_floor,
     ) or floor
     preferred_threshold = (
@@ -355,6 +373,8 @@ def apply_quality_guards(
         notes.append(f"step-risk-floor={risk_floor.value}")
     elif risk_floor is not None:
         notes.append(f"agent-pressure-floor={risk_floor.value}")
+    if lane_floor is not None:
+        notes.append(f"lane-floor={lane_floor.value}")
     if continuity_floor is not None and hard_continuity_floor is None:
         notes.append(f"continuity-soft={continuity_floor.value}")
     # AUTO should route on model suitability, not collapse a high-risk complex

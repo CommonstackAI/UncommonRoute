@@ -9,6 +9,60 @@ def test_simple_prompt_predicts_low():
     assert vote.confidence > 0.0
 
 
+def test_system_prompt_does_not_escalate_simple_latest_user_message():
+    sig = StructuralSignal()
+    row = {"messages": [
+        {
+            "role": "system",
+            "content": "You are Claude Code, an interactive CLI for software engineering. " * 80,
+        },
+        {"role": "user", "content": "say hello to me"},
+    ]}
+    vote = sig.predict(row)
+    assert vote.tier_id == 0
+    assert vote.confidence > 0.0
+
+
+def test_short_system_prompt_constraints_still_influence_classification():
+    sig = StructuralSignal()
+    row = {"messages": [
+        {"role": "system", "content": "You are helpful. Respond in JSON format."},
+        {"role": "user", "content": "list 3 colors"},
+    ]}
+    vote = sig.predict(row)
+    assert vote.tier_id >= 1
+
+
+def test_short_persona_system_prompt_does_not_escalate_simple_latest_user_message():
+    sig = StructuralSignal()
+    row = {"messages": [
+        {"role": "system", "content": "You are Claude Code."},
+        {"role": "user", "content": "hello"},
+    ]}
+    vote = sig.predict(row)
+    assert vote.tier_id == 0
+
+
+def test_client_wrapper_blocks_do_not_escalate_simple_latest_user_message():
+    sig = StructuralSignal()
+    row = {"messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<system-reminder>\nThe following skills are available for use with the Skill tool.\n" * 100
+                    + "</system-reminder>",
+                },
+                {"type": "text", "text": "hello"},
+            ],
+        },
+    ]}
+    vote = sig.predict(row)
+    assert vote.tier_id == 0
+    assert vote.confidence > 0.0
+
+
 def test_complex_prompt_predicts_high():
     sig = StructuralSignal()
     row = {"messages": [{"role": "user", "content": (

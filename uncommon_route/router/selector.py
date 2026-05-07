@@ -382,6 +382,8 @@ def select_model(
         continuity_floor=effective_features.continuity_quality_floor,
         step_risk=effective_features.step_risk,
         agent_pressure=effective_features.agent_pressure,
+        is_agentic=effective_features.is_agentic,
+        has_tool_results=effective_features.has_tool_results,
     )
     scoring_candidates = quality_guard.allowed_models
     reasoning = f"{reasoning} | {' | '.join(quality_guard.notes)}"
@@ -484,7 +486,16 @@ def select_model(
     if tc.hard_pin:
         fallback_models = candidates
     else:
-        fallback_models = [scored.model for scored in candidate_scores]
+        fallback_scores = _order_routine_fallback_chain(
+            candidate_scores,
+            selected=candidate_scores[0],
+            mode=mode,
+            tier=tier,
+            lane=lane,
+            requirements=requirements,
+            features=effective_features,
+        )
+        fallback_models = [scored.model for scored in fallback_scores]
     for fb_model in fallback_models:
         exp = _experience_snapshot(model_experience, fb_model, mode, tier)
         fb_cost = _calc_cost(
@@ -944,6 +955,100 @@ def _apply_premium_cost_benefit_guard(
     return reordered, note
 
 
+def _apply_routine_premium_guard(
+    ranked: list[CandidateScore],
+    *,
+    mode: RoutingMode,
+    tier: Tier,
+    lane: CapabilityLane,
+    target: ServedQuality,
+    requirements: RequestRequirements,
+    features: RoutingFeatures,
+) -> tuple[list[CandidateScore], str]:
+    """Keep routine AUTO SIMPLE/MEDIUM routing from over-buying premium models."""
+    if mode is not RoutingMode.AUTO or tier is Tier.COMPLEX or len(ranked) < 2:
+        return ranked, ""
+    if lane is CapabilityLane.REASONING or requirements.prefers_reasoning or features.prefers_reasoning:
+        return ranked, ""
+    if features.continuity_quality_floor is ServedQuality.PREMIUM:
+        return ranked, ""
+
+    selected = ranked[0]
+    if quality_rank(selected.served_quality) < quality_rank(ServedQuality.PREMIUM):
+        return ranked, ""
+    selected_cost = max(0.0, selected.predicted_cost)
+    if selected_cost <= 0:
+        return ranked, ""
+
+    target_rank = quality_rank(target)
+    max_quality_gap = 0.18 if target is ServedQuality.BALANCED else 0.12
+    min_cost_ratio = 3.0 if target is ServedQuality.BALANCED else 2.0
+    alternatives: list[CandidateScore] = []
+    for score in ranked[1:]:
+        if quality_rank(score.served_quality) > max(target_rank, quality_rank(ServedQuality.BALANCED)):
+            continue
+        if score.predicted_cost <= 0 or selected_cost < score.predicted_cost * min_cost_ratio:
+            continue
+        quality_gap = selected.predicted_quality - score.predicted_quality
+        if quality_gap <= max_quality_gap:
+            alternatives.append(score)
+    if not alternatives:
+        return ranked, ""
+
+    replacement = max(
+        alternatives,
+        key=lambda score: (
+            quality_rank(score.served_quality),
+            score.predicted_quality,
+            score.editorial,
+            -score.predicted_cost,
+            score.total,
+        ),
+    )
+    if replacement.model == selected.model:
+        return ranked, ""
+
+    reordered = [replacement]
+    reordered.extend(score for score in ranked if score.model != replacement.model)
+    note = (
+        "routine-premium-guard="
+        f"{selected.model}->{replacement.model}"
+        f"(q={selected.predicted_quality:.3f}->{replacement.predicted_quality:.3f},"
+        f" cost={selected_cost:.6f}->{replacement.predicted_cost:.6f})"
+    )
+    return reordered, note
+
+
+def _order_routine_fallback_chain(
+    ranked: list[CandidateScore],
+    *,
+    selected: CandidateScore,
+    mode: RoutingMode,
+    tier: Tier,
+    lane: CapabilityLane,
+    requirements: RequestRequirements,
+    features: RoutingFeatures,
+) -> list[CandidateScore]:
+    """Prefer near-quality fallbacks before over-buying premium on routine steps."""
+    if mode is not RoutingMode.AUTO or tier is Tier.COMPLEX or len(ranked) < 2:
+        return ranked
+    if lane is not CapabilityLane.GENERAL:
+        return ranked
+    if requirements.prefers_reasoning or features.prefers_reasoning:
+        return ranked
+
+    selected_rank = quality_rank(selected.served_quality)
+
+    def fallback_key(score: CandidateScore) -> tuple[int, int, float, float]:
+        rank_delta = quality_rank(score.served_quality) - selected_rank
+        overbuy = 1 if rank_delta > 0 else 0
+        return (overbuy, abs(rank_delta), score.predicted_cost, -score.total)
+
+    remaining = [score for score in ranked if score.model != selected.model]
+    remaining.sort(key=fallback_key)
+    return [selected, *remaining]
+
+
 def _normalized_costs(
     models: list[str],
     pricing: dict[str, ModelPricing],
@@ -1222,6 +1327,8 @@ def select_from_pool(
         continuity_floor=effective_features.continuity_quality_floor,
         step_risk=effective_features.step_risk,
         agent_pressure=effective_features.agent_pressure,
+        is_agentic=effective_features.is_agentic,
+        has_tool_results=effective_features.has_tool_results,
     )
     candidates = quality_guard.allowed_models
     alignment_target = scoring_served_quality_target(
@@ -1486,6 +1593,15 @@ def select_from_pool(
         confidence=confidence,
         features=effective_features,
     )
+    ranked, routine_premium_note = _apply_routine_premium_guard(
+        ranked,
+        mode=mode,
+        tier=tier,
+        lane=lane,
+        target=alignment_target,
+        requirements=requirements,
+        features=effective_features,
+    )
 
     if user_keyed_models:
         keyed = [s for s in ranked if s.model in user_keyed_models]
@@ -1505,10 +1621,19 @@ def select_from_pool(
     savings = max(0.0, (baseline_cost - cost) /
                   baseline_cost) if baseline_cost > 0 else 0.0
 
+    fallback_ranked = _order_routine_fallback_chain(
+        ranked,
+        selected=selected,
+        mode=mode,
+        tier=tier,
+        lane=lane,
+        requirements=requirements,
+        features=effective_features,
+    )
     chain = [
         FallbackOption(model=s.model, cost_estimate=s.predicted_cost,
                        suggested_output_budget=effective_output)
-        for s in ranked
+        for s in fallback_ranked
     ]
 
     method_note = "pool"
@@ -1546,6 +1671,8 @@ def select_from_pool(
         reasoning_parts.append(cost_guard_note)
     if premium_cost_note:
         reasoning_parts.append(premium_cost_note)
+    if routine_premium_note:
+        reasoning_parts.append(routine_premium_note)
     if routine_exploration_disabled:
         reasoning_parts.append("routine-exploration=base-prior")
     if premium_exploration_blocked:

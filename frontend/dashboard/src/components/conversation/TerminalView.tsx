@@ -3,6 +3,8 @@ import type { Conversation, ConversationMessage, ConversationToolCall } from "..
 import CodeBlock, { languageFromPath } from "./CodeBlock";
 import DecisionBadge from "./DecisionBadge";
 import MarkdownContent from "./MarkdownContent";
+import { useT } from "../../i18n";
+import type { Dictionary } from "../../i18n/types";
 
 const SYSTEM_REMINDER_PATTERN =
   /^\s*(<(system-reminder|command-name|local-command-stdout|command-message|command-args)\b[^>]*>)/i;
@@ -13,6 +15,7 @@ const PREVIEW_CHARS = 800;
 type ToolCallLookup = Record<string, ConversationToolCall>;
 
 export default function TerminalView({ data }: { data: Conversation }) {
+  const t = useT();
   const lookup = useMemo(() => buildLookup(data), [data]);
   const compactSet = useMemo(() => new Set(data.compact_breaks), [data.compact_breaks]);
   const rows: ReactNode[] = [];
@@ -20,10 +23,10 @@ export default function TerminalView({ data }: { data: Conversation }) {
 
   data.messages.forEach((m, idx) => {
     if (m.role === "user") {
-      rows.push(<UserRow key={`u-${idx}`} message={m} />);
+      rows.push(<UserRow key={`u-${idx}`} message={m} t={t} />);
     } else if (m.role === "assistant") {
       if (m.text && m.text.trim()) {
-        rows.push(<AssistantTextRow key={`at-${idx}`} message={m} />);
+        rows.push(<AssistantTextRow key={`at-${idx}`} message={m} t={t} />);
       } else if (m.decision != null && (!m.tool_calls || m.tool_calls.length === 0)) {
         rows.push(<AssistantDecisionRow key={`ad-${idx}`} message={m} />);
       }
@@ -33,12 +36,12 @@ export default function TerminalView({ data }: { data: Conversation }) {
       if (m.decision != null) {
         capturedAsstCount += 1;
         if (compactSet.has(capturedAsstCount)) {
-          rows.push(<CompactBreak key={`cb-${capturedAsstCount}`} />);
+          rows.push(<CompactBreak key={`cb-${capturedAsstCount}`} t={t} />);
         }
       }
     } else if (m.role === "tool_result") {
       const call = m.tool_use_id ? lookup[m.tool_use_id] : undefined;
-      rows.push(<ToolResultRow key={`tr-${idx}`} message={m} call={call} />);
+      rows.push(<ToolResultRow key={`tr-${idx}`} message={m} call={call} t={t} />);
     }
   });
 
@@ -86,7 +89,7 @@ function ContinuationRow({ children }: { children: ReactNode }) {
 
 // ===== User =====
 
-function UserRow({ message }: { message: ConversationMessage }) {
+function UserRow({ message, t }: { message: ConversationMessage; t: Dictionary }) {
   const [showWrapper, setShowWrapper] = useState(false);
   const hasWrapper = SYSTEM_REMINDER_PATTERN.test(message.text);
   let displayText = message.text;
@@ -109,7 +112,7 @@ function UserRow({ message }: { message: ConversationMessage }) {
             onClick={() => setShowWrapper((v) => !v)}
             className="mr-2 align-middle font-mono text-[10px] uppercase tracking-[0.06em] text-n-secondary hover:text-n-primary"
           >
-            ⚙ {showWrapper ? "hide" : "show"} reminder
+            ⚙ {showWrapper ? t.conversation.hideReminder : t.conversation.showReminder}
           </button>
         ) : null}
         {showWrapper && wrapperText ? (
@@ -117,13 +120,13 @@ function UserRow({ message }: { message: ConversationMessage }) {
             {wrapperText}
           </pre>
         ) : null}
-        {displayText.trim() ? <CollapsibleProse text={displayText} /> : null}
+        {displayText.trim() ? <CollapsibleProse text={displayText} t={t} /> : null}
       </div>
     </div>
   );
 }
 
-function CollapsibleProse({ text }: { text: string }) {
+function CollapsibleProse({ text, t }: { text: string; t: Dictionary }) {
   const [expanded, setExpanded] = useState(false);
   const lineCount = countLines(text);
   const isLong = lineCount > 18 || text.length > 1400;
@@ -146,7 +149,7 @@ function CollapsibleProse({ text }: { text: string }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-n-secondary hover:text-n-primary"
         >
-          {expanded ? "show less" : "show more"}
+          {expanded ? t.common.showLess : t.common.showMore}
         </button>
       ) : null}
     </div>
@@ -155,12 +158,12 @@ function CollapsibleProse({ text }: { text: string }) {
 
 // ===== Assistant prose =====
 
-function AssistantTextRow({ message }: { message: ConversationMessage }) {
+function AssistantTextRow({ message, t }: { message: ConversationMessage; t: Dictionary }) {
   return (
     <BulletRow>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <CollapsibleMarkdown text={message.text} />
+          <CollapsibleMarkdown text={message.text} t={t} />
         </div>
         {message.decision ? (
           <div className="shrink-0">
@@ -183,7 +186,7 @@ function AssistantDecisionRow({ message }: { message: ConversationMessage }) {
   );
 }
 
-function CollapsibleMarkdown({ text }: { text: string }) {
+function CollapsibleMarkdown({ text, t }: { text: string; t: Dictionary }) {
   const [expanded, setExpanded] = useState(false);
   const lineCount = countLines(text);
   const isLong = lineCount > 18 || text.length > 1400;
@@ -200,7 +203,7 @@ function CollapsibleMarkdown({ text }: { text: string }) {
         onClick={() => setExpanded((v) => !v)}
         className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-n-secondary hover:text-n-primary"
       >
-        {expanded ? "show less" : "show more"}
+        {expanded ? t.common.showLess : t.common.showMore}
       </button>
     </div>
   );
@@ -261,15 +264,17 @@ function formatToolCallInline(call: ConversationToolCall): string {
 function ToolResultRow({
   message,
   call,
+  t,
 }: {
   message: ConversationMessage;
   call?: ConversationToolCall;
+  t: Dictionary;
 }) {
   // Special-cased renderers:
   if (call && (call.name === "Edit" || call.name === "MultiEdit" || call.name === "Write")) {
     return (
       <ContinuationRow>
-        <EditDiffBlock call={call} />
+        <EditDiffBlock call={call} t={t} />
       </ContinuationRow>
     );
   }
@@ -277,13 +282,13 @@ function ToolResultRow({
     const filePath = readToolPath(call);
     return (
       <ContinuationRow>
-        <CodePreview text={message.text || ""} language={languageFromPath(filePath)} />
+        <CodePreview text={message.text || ""} language={languageFromPath(filePath)} t={t} />
       </ContinuationRow>
     );
   }
   return (
     <ContinuationRow>
-      <OutputPreview text={message.text || ""} />
+      <OutputPreview text={message.text || ""} t={t} />
     </ContinuationRow>
   );
 }
@@ -294,7 +299,7 @@ function readToolPath(call: ConversationToolCall): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-function CodePreview({ text, language }: { text: string; language: string }) {
+function CodePreview({ text, language, t }: { text: string; language: string; t: Dictionary }) {
   const [expanded, setExpanded] = useState(false);
   const lines = text.split("\n");
   const isLong = lines.length > PREVIEW_LINES || text.length > PREVIEW_CHARS;
@@ -308,14 +313,14 @@ function CodePreview({ text, language }: { text: string; language: string }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-[11px] text-n-disabled hover:text-n-primary"
         >
-          {expanded ? "show less" : `… +${hiddenCount} lines (click to expand)`}
+          {expanded ? t.common.showLess : t.conversation.expandLines(hiddenCount)}
         </button>
       ) : null}
     </div>
   );
 }
 
-function OutputPreview({ text }: { text: string }) {
+function OutputPreview({ text, t }: { text: string; t: Dictionary }) {
   const [expanded, setExpanded] = useState(false);
   const lines = text.split("\n");
   const isLong = lines.length > PREVIEW_LINES || text.length > PREVIEW_CHARS;
@@ -329,7 +334,7 @@ function OutputPreview({ text }: { text: string }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-[11px] text-n-disabled hover:text-n-primary"
         >
-          {expanded ? "show less" : `… +${hiddenCount} lines (click to expand)`}
+          {expanded ? t.common.showLess : t.conversation.expandLines(hiddenCount)}
         </button>
       ) : null}
     </div>
@@ -371,7 +376,7 @@ function collectEditPairs(call: ConversationToolCall): EditPair[] {
   return [];
 }
 
-function EditDiffBlock({ call }: { call: ConversationToolCall }) {
+function EditDiffBlock({ call, t }: { call: ConversationToolCall; t: Dictionary }) {
   const [expanded, setExpanded] = useState(false);
   const pairs = collectEditPairs(call);
   if (pairs.length === 0) return null;
@@ -392,10 +397,8 @@ function EditDiffBlock({ call }: { call: ConversationToolCall }) {
 
   const summary =
     call.name === "Write"
-      ? `Wrote ${totalAdded} line${totalAdded === 1 ? "" : "s"}`
-      : `Added ${totalAdded} line${totalAdded === 1 ? "" : "s"}, removed ${totalRemoved} line${
-          totalRemoved === 1 ? "" : "s"
-        }`;
+      ? t.conversation.wrote(totalAdded)
+      : t.conversation.addedRemoved(totalAdded, totalRemoved);
 
   const shouldClamp = totalAdded + totalRemoved > 12;
   const renderClamped = shouldClamp && !expanded;
@@ -428,7 +431,7 @@ function EditDiffBlock({ call }: { call: ConversationToolCall }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-[11px] text-n-disabled hover:text-n-primary"
         >
-          {expanded ? "show less" : `show full diff (${totalAdded + totalRemoved} lines)`}
+          {expanded ? t.common.showLess : t.conversation.showFullDiff(totalAdded + totalRemoved)}
         </button>
       ) : null}
     </div>
@@ -512,11 +515,11 @@ function DiffCode({ text, language }: { text: string; language: string }) {
 
 // ===== Compact break =====
 
-function CompactBreak() {
+function CompactBreak({ t }: { t: Dictionary }) {
   return (
     <div className="my-3 flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.08em] text-n-disabled">
       <span className="h-px flex-1 bg-n-border" />
-      <span>⟪HISTORY COMPACTED⟫</span>
+      <span>{t.conversation.historyCompacted}</span>
       <span className="h-px flex-1 bg-n-border" />
     </div>
   );

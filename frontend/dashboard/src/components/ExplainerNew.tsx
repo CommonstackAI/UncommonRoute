@@ -10,8 +10,10 @@ import type { TraceRecord } from "../api";
 import ConversationView from "./conversation/ConversationView";
 import { groupSessions, relativeTime, type Session } from "./conversation/TurnListView";
 import { useLiveData } from "../state/LiveDataContext";
+import { useT } from "../i18n";
 
 export default function ExplainerNew() {
+  const t = useT();
   const { recent: liveRecent } = useLiveData();
   const completedCount = useMemo(
     () => liveRecent.filter((r) => r.state === "completed").length,
@@ -27,7 +29,7 @@ export default function ExplainerNew() {
       const payload = await fetchTraces(100);
       if (cancelled) return;
       if (!payload) {
-        setError("[ERROR: TRACE ENDPOINT UNREACHABLE]");
+        setError(t.explainer.errEndpoint);
         setTraces([]);
         return;
       }
@@ -38,6 +40,7 @@ export default function ExplainerNew() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [completedCount]);
 
   const sessions = useMemo<Session[]>(() => groupSessions(traces), [traces]);
@@ -62,9 +65,9 @@ export default function ExplainerNew() {
       <div className="grid grid-cols-12 items-start gap-8">
         <div className="col-span-4 sticky top-8 self-start flex max-h-[calc(100vh-4rem)] flex-col">
           <div className="mb-4 shrink-0">
-            <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN</h1>
+            <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.explainer.title}</h1>
             <p className="mt-2 text-[13px] text-n-secondary">
-              Routing decisions grouped by session.
+              {t.explainer.subtitleNew}
             </p>
           </div>
           {error ? (
@@ -72,15 +75,15 @@ export default function ExplainerNew() {
           ) : null}
           <div className="min-h-0 flex-1 overflow-y-auto rounded-card border border-n-border bg-n-surface">
           <div className="flex items-center justify-between border-b border-n-border px-5 py-4">
-            <div className="label">SESSIONS</div>
+            <div className="label">{t.explainer.sessions}</div>
             <div className="font-mono text-[11px] text-n-secondary">
-              {sessions.length} · {traces.length} turns
+              {t.explainer.sessionsCount(sessions.length, traces.length)}
             </div>
           </div>
 
           {sessions.length === 0 && !error ? (
             <div className="flex items-center justify-center py-16 font-mono text-[11px] tracking-[0.08em] text-n-disabled">
-              [NO SESSIONS YET]
+              {t.explainer.noSessions}
             </div>
           ) : null}
 
@@ -88,7 +91,7 @@ export default function ExplainerNew() {
             {sessions.map((session) => {
               const active = session.id === selectedId;
               const firstTurn = session.turns[0];
-              const title = firstTurn?.prompt_preview || "[no preview]";
+              const title = firstTurn?.prompt_preview || t.common.noPreview;
               return (
                 <button
                   key={session.id}
@@ -107,7 +110,7 @@ export default function ExplainerNew() {
                       </span>
                     </div>
                     <span className="font-mono text-[11px] text-n-disabled">
-                      {session.turns.length} TURNS
+                      {t.explainer.turns(session.turns.length)}
                     </span>
                   </div>
 
@@ -115,9 +118,9 @@ export default function ExplainerNew() {
 
                   <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[11px] text-n-secondary">
                     <span className="truncate">
-                      {session.tierCounts.map(([t, n]) => `${t}×${n}`).join(" ") || "—"}
+                      {session.tierCounts.map(([tier, n]) => `${t.common.tierLabel(tier)}×${n}`).join(" ") || "—"}
                     </span>
-                    <span>{relativeTime(session.lastTimestamp)}</span>
+                    <span>{relativeTime(session.lastTimestamp, t)}</span>
                   </div>
                 </button>
               );
@@ -129,7 +132,7 @@ export default function ExplainerNew() {
         <div className="col-span-8">
           {!selected ? (
             <div className="flex min-h-[320px] items-center justify-center rounded-card border border-dashed border-n-border dot-grid-subtle">
-              <span className="font-mono text-[11px] tracking-[0.08em] text-n-disabled">[SELECT A SESSION]</span>
+              <span className="font-mono text-[11px] tracking-[0.08em] text-n-disabled">{t.explainer.selectSession}</span>
             </div>
           ) : (
             <ConversationView sessionId={selected.id} fallbackSession={selected} />

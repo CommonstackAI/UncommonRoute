@@ -9,6 +9,7 @@ import {
   type ConnectionState,
   type ProviderRecord,
 } from "../api";
+import { useT } from "../i18n";
 
 interface Props {
   initialConnection: ConnectionState | null;
@@ -32,6 +33,7 @@ const EMPTY_PROVIDER: ProviderDraft = {
 };
 
 export default function Connections({ initialConnection, onRefresh }: Props) {
+  const t = useT();
   const [connection, setConnection] = useState<ConnectionState | null>(initialConnection);
   const [providers, setProviders] = useState<ProviderRecord[]>([]);
   const [upstream, setUpstream] = useState(initialConnection?.upstream ?? "");
@@ -77,17 +79,17 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
       setUpstream(updated.upstream);
       setApiKey("");
       setFormDirty(false);
-      setMessage("Primary upstream updated.");
+      setMessage(t.connections.msgPrimaryUpdated);
       onRefresh();
     } else {
-      setMessage("Failed to update primary upstream.");
+      setMessage(t.connections.msgPrimaryFailed);
     }
     setBusyKey(null);
   }
 
   async function handleSaveProvider() {
     if (!providerDraft.name.trim() || !providerDraft.apiKey.trim()) {
-      setMessage("Provider name and API key are required.");
+      setMessage(t.connections.msgNameKeyRequired);
       return;
     }
     setBusyKey("provider:add");
@@ -105,10 +107,10 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
     if (result) {
       setProviders(result.providers);
       setProviderDraft(EMPTY_PROVIDER);
-      setMessage("Provider saved and loaded live.");
+      setMessage(t.connections.msgProviderSaved);
       onRefresh();
     } else {
-      setMessage("Failed to save provider.");
+      setMessage(t.connections.msgProviderSaveFailed);
     }
     setBusyKey(null);
   }
@@ -119,10 +121,10 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
     const result = await deleteProvider(name);
     if (result) {
       setProviders(result.providers);
-      setMessage(`Removed provider ${name}.`);
+      setMessage(t.connections.msgProviderRemoved(name));
       onRefresh();
     } else {
-      setMessage(`Failed to remove provider ${name}.`);
+      setMessage(t.connections.msgProviderRemoveFailed(name));
     }
     setBusyKey(null);
   }
@@ -132,9 +134,9 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
     setMessage("");
     const result = await verifyProvider(name);
     if (result) {
-      setMessage(result.ok ? `${name}: ${result.detail}` : `${name}: ${result.detail}`);
+      setMessage(`${name}: ${result.detail}`);
     } else {
-      setMessage(`Failed to verify provider ${name}.`);
+      setMessage(t.connections.msgProviderVerifyFailed(name));
     }
     setBusyKey(null);
   }
@@ -144,9 +146,9 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
   return (
     <div className="space-y-6 animate-fadeIn">
       <div>
-        <h1 className="font-display text-[36px] text-n-display tracking-tight">CONNECTIONS</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.connections.title}</h1>
         <p className="mt-1 text-[13px] text-n-secondary">
-          Manage the primary upstream and live BYOK provider keys.
+          {t.connections.subtitle}
         </p>
       </div>
 
@@ -160,37 +162,40 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
       <div className="rounded-card border border-n-border bg-n-surface p-6">
         <div className="flex items-start justify-between gap-6">
           <div>
-            <div className="label">Primary Upstream</div>
-            <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">Runtime connection</h2>
+            <div className="label">{t.connections.primaryUpstream}</div>
+            <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">{t.connections.runtimeConnection}</h2>
             <p className="mt-1 text-[13px] text-n-secondary">
-              Source: {connection?.source ?? "unknown"} · Provider: {connection?.provider ?? "unknown"} ·
-              {` `}{connection?.discovered ? "live catalog" : "static catalog"}
+              {t.connections.sourceLine(
+                connection?.source ?? t.common.unknown,
+                connection?.provider ?? t.common.unknown,
+                connection?.discovered ? t.connections.liveCatalog : t.connections.staticCatalog,
+              )}
             </p>
           </div>
           <div className="min-w-[240px] rounded-compact border border-n-border px-4 py-3 text-right">
-            <div className="label">Current</div>
+            <div className="label">{t.connections.current}</div>
             <div className="mt-2 break-all font-mono text-[13px] text-n-primary">
-              {connection?.upstream || "Not configured"}
+              {connection?.upstream || t.common.notConfigured}
             </div>
             <div className="mt-2 text-[12px] text-n-secondary">
-              Key: {connection?.api_key_preview || "none"}
+              {t.connections.keyLabel(connection?.api_key_preview || t.common.none)}
             </div>
           </div>
         </div>
 
         <div className="mt-6 grid grid-cols-2 gap-4">
           <Field
-            label="UPSTREAM URL"
+            label={t.connections.upstreamUrl}
             value={upstream}
             onChange={(v) => { setUpstream(v); setFormDirty(true); }}
             placeholder="https://api.commonstack.ai/v1"
             disabled={!connectionEditable || busyKey === "primary"}
           />
           <Field
-            label="API KEY"
+            label={t.connections.apiKey}
             value={apiKey}
             onChange={(v) => { setApiKey(v); setFormDirty(true); }}
-            placeholder={connection?.has_api_key ? "Leave empty to keep current key" : "sk-..."}
+            placeholder={connection?.has_api_key ? t.connections.keepCurrent : "sk-..."}
             disabled={!connectionEditable || busyKey === "primary"}
             type="password"
           />
@@ -199,15 +204,15 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
         <div className="mt-4 flex items-center justify-between">
           <div className="text-[12px] text-n-secondary">
             {connectionEditable
-              ? "Changes apply live after validation succeeds."
-              : `Locked by ${connection?.source ?? "external source"}.`}
+              ? t.connections.changesApply
+              : t.connections.lockedBy(connection?.source ?? t.common.unknown)}
           </div>
           <button
             disabled={!connectionEditable || busyKey === "primary"}
             onClick={handleSaveConnection}
             className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >
-            SAVE PRIMARY
+            {t.connections.savePrimary}
           </button>
         </div>
       </div>
@@ -216,27 +221,27 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
       <div className="rounded-card border border-n-border bg-n-surface p-6">
         <div className="flex items-center justify-between">
           <div>
-            <div className="label">Provider Keys</div>
-            <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">Bring your own keys</h2>
+            <div className="label">{t.connections.providerKeys}</div>
+            <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">{t.connections.byok}</h2>
             <p className="mt-1 text-[13px] text-n-secondary">
-              Save provider credentials and make them available immediately to routing.
+              {t.connections.byokDescription}
             </p>
           </div>
           <div className="font-mono text-[13px] text-n-secondary">
-            {providers.length} configured
+            {t.connections.configured(providers.length)}
           </div>
         </div>
 
         <div className="mt-6 grid grid-cols-2 gap-4">
           <Field
-            label="PROVIDER NAME"
+            label={t.connections.providerName}
             value={providerDraft.name}
             onChange={(value) => setProviderDraft((prev) => ({ ...prev, name: value }))}
             placeholder="openai"
             disabled={busyKey === "provider:add"}
           />
           <Field
-            label="API KEY"
+            label={t.connections.apiKey}
             value={providerDraft.apiKey}
             onChange={(value) => setProviderDraft((prev) => ({ ...prev, apiKey: value }))}
             placeholder="sk-..."
@@ -244,27 +249,27 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
             type="password"
           />
           <Field
-            label="BASE URL"
+            label={t.connections.baseUrl}
             value={providerDraft.baseUrl}
             onChange={(value) => setProviderDraft((prev) => ({ ...prev, baseUrl: value }))}
-            placeholder="Optional override"
+            placeholder={t.connections.baseUrlPlaceholder}
             disabled={busyKey === "provider:add"}
           />
           <Field
-            label="PLAN"
+            label={t.connections.plan}
             value={providerDraft.plan}
             onChange={(value) => setProviderDraft((prev) => ({ ...prev, plan: value }))}
-            placeholder="Optional note"
+            placeholder={t.connections.planPlaceholder}
             disabled={busyKey === "provider:add"}
           />
         </div>
 
         <div className="mt-4">
-          <label className="label mb-1.5 block">MODELS (COMMA SEPARATED)</label>
+          <label className="label mb-1.5 block">{t.connections.modelsCsv}</label>
           <input
             value={providerDraft.modelsCsv}
             onChange={(e) => setProviderDraft((prev) => ({ ...prev, modelsCsv: e.target.value }))}
-            placeholder="Optional explicit model list"
+            placeholder={t.connections.modelsCsvPlaceholder}
             disabled={busyKey === "provider:add"}
             className="w-full border-b border-n-border-vis bg-transparent px-0 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-display focus:outline-none"
           />
@@ -276,7 +281,7 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
             onClick={handleSaveProvider}
             className="rounded-pill bg-n-display px-5 py-2.5 font-mono text-[13px] uppercase tracking-[0.06em] text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >
-            ADD PROVIDER
+            {t.connections.addProvider}
           </button>
         </div>
       </div>
@@ -284,15 +289,15 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
       {/* Configured Providers Table */}
       <div className="rounded-card border border-n-border bg-n-surface overflow-hidden">
         <div className="border-b border-n-border px-6 py-4">
-          <span className="label">Configured Providers</span>
+          <span className="label">{t.connections.configuredProviders}</span>
         </div>
         <table className="w-full">
           <thead>
             <tr className="border-b border-n-border">
-              <th className="label px-6 py-3 text-left">NAME</th>
-              <th className="label px-6 py-3 text-left">BASE URL</th>
-              <th className="label px-6 py-3 text-left">MODELS</th>
-              <th className="label px-6 py-3 text-left">KEY</th>
+              <th className="label px-6 py-3 text-left">{t.connections.name}</th>
+              <th className="label px-6 py-3 text-left">{t.connections.baseUrl}</th>
+              <th className="label px-6 py-3 text-left">{t.connections.modelsCol}</th>
+              <th className="label px-6 py-3 text-left">{t.connections.keyCol}</th>
               <th className="label px-6 py-3 text-right"></th>
             </tr>
           </thead>
@@ -300,7 +305,7 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
             {providers.length === 0 ? (
               <tr>
                 <td colSpan={5} className="py-16 text-center font-mono text-[14px] text-n-disabled">
-                  No provider keys saved yet.
+                  {t.connections.noProviders}
                 </td>
               </tr>
             ) : (
@@ -309,7 +314,7 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
                   <td className="px-6 py-4 font-mono text-[13px] font-semibold text-n-display">{provider.name}</td>
                   <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{provider.base_url || "\u2014"}</td>
                   <td className="px-6 py-4 font-mono text-[13px] text-n-primary">
-                    {provider.model_count > 0 ? `${provider.model_count} models` : "Default set"}
+                    {provider.model_count > 0 ? t.connections.nModels(provider.model_count) : t.connections.defaultSet}
                   </td>
                   <td className="px-6 py-4 font-mono text-[12px] text-n-secondary">{provider.api_key_preview || "\u2014"}</td>
                   <td className="px-6 py-4">
@@ -319,14 +324,14 @@ export default function Connections({ initialConnection, onRefresh }: Props) {
                         onClick={() => handleVerifyProvider(provider.name)}
                         className="rounded-pill border border-n-border-vis px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
                       >
-                        VERIFY
+                        {t.connections.verify}
                       </button>
                       <button
                         disabled={busyKey === `provider:remove:${provider.name}`}
                         onClick={() => handleRemoveProvider(provider.name)}
                         className="rounded-pill border border-n-accent px-3 py-1.5 font-mono text-[12px] uppercase tracking-wider text-n-accent transition-colors hover:bg-n-accent hover:text-n-display disabled:opacity-40"
                       >
-                        REMOVE
+                        {t.connections.remove}
                       </button>
                     </div>
                   </td>

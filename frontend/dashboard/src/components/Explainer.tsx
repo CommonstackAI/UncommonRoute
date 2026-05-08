@@ -11,19 +11,11 @@ import {
   type TraceRecord,
 } from "../api";
 import { useLiveData } from "../state/LiveDataContext";
-
-const TIER_NAMES: Record<string, string> = {
-  SIMPLE: "LOW",
-  MEDIUM: "MID",
-  COMPLEX: "HIGH",
-  REASONING: "HIGH",
-  low: "LOW",
-  mid: "MID",
-  mid_high: "MID_HIGH",
-  high: "HIGH",
-};
+import { useT } from "../i18n";
+import type { Dictionary } from "../i18n/types";
 
 export default function Explainer() {
+  const t = useT();
   const { recent: liveRecent } = useLiveData();
   const completedCount = useMemo(
     () => liveRecent.filter((r) => r.state === "completed").length,
@@ -41,7 +33,7 @@ export default function Explainer() {
       const payload = await fetchTraces(30);
       if (cancelled) return;
       if (!payload) {
-        setError("[ERROR: TRACE ENDPOINT UNREACHABLE]");
+        setError(t.explainer.errEndpoint);
         setRecent([]);
         return;
       }
@@ -56,6 +48,7 @@ export default function Explainer() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [completedCount]);
 
   useEffect(() => {
@@ -89,17 +82,17 @@ export default function Explainer() {
     return {
       requested: prettyTransport(selected.requested_transport || selected.transport),
       selected: prettyTransport(selected.transport),
-      source: prettifySource(selected.transport_preference_source),
-      reason: selected.transport_reason || "No explicit transport reason recorded.",
+      source: prettifySource(selected.transport_preference_source, t),
+      reason: selected.transport_reason || t.explainer.noTransportReason,
     };
-  }, [selected]);
+  }, [selected, t]);
 
   return (
     <div className="animate-fadeIn">
       <div className="mb-8">
-        <h1 className="font-display text-[36px] text-n-display tracking-tight">EXPLAIN</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.explainer.title}</h1>
         <p className="mt-2 text-[14px] text-n-secondary">
-          Inspect one request at a time, including why the proxy chose a model and which upstream protocol it used.
+          {t.explainer.subtitle}
         </p>
       </div>
 
@@ -108,13 +101,13 @@ export default function Explainer() {
       <div className="grid grid-cols-12 gap-8">
         <div className="col-span-4 max-h-[720px] overflow-y-auto rounded-card border border-n-border bg-n-surface">
           <div className="flex items-center justify-between border-b border-n-border px-5 py-4">
-            <div className="label">RECENT TRACES</div>
-            <div className="font-mono text-[11px] text-n-secondary">{recent.length} loaded</div>
+            <div className="label">{t.explainer.recentTraces}</div>
+            <div className="font-mono text-[11px] text-n-secondary">{t.explainer.loaded(recent.length)}</div>
           </div>
 
           {recent.length === 0 && !error ? (
             <div className="flex items-center justify-center py-16 font-mono text-[11px] tracking-[0.08em] text-n-disabled">
-              [NO TRACES YET]
+              {t.explainer.noTraces}
             </div>
           ) : null}
 
@@ -133,7 +126,7 @@ export default function Explainer() {
                     <div className="flex items-center gap-2">
                       <span className={`h-1.5 w-1.5 rounded-full ${trace.status_code >= 400 ? "bg-n-accent" : "bg-n-success"}`} />
                       <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-n-secondary">
-                        {normTier(trace.decision_tier || trace.tier)}
+                        {t.common.tierLabel(trace.decision_tier || trace.tier || "")}
                       </span>
                     </div>
                     <span className="font-mono text-[11px] text-n-disabled">
@@ -142,7 +135,7 @@ export default function Explainer() {
                   </div>
 
                   <div className="mt-2 truncate text-[13px] text-n-primary">
-                    {trace.prompt_preview || "[no preview]"}
+                    {trace.prompt_preview || t.common.noPreview}
                   </div>
 
                   <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[11px] text-n-secondary">
@@ -157,25 +150,25 @@ export default function Explainer() {
 
         <div className="col-span-8">
           {!selectedId ? (
-            <EmptyPanel label="[SELECT A TRACE]" />
+            <EmptyPanel label={t.explainer.selectTrace} />
           ) : loadingDetail && !selected ? (
-            <EmptyPanel label="[LOADING TRACE...]" />
+            <EmptyPanel label={t.explainer.loadingTrace} />
           ) : selected ? (
             <div className="space-y-6">
               <div className="rounded-card border border-n-border bg-n-surface p-6">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <div className="label">ROUTED TO</div>
+                    <div className="label">{t.explainer.routedTo}</div>
                     <div className="mt-2 font-display text-[44px] leading-none tracking-tight text-n-display">
                       {shortModel(selected.model) || "—"}
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-n-secondary">
-                      <Badge>{normTier(selected.decision_tier || selected.tier)}</Badge>
+                      <Badge>{t.common.tierLabel(selected.decision_tier || selected.tier || "")}</Badge>
                       {selected.served_quality ? <Badge>{prettyQuality(selected.served_quality)}</Badge> : null}
                       {selected.capability_lane ? <Badge>{prettyLane(selected.capability_lane)}</Badge> : null}
                       <Badge>{(selected.method || "pool").toUpperCase()}</Badge>
                       <Badge>{(selected.endpoint || "chat_completions").replace(/_/g, " ")}</Badge>
-                      <Badge>{selected.streaming ? "STREAM" : "NON-STREAM"}</Badge>
+                      <Badge>{selected.streaming ? t.common.stream : t.common.nonStream}</Badge>
                       <Badge tone={selected.status_code >= 400 ? "error" : "default"}>
                         {selected.status_code >= 400 ? `ERR ${selected.status_code}` : `HTTP ${selected.status_code}`}
                       </Badge>
@@ -183,36 +176,36 @@ export default function Explainer() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-3 min-w-[280px]">
-                    <MiniMetric label="CONFIDENCE" value={selected.raw_confidence ? `${Math.round(selected.raw_confidence * 100)}%` : "—"} />
-                    <MiniMetric label="LATENCY" value={`${(selected.latency_us / 1000).toFixed(1)}ms`} />
-                    <MiniMetric label="EST. COST" value={`$${selected.estimated_cost.toFixed(4)}`} />
-                    <MiniMetric label="REQUEST ID" value={selected.request_id} monoSmall />
+                    <MiniMetric label={t.explainer.confidence} value={selected.raw_confidence ? `${Math.round(selected.raw_confidence * 100)}%` : "—"} />
+                    <MiniMetric label={t.explainer.latency} value={`${(selected.latency_us / 1000).toFixed(1)}ms`} />
+                    <MiniMetric label={t.explainer.estCost} value={`$${selected.estimated_cost.toFixed(4)}`} />
+                    <MiniMetric label={t.explainer.requestId} value={selected.request_id} monoSmall />
                   </div>
                 </div>
 
                 <div className="mt-6 border-t border-n-border pt-5">
-                  <div className="label mb-2">ROUTE REASONING</div>
+                  <div className="label mb-2">{t.explainer.routeReasoning}</div>
                   <div className="text-[14px] text-n-primary">
-                    {selected.route_reasoning || "No route reasoning recorded."}
+                    {selected.route_reasoning || t.explainer.noReasoning}
                   </div>
                   {selected.fallback_reason ? (
                     <div className="mt-3 font-mono text-[12px] text-n-warning">
-                      Fallback: {selected.fallback_reason}
+                      {t.explainer.fallback(selected.fallback_reason)}
                     </div>
                   ) : null}
                 </div>
 
                 <div className="mt-6 border-t border-n-border pt-5">
-                  <div className="label mb-3">SERVICE CONTRACT</div>
+                  <div className="label mb-3">{t.explainer.serviceContract}</div>
                   <div className="grid grid-cols-4 gap-3">
-                    <MiniMetric label="REQUEST" value={normTier(selected.decision_tier || selected.tier)} />
-                    <MiniMetric label="SERVED" value={prettyQuality(selected.served_quality)} />
-                    <MiniMetric label="TARGET" value={prettyQuality(selected.served_quality_target)} />
-                    <MiniMetric label="LANE" value={prettyLane(selected.capability_lane)} />
+                    <MiniMetric label={t.explainer.request} value={t.common.tierLabel(selected.decision_tier || selected.tier || "")} />
+                    <MiniMetric label={t.explainer.served} value={prettyQuality(selected.served_quality)} />
+                    <MiniMetric label={t.explainer.target} value={prettyQuality(selected.served_quality_target)} />
+                    <MiniMetric label={t.explainer.lane} value={prettyLane(selected.capability_lane)} />
                   </div>
                   {selected.served_quality_floor ? (
                     <div className="mt-3 font-mono text-[11px] text-n-secondary">
-                      Floor: {prettyQuality(selected.served_quality_floor)}
+                      {t.explainer.floor(prettyQuality(selected.served_quality_floor))}
                     </div>
                   ) : null}
                 </div>
@@ -221,7 +214,7 @@ export default function Explainer() {
               {transportSummary ? (
                 <div className="rounded-card border border-n-border bg-n-surface p-6">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="label">TRANSPORT DECISION</div>
+                    <div className="label">{t.explainer.transportDecision}</div>
                     <div className="font-mono text-[11px] text-n-secondary">
                       {transportSummary.source}
                     </div>
@@ -229,7 +222,7 @@ export default function Explainer() {
 
                   <div className="mt-5 grid grid-cols-12 gap-4">
                     <div className="col-span-5 rounded-compact border border-n-border px-4 py-4">
-                      <div className="label">REQUESTED</div>
+                      <div className="label">{t.explainer.requested}</div>
                       <div className="mt-2 font-mono text-[18px] font-semibold text-n-display">
                         {transportSummary.requested}
                       </div>
@@ -240,7 +233,7 @@ export default function Explainer() {
                     </div>
 
                     <div className="col-span-5 rounded-compact border border-n-border px-4 py-4">
-                      <div className="label">SERVED</div>
+                      <div className="label">{t.explainer.servedCol}</div>
                       <div className="mt-2 font-mono text-[18px] font-semibold text-n-display">
                         {transportSummary.selected}
                       </div>
@@ -248,7 +241,7 @@ export default function Explainer() {
                   </div>
 
                   <div className="mt-5 rounded-compact border border-n-border px-4 py-4">
-                    <div className="label">WHY THIS PROTOCOL</div>
+                    <div className="label">{t.explainer.whyProtocol}</div>
                     <div className="mt-2 text-[14px] text-n-primary">
                       {transportSummary.reason}
                     </div>
@@ -259,48 +252,48 @@ export default function Explainer() {
               <div className="grid grid-cols-12 gap-6">
                 <div className="col-span-7 rounded-card border border-n-border bg-n-surface p-6">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="label">ATTEMPT CHAIN</div>
+                    <div className="label">{t.explainer.attemptChain}</div>
                     <div className="font-mono text-[11px] text-n-secondary">
-                      {selected.attempts_payload.length} attempts
+                      {t.explainer.attempts(selected.attempts_payload.length)}
                     </div>
                   </div>
 
                   <div className="mt-4 space-y-3">
                     {selected.attempts_payload.length === 0 ? (
-                      <div className="font-mono text-[11px] text-n-disabled">[NO ATTEMPTS RECORDED]</div>
+                      <div className="font-mono text-[11px] text-n-disabled">{t.explainer.noAttempts}</div>
                     ) : (
                       selected.attempts_payload.map((attempt) => (
-                        <AttemptRow key={`${attempt.attempt_index}-${attempt.selected_model}`} attempt={attempt} />
+                        <AttemptRow key={`${attempt.attempt_index}-${attempt.selected_model}`} attempt={attempt} t={t} />
                       ))
                     )}
                   </div>
                 </div>
 
                 <div className="col-span-5 rounded-card border border-n-border bg-n-surface p-6">
-                  <div className="label">REQUEST SHAPE</div>
+                  <div className="label">{t.explainer.requestShape}</div>
                   <div className="mt-4 grid grid-cols-2 gap-3">
-                    <MiniMetric label="API FORMAT" value={(selected.api_format || "openai").toUpperCase()} />
-                    <MiniMetric label="STEP TYPE" value={(selected.step_type || "general").toUpperCase()} />
-                    <MiniMetric label="INPUT TOKENS" value={`${selected.usage_input_tokens || selected.input_tokens_after || 0}`} />
-                    <MiniMetric label="OUTPUT TOKENS" value={`${selected.usage_output_tokens || 0}`} />
+                    <MiniMetric label={t.explainer.apiFormat} value={(selected.api_format || "openai").toUpperCase()} />
+                    <MiniMetric label={t.explainer.stepType} value={(selected.step_type || "general").toUpperCase()} />
+                    <MiniMetric label={t.explainer.inputTokens} value={`${selected.usage_input_tokens || selected.input_tokens_after || 0}`} />
+                    <MiniMetric label={t.explainer.outputTokens} value={`${selected.usage_output_tokens || 0}`} />
                   </div>
 
                   <div className="mt-5 border-t border-n-border pt-5">
-                    <div className="label mb-3">TAGS</div>
-                    <TagGroup title="FEATURE" items={selected.feature_tags} />
-                    <TagGroup title="CONSTRAINT" items={selected.constraint_tags} />
-                    <TagGroup title="HINT" items={selected.hint_tags} />
+                    <div className="label mb-3">{t.explainer.tags}</div>
+                    <TagGroup title={t.explainer.feature} items={selected.feature_tags} />
+                    <TagGroup title={t.explainer.constraint} items={selected.constraint_tags} format={t.tags.constraint} />
+                    <TagGroup title={t.explainer.hint} items={selected.hint_tags} format={t.tags.hint} />
                   </div>
 
                   {(selected.error_code || selected.error_message) ? (
                     <div className="mt-5 rounded-compact border border-n-accent px-4 py-4">
-                      <div className="label text-n-accent">ERROR</div>
+                      <div className="label text-n-accent">{t.explainer.error}</div>
                       <div className="mt-2 font-mono text-[12px] text-n-accent">
                         {selected.error_code || "upstream_error"}
                         {selected.error_stage ? ` · ${selected.error_stage}` : ""}
                       </div>
                       <div className="mt-2 text-[13px] text-n-primary">
-                        {selected.error_message || "No detailed error message recorded."}
+                        {selected.error_message || t.explainer.noErrorMessage}
                       </div>
                     </div>
                   ) : null}
@@ -308,7 +301,7 @@ export default function Explainer() {
               </div>
             </div>
           ) : (
-            <EmptyPanel label="[TRACE DETAIL UNAVAILABLE]" />
+            <EmptyPanel label={t.explainer.traceUnavailable} />
           )}
         </div>
       </div>
@@ -316,7 +309,7 @@ export default function Explainer() {
   );
 }
 
-function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
+function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
   return (
     <div className="rounded-compact border border-n-border px-4 py-4">
       <div className="flex items-start justify-between gap-3">
@@ -324,7 +317,7 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
           <div className="flex items-center gap-2">
             <span className={`h-1.5 w-1.5 rounded-full ${attempt.success ? "bg-n-success" : attempt.blocked ? "bg-n-warning" : "bg-n-accent"}`} />
             <span className="font-mono text-[12px] uppercase tracking-[0.08em] text-n-secondary">
-              Attempt {attempt.attempt_index}
+              {t.explainer.attempt} {attempt.attempt_index}
             </span>
           </div>
           <div className="mt-2 font-mono text-[15px] text-n-display">
@@ -340,7 +333,7 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
             {attempt.provider_name || "gateway"}
           </div>
           <div className={`mt-1 font-mono text-[11px] ${attempt.success ? "text-n-success" : "text-n-accent"}`}>
-            {attempt.blocked ? "BLOCKED" : attempt.success ? "SUCCESS" : `HTTP ${attempt.status_code || "—"}`}
+            {attempt.blocked ? t.common.blocked : attempt.success ? t.common.success : `HTTP ${attempt.status_code || "—"}`}
           </div>
         </div>
       </div>
@@ -352,8 +345,8 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
       ) : null}
 
       <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[11px] text-n-secondary">
-        <span className="truncate">{attempt.target_url || "no target url recorded"}</span>
-        <span>{attempt.transport_preference_source ? prettifySource(attempt.transport_preference_source) : ""}</span>
+        <span className="truncate">{attempt.target_url || ""}</span>
+        <span>{attempt.transport_preference_source ? prettifySource(attempt.transport_preference_source, t) : ""}</span>
       </div>
 
       {(attempt.error_code || attempt.error_message) ? (
@@ -366,14 +359,14 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
   );
 }
 
-function TagGroup({ title, items }: { title: string; items: string[] }) {
+function TagGroup({ title, items, format }: { title: string; items: string[]; format?: (raw: string) => string }) {
   if (!items || items.length === 0) return null;
   return (
     <div className="mt-3">
       <div className="font-mono text-[11px] text-n-secondary">{title}</div>
       <div className="mt-2 flex flex-wrap gap-2">
         {items.map((item) => (
-          <Badge key={`${title}-${item}`}>{item}</Badge>
+          <Badge key={`${title}-${item}`}>{format ? format(item) : item}</Badge>
         ))}
       </div>
     </div>
@@ -427,10 +420,6 @@ function EmptyPanel({ label }: { label: string }) {
   );
 }
 
-function normTier(t?: string) {
-  return TIER_NAMES[t || ""] || (t || "—").toUpperCase();
-}
-
 function shortModel(model?: string) {
   return (model || "").split("/").pop() || model || "—";
 }
@@ -458,7 +447,7 @@ function prettyLane(value?: string) {
   return value.replace(/-/g, " ").replace(/_/g, " ").toUpperCase();
 }
 
-function prettifySource(source?: string) {
-  if (!source) return "unspecified";
+function prettifySource(source?: string, t?: Dictionary) {
+  if (!source) return t?.explainer.unspecified ?? "unspecified";
   return source.replace(/-/g, " ").replace(/_/g, " ").toUpperCase();
 }

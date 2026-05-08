@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { useT } from "../../i18n";
+import type { Dictionary } from "../../i18n/types";
 
 interface Token {
   raw: string;
@@ -14,48 +16,50 @@ interface Group {
   tokens: Token[];
 }
 
-const GROUP_DEFS: Array<{ id: string; title: string; hint: string; matches: (t: Token) => boolean }> = [
-  {
-    id: "signals",
-    title: "CLASSIFIER SIGNALS",
-    hint: "task complexity vote",
-    matches: (t) => t.raw.startsWith("v2:") || t.raw.startsWith("v2-"),
-  },
-  {
-    id: "selector",
-    title: "SELECTOR",
-    hint: "how the model pool was scored",
-    matches: (t) =>
-      hasKey(t, "chooser") ||
-      hasKey(t, "mode") ||
-      hasKey(t, "depth") ||
-      hasKey(t, "hints") ||
-      hasKey(t, "constraints") ||
-      hasKey(t, "required_caps") ||
-      t.raw === "step-stable=no-bandit" ||
-      t.raw.startsWith("byok-preferred"),
-  },
-  {
-    id: "quality",
-    title: "QUALITY GUARD",
-    hint: "quality / risk floors",
-    matches: (t) =>
-      hasKey(t, "lane") ||
-      t.raw.startsWith("served-quality") ||
-      t.raw.startsWith("step-risk") ||
-      t.raw.startsWith("continuity-"),
-  },
-  {
-    id: "pool",
-    title: "CANDIDATE POOL",
-    hint: "transport / capability filters",
-    matches: (t) =>
-      hasKey(t, "transport-filter") ||
-      hasKey(t, "thinking-context") ||
-      hasKey(t, "context-fit") ||
-      hasKey(t, "cost-guard"),
-  },
-];
+function groupDefs(t: Dictionary): Array<{ id: string; title: string; hint: string; matches: (t: Token) => boolean }> {
+  return [
+    {
+      id: "signals",
+      title: t.conversation.classifierSignals,
+      hint: t.conversation.classifierHint,
+      matches: (tok) => tok.raw.startsWith("v2:") || tok.raw.startsWith("v2-"),
+    },
+    {
+      id: "selector",
+      title: t.conversation.selector,
+      hint: t.conversation.selectorHint,
+      matches: (tok) =>
+        hasKey(tok, "chooser") ||
+        hasKey(tok, "mode") ||
+        hasKey(tok, "depth") ||
+        hasKey(tok, "hints") ||
+        hasKey(tok, "constraints") ||
+        hasKey(tok, "required_caps") ||
+        tok.raw === "step-stable=no-bandit" ||
+        tok.raw.startsWith("byok-preferred"),
+    },
+    {
+      id: "quality",
+      title: t.conversation.qualityGuard,
+      hint: t.conversation.qualityHint,
+      matches: (tok) =>
+        hasKey(tok, "lane") ||
+        tok.raw.startsWith("served-quality") ||
+        tok.raw.startsWith("step-risk") ||
+        tok.raw.startsWith("continuity-"),
+    },
+    {
+      id: "pool",
+      title: t.conversation.candidatePool,
+      hint: t.conversation.poolHint,
+      matches: (tok) =>
+        hasKey(tok, "transport-filter") ||
+        hasKey(tok, "thinking-context") ||
+        hasKey(tok, "context-fit") ||
+        hasKey(tok, "cost-guard"),
+    },
+  ];
+}
 
 function hasKey(t: Token, key: string): boolean {
   return t.key === key;
@@ -88,16 +92,16 @@ function parseReasoning(text: string): Token[] {
   return out;
 }
 
-function groupTokens(tokens: Token[]): { groups: Group[]; other: Token[] } {
+function groupTokens(tokens: Token[], defs: ReturnType<typeof groupDefs>): { groups: Group[]; other: Token[] } {
   const buckets: Record<string, Token[]> = {};
-  GROUP_DEFS.forEach((g) => (buckets[g.id] = []));
+  defs.forEach((g) => (buckets[g.id] = []));
   const other: Token[] = [];
-  for (const t of tokens) {
-    const found = GROUP_DEFS.find((g) => g.matches(t));
-    if (found) buckets[found.id].push(t);
-    else other.push(t);
+  for (const tok of tokens) {
+    const found = defs.find((g) => g.matches(tok));
+    if (found) buckets[found.id].push(tok);
+    else other.push(tok);
   }
-  const groups = GROUP_DEFS.map((g) => ({
+  const groups = defs.map((g) => ({
     id: g.id,
     title: g.title,
     hint: g.hint,
@@ -107,16 +111,18 @@ function groupTokens(tokens: Token[]): { groups: Group[]; other: Token[] } {
 }
 
 export default function RouteReasoning({ text }: { text: string }) {
+  const t = useT();
   const [view, setView] = useState<"grouped" | "raw">("grouped");
   const parsed = useMemo(() => parseReasoning(text), [text]);
-  const { groups, other } = useMemo(() => groupTokens(parsed), [parsed]);
+  const defs = useMemo(() => groupDefs(t), [t]);
+  const { groups, other } = useMemo(() => groupTokens(parsed, defs), [parsed, defs]);
   const hasGroups = groups.length > 0 || other.length > 0;
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
-        <div className="label">ROUTE REASONING</div>
-        <Toggle value={view} onChange={setView} />
+        <div className="label">{t.conversation.routeReasoning}</div>
+        <Toggle value={view} onChange={setView} t={t} />
       </div>
 
       {view === "raw" || !hasGroups ? (
@@ -130,7 +136,7 @@ export default function RouteReasoning({ text }: { text: string }) {
           ))}
           {other.length > 0 ? (
             <GroupBlock
-              group={{ id: "other", title: "OTHER", hint: "uncategorized notes", tokens: other }}
+              group={{ id: "other", title: t.conversation.other, hint: t.conversation.otherHint, tokens: other }}
             />
           ) : null}
         </div>
@@ -142,9 +148,11 @@ export default function RouteReasoning({ text }: { text: string }) {
 function Toggle({
   value,
   onChange,
+  t,
 }: {
   value: "grouped" | "raw";
   onChange: (v: "grouped" | "raw") => void;
+  t: Dictionary;
 }) {
   return (
     <div className="flex items-center gap-0 overflow-hidden rounded-pill border border-n-border-vis font-mono text-[10px] uppercase tracking-[0.06em]">
@@ -154,7 +162,7 @@ function Toggle({
           value === "grouped" ? "bg-n-raised text-n-display" : "text-n-secondary hover:text-n-primary"
         }`}
       >
-        Grouped
+        {t.conversation.grouped}
       </button>
       <button
         onClick={() => onChange("raw")}
@@ -162,7 +170,7 @@ function Toggle({
           value === "raw" ? "bg-n-raised text-n-display" : "text-n-secondary hover:text-n-primary"
         }`}
       >
-        Raw
+        {t.conversation.raw}
       </button>
     </div>
   );

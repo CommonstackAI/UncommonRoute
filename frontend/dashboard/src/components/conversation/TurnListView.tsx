@@ -1,5 +1,7 @@
 import { type ReactNode, useState } from "react";
 import type { TraceAttempt, TraceRecord } from "../../api";
+import { useT } from "../../i18n";
+import type { Dictionary } from "../../i18n/types";
 
 // ===== Types =====
 
@@ -17,6 +19,7 @@ export interface Session {
 // ===== Top-level component =====
 
 export default function TurnListView({ session }: { session: Session }) {
+  const t = useT();
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set());
   const toggleTurn = (rid: string) => {
     setExpandedTurns((prev) => {
@@ -32,30 +35,30 @@ export default function TurnListView({ session }: { session: Session }) {
       <div className="rounded-card border border-n-border bg-n-surface p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="label">SESSION</div>
+            <div className="label">{t.explainer.session}</div>
             <div className="mt-2 font-display text-[28px] leading-tight tracking-tight text-n-display">
               {session.id}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-n-secondary">
-              <Badge>{session.turns.length} TURNS</Badge>
-              {session.tierCounts.map(([t, n]) => (
-                <Badge key={`tier-${t}`}>{`${t} × ${n}`}</Badge>
+              <Badge>{t.explainer.turns(session.turns.length)}</Badge>
+              {session.tierCounts.map(([tier, n]) => (
+                <Badge key={`tier-${tier}`}>{`${t.common.tierLabel(tier)} × ${n}`}</Badge>
               ))}
-              {session.hasError ? <Badge tone="error">HAS ERRORS</Badge> : null}
+              {session.hasError ? <Badge tone="error">{t.explainer.hasErrors}</Badge> : null}
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3 min-w-[260px]">
-            <MiniMetric label="MODELS" value={`${session.models.length}`} />
-            <MiniMetric label="TOTAL COST" value={`$${session.totalCost.toFixed(4)}`} />
-            <MiniMetric label="STARTED" value={relativeTime(session.firstTimestamp)} />
-            <MiniMetric label="LAST" value={relativeTime(session.lastTimestamp)} />
+            <MiniMetric label={t.explainer.modelsCount} value={`${session.models.length}`} />
+            <MiniMetric label={t.explainer.totalCost} value={`$${session.totalCost.toFixed(4)}`} />
+            <MiniMetric label={t.explainer.started} value={relativeTime(session.firstTimestamp, t)} />
+            <MiniMetric label={t.explainer.last} value={relativeTime(session.lastTimestamp, t)} />
           </div>
         </div>
 
         {session.models.length > 0 ? (
           <div className="mt-5 border-t border-n-border pt-4">
-            <div className="label mb-2">MODELS USED</div>
+            <div className="label mb-2">{t.explainer.modelsUsed}</div>
             <div className="flex flex-wrap gap-2">
               {session.models.map((m) => (
                 <Badge key={`model-${m}`}>{shortModel(m)}</Badge>
@@ -73,6 +76,7 @@ export default function TurnListView({ session }: { session: Session }) {
             turn={turn}
             isOpen={expandedTurns.has(turn.request_id)}
             onToggle={() => toggleTurn(turn.request_id)}
+            t={t}
           />
         ))}
       </div>
@@ -87,11 +91,13 @@ function TurnRow({
   turn,
   isOpen,
   onToggle,
+  t,
 }: {
   index: number;
   turn: TraceRecord;
   isOpen: boolean;
   onToggle: () => void;
+  t: Dictionary;
 }) {
   const isError = turn.status_code >= 400;
   return (
@@ -104,10 +110,10 @@ function TurnRow({
           <div className="flex items-center gap-2">
             <span className={`h-1.5 w-1.5 rounded-full ${isError ? "bg-n-accent" : "bg-n-success"}`} />
             <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-n-secondary">
-              TURN {index}
+              {t.explainer.turn} {index}
             </span>
             <span className="font-mono text-[11px] text-n-disabled">
-              {normTier(turn.decision_tier || turn.tier)}
+              {t.common.tierLabel(turn.decision_tier || turn.tier || "")}
             </span>
           </div>
           <span className="font-mono text-[11px] text-n-disabled">
@@ -115,7 +121,7 @@ function TurnRow({
           </span>
         </div>
         <div className="mt-2 truncate text-[14px] text-n-primary">
-          {turn.prompt_preview || "[no preview]"}
+          {turn.prompt_preview || t.common.noPreview}
         </div>
         <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[11px] text-n-secondary">
           <span className="truncate">{shortModel(turn.model) || "—"}</span>
@@ -124,17 +130,17 @@ function TurnRow({
           </span>
         </div>
       </button>
-      {isOpen ? <TurnDecision turn={turn} /> : null}
+      {isOpen ? <TurnDecision turn={turn} t={t} /> : null}
     </div>
   );
 }
 
-function TurnDecision({ turn }: { turn: TraceRecord }) {
+function TurnDecision({ turn, t }: { turn: TraceRecord; t: Dictionary }) {
   const transport = {
     requested: prettyTransport(turn.requested_transport || turn.transport),
     selected: prettyTransport(turn.transport),
-    source: prettifySource(turn.transport_preference_source),
-    reason: turn.transport_reason || "No explicit transport reason recorded.",
+    source: prettifySource(turn.transport_preference_source, t),
+    reason: turn.transport_reason || t.explainer.noTransportReason,
   };
 
   return (
@@ -142,17 +148,17 @@ function TurnDecision({ turn }: { turn: TraceRecord }) {
       <div>
         <div className="flex flex-wrap items-baseline justify-between gap-3">
           <div>
-            <div className="label">ROUTED TO</div>
+            <div className="label">{t.explainer.routedTo}</div>
             <div className="mt-1 font-display text-[24px] leading-none tracking-tight text-n-display">
               {shortModel(turn.model) || "—"}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-n-secondary">
-            <Badge>{normTier(turn.decision_tier || turn.tier)}</Badge>
+            <Badge>{t.common.tierLabel(turn.decision_tier || turn.tier || "")}</Badge>
             {turn.served_quality ? <Badge>{prettyQuality(turn.served_quality)}</Badge> : null}
             {turn.capability_lane ? <Badge>{prettyLane(turn.capability_lane)}</Badge> : null}
             <Badge>{(turn.method || "pool").toUpperCase()}</Badge>
-            <Badge>{turn.streaming ? "STREAM" : "NON-STREAM"}</Badge>
+            <Badge>{turn.streaming ? t.common.stream : t.common.nonStream}</Badge>
             <Badge tone={turn.status_code >= 400 ? "error" : "default"}>
               {turn.status_code >= 400 ? `ERR ${turn.status_code}` : `HTTP ${turn.status_code}`}
             </Badge>
@@ -160,40 +166,40 @@ function TurnDecision({ turn }: { turn: TraceRecord }) {
         </div>
 
         <div className="mt-4 grid grid-cols-4 gap-3">
-          <MiniMetric label="CONFIDENCE" value={turn.raw_confidence ? `${Math.round(turn.raw_confidence * 100)}%` : "—"} />
-          <MiniMetric label="LATENCY" value={`${(turn.latency_us / 1000).toFixed(1)}ms`} />
-          <MiniMetric label="COST" value={`$${turn.estimated_cost.toFixed(4)}`} />
-          <MiniMetric label="REQ ID" value={turn.request_id} monoSmall />
+          <MiniMetric label={t.explainer.confidence} value={turn.raw_confidence ? `${Math.round(turn.raw_confidence * 100)}%` : "—"} />
+          <MiniMetric label={t.explainer.latency} value={`${(turn.latency_us / 1000).toFixed(1)}ms`} />
+          <MiniMetric label={t.explainer.cost} value={`$${turn.estimated_cost.toFixed(4)}`} />
+          <MiniMetric label={t.explainer.requestId} value={turn.request_id} monoSmall />
         </div>
       </div>
 
       <div>
-        <div className="label mb-2">ROUTE REASONING</div>
+        <div className="label mb-2">{t.explainer.routeReasoning}</div>
         <div className="text-[13px] text-n-primary">
-          {turn.route_reasoning || "No route reasoning recorded."}
+          {turn.route_reasoning || t.explainer.noReasoning}
         </div>
         {turn.fallback_reason ? (
           <div className="mt-2 font-mono text-[11px] text-n-warning">
-            Fallback: {turn.fallback_reason}
+            {t.explainer.fallback(turn.fallback_reason)}
           </div>
         ) : null}
       </div>
 
       <div>
         <div className="flex items-center justify-between gap-3">
-          <div className="label">TRANSPORT</div>
+          <div className="label">{t.explainer.transport}</div>
           <div className="font-mono text-[11px] text-n-secondary">{transport.source}</div>
         </div>
         <div className="mt-3 grid grid-cols-12 gap-3">
           <div className="col-span-5 rounded-compact border border-n-border px-3 py-3">
-            <div className="label">REQUESTED</div>
+            <div className="label">{t.explainer.requested}</div>
             <div className="mt-1 font-mono text-[14px] font-semibold text-n-display">{transport.requested}</div>
           </div>
           <div className="col-span-2 flex items-center justify-center">
             <div className="font-display text-[20px] text-n-display">→</div>
           </div>
           <div className="col-span-5 rounded-compact border border-n-border px-3 py-3">
-            <div className="label">SERVED</div>
+            <div className="label">{t.explainer.servedCol}</div>
             <div className="mt-1 font-mono text-[14px] font-semibold text-n-display">{transport.selected}</div>
           </div>
         </div>
@@ -202,15 +208,15 @@ function TurnDecision({ turn }: { turn: TraceRecord }) {
 
       <div>
         <div className="flex items-center justify-between gap-3">
-          <div className="label">ATTEMPT CHAIN</div>
-          <div className="font-mono text-[11px] text-n-secondary">{turn.attempts_payload.length} attempts</div>
+          <div className="label">{t.explainer.attemptChain}</div>
+          <div className="font-mono text-[11px] text-n-secondary">{t.explainer.attempts(turn.attempts_payload.length)}</div>
         </div>
         <div className="mt-3 space-y-2">
           {turn.attempts_payload.length === 0 ? (
-            <div className="font-mono text-[11px] text-n-disabled">[NO ATTEMPTS RECORDED]</div>
+            <div className="font-mono text-[11px] text-n-disabled">{t.explainer.noAttempts}</div>
           ) : (
             turn.attempts_payload.map((attempt) => (
-              <AttemptRow key={`${attempt.attempt_index}-${attempt.selected_model}`} attempt={attempt} />
+              <AttemptRow key={`${attempt.attempt_index}-${attempt.selected_model}`} attempt={attempt} t={t} />
             ))
           )}
         </div>
@@ -218,22 +224,22 @@ function TurnDecision({ turn }: { turn: TraceRecord }) {
 
       {(turn.feature_tags?.length || turn.constraint_tags?.length || turn.hint_tags?.length) ? (
         <div>
-          <div className="label mb-2">TAGS</div>
-          <TagGroup title="FEATURE" items={turn.feature_tags} />
-          <TagGroup title="CONSTRAINT" items={turn.constraint_tags} />
-          <TagGroup title="HINT" items={turn.hint_tags} />
+          <div className="label mb-2">{t.explainer.tags}</div>
+          <TagGroup title={t.explainer.feature} items={turn.feature_tags} />
+          <TagGroup title={t.explainer.constraint} items={turn.constraint_tags} format={t.tags.constraint} />
+          <TagGroup title={t.explainer.hint} items={turn.hint_tags} format={t.tags.hint} />
         </div>
       ) : null}
 
       {(turn.error_code || turn.error_message) ? (
         <div className="rounded-compact border border-n-accent px-4 py-3">
-          <div className="label text-n-accent">ERROR</div>
+          <div className="label text-n-accent">{t.explainer.error}</div>
           <div className="mt-1 font-mono text-[11px] text-n-accent">
             {turn.error_code || "upstream_error"}
             {turn.error_stage ? ` · ${turn.error_stage}` : ""}
           </div>
           <div className="mt-1 text-[13px] text-n-primary">
-            {turn.error_message || "No detailed error message recorded."}
+            {turn.error_message || t.explainer.noErrorMessage}
           </div>
         </div>
       ) : null}
@@ -241,7 +247,7 @@ function TurnDecision({ turn }: { turn: TraceRecord }) {
   );
 }
 
-function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
+function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
   return (
     <div className="rounded-compact border border-n-border px-3 py-3">
       <div className="flex items-start justify-between gap-3">
@@ -249,7 +255,7 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
           <div className="flex items-center gap-2">
             <span className={`h-1.5 w-1.5 rounded-full ${attempt.success ? "bg-n-success" : attempt.blocked ? "bg-n-warning" : "bg-n-accent"}`} />
             <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-n-secondary">
-              Attempt {attempt.attempt_index}
+              {t.explainer.attempt} {attempt.attempt_index}
             </span>
           </div>
           <div className="mt-1 font-mono text-[13px] text-n-display">{shortModel(attempt.selected_model)}</div>
@@ -260,7 +266,7 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
         <div className="text-right">
           <div className="font-mono text-[11px] text-n-secondary">{attempt.provider_name || "gateway"}</div>
           <div className={`mt-1 font-mono text-[11px] ${attempt.success ? "text-n-success" : "text-n-accent"}`}>
-            {attempt.blocked ? "BLOCKED" : attempt.success ? "SUCCESS" : `HTTP ${attempt.status_code || "—"}`}
+            {attempt.blocked ? t.common.blocked : attempt.success ? t.common.success : `HTTP ${attempt.status_code || "—"}`}
           </div>
         </div>
       </div>
@@ -277,14 +283,14 @@ function AttemptRow({ attempt }: { attempt: TraceAttempt }) {
   );
 }
 
-function TagGroup({ title, items }: { title: string; items: string[] }) {
+function TagGroup({ title, items, format }: { title: string; items: string[]; format?: (raw: string) => string }) {
   if (!items || items.length === 0) return null;
   return (
     <div className="mt-2">
       <div className="font-mono text-[11px] text-n-secondary">{title}</div>
       <div className="mt-1 flex flex-wrap gap-1.5">
         {items.map((item) => (
-          <Badge key={`${title}-${item}`}>{item}</Badge>
+          <Badge key={`${title}-${item}`}>{format ? format(item) : item}</Badge>
         ))}
       </div>
     </div>
@@ -341,13 +347,19 @@ const TIER_NAMES: Record<string, string> = {
   high: "HIGH",
 };
 
-export function relativeTime(ts: number) {
+export function relativeTime(ts: number, t?: Dictionary) {
   if (!ts) return "—";
   const seconds = Math.max(0, Date.now() / 1000 - ts);
-  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+  if (!t) {
+    if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+  }
+  if (seconds < 60) return t.explainer.timeAgoSec(Math.floor(seconds));
+  if (seconds < 3600) return t.explainer.timeAgoMin(Math.floor(seconds / 60));
+  if (seconds < 86400) return t.explainer.timeAgoHour(Math.floor(seconds / 3600));
+  return t.explainer.timeAgoDay(Math.floor(seconds / 86400));
 }
 
 export function normTier(t?: string) {
@@ -381,8 +393,8 @@ function prettyLane(value?: string) {
   return value.replace(/-/g, " ").replace(/_/g, " ").toUpperCase();
 }
 
-function prettifySource(source?: string) {
-  if (!source) return "unspecified";
+function prettifySource(source?: string, t?: Dictionary) {
+  if (!source) return t?.explainer.unspecified ?? "unspecified";
   return source.replace(/-/g, " ").replace(/_/g, " ").toUpperCase();
 }
 

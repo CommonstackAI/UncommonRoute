@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { ToolStep } from "./groupMessages";
 import DecisionBadge from "./DecisionBadge";
 import MessageBubble, { type ToolCallLookup } from "./MessageBubble";
+import { useT } from "../../i18n";
+import type { Dictionary } from "../../i18n/types";
 
 function aggregateToolNames(steps: ToolStep[]): Record<string, number> {
   const acc: Record<string, number> = {};
@@ -13,7 +15,7 @@ function aggregateToolNames(steps: ToolStep[]): Record<string, number> {
   return acc;
 }
 
-function distinctModels(steps: ToolStep[]): { captured: number; preCapture: number } {
+function distinctModels(steps: ToolStep[], t: Dictionary): { captured: number; preCapture: number; summary: string } {
   const captured = new Set<string>();
   let preCapture = 0;
   for (const s of steps) {
@@ -23,7 +25,10 @@ function distinctModels(steps: ToolStep[]): { captured: number; preCapture: numb
       captured.add(s.assistant.decision.model);
     }
   }
-  return { captured: captured.size, preCapture };
+  const summary = preCapture > 0
+    ? t.conversation.modelsAndPreCapture(captured.size, preCapture)
+    : t.conversation.nModels(captured.size);
+  return { captured: captured.size, preCapture, summary };
 }
 
 export default function ToolStepGroup({
@@ -33,15 +38,13 @@ export default function ToolStepGroup({
   steps: ToolStep[];
   toolCalls?: ToolCallLookup;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const tools = aggregateToolNames(steps);
   const toolSummary = Object.entries(tools)
     .map(([name, n]) => `${name}×${n}`)
     .join(" ");
-  const { captured, preCapture } = distinctModels(steps);
-  const modelSummary = preCapture > 0
-    ? `${captured} models · ${preCapture} pre-capture`
-    : `${captured} model${captured === 1 ? "" : "s"}`;
+  const { summary: modelSummary } = distinctModels(steps, t);
 
   return (
     <div className="rounded-card border border-n-border bg-n-surface">
@@ -51,7 +54,7 @@ export default function ToolStepGroup({
       >
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10px] text-n-disabled">{open ? "▾" : "▸"}</span>
-          <span className="label">AGENT THOUGHT FOR {steps.length} STEP{steps.length === 1 ? "" : "S"}</span>
+          <span className="label">{t.conversation.agentThoughtFor(steps.length)}</span>
         </div>
         <div className="flex items-center gap-3 font-mono text-[11px] text-n-secondary">
           <span className="truncate max-w-[260px]">{toolSummary}</span>
@@ -64,14 +67,14 @@ export default function ToolStepGroup({
           {steps.map((step, i) => (
             <div key={i} className="rounded-compact border border-n-border bg-n-raised px-3 py-3 space-y-2">
               <div className="flex items-baseline justify-between gap-3">
-                <div className="label">STEP {i + 1}</div>
+                <div className="label">{t.conversation.step} {i + 1}</div>
                 {step.assistant.decision ? (
                   <div className="min-w-0 max-w-[60%]">
                     <DecisionBadge decision={step.assistant.decision} />
                   </div>
                 ) : (
                   <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.06em] text-n-disabled">
-                    ⟪PRE-CAPTURE⟫
+                    {t.conversation.preCapture}
                   </span>
                 )}
               </div>

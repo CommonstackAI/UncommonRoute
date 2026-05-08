@@ -10,6 +10,8 @@ import {
   type RoutingConfigState,
   type RoutingTierConfig,
 } from "../api";
+import { useT } from "../i18n";
+import type { Dictionary } from "../i18n/types";
 
 const MODES = ["auto", "fast", "best"] as const;
 const TIERS = ["SIMPLE", "MEDIUM", "COMPLEX"] as const;
@@ -32,6 +34,7 @@ interface Props {
 }
 
 export default function Routing({ onRefresh }: Props) {
+  const t = useT();
   const [config, setConfig] = useState<RoutingConfigState | null>(null);
   const [mapping, setMapping] = useState<Mapping | null>(null);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
@@ -64,8 +67,8 @@ export default function Routing({ onRefresh }: Props) {
 
   const defaultMode = config?.default_mode ?? "auto";
   const editable = config?.editable ?? true;
-  const modeMeta = getModeMeta(defaultMode);
-  const editModeMeta = getModeMeta(editorMode);
+  const modeMeta = getModeMeta(defaultMode, t);
+  const editModeMeta = getModeMeta(editorMode, t);
   const selectedModeRows = config?.modes?.[editorMode]?.tiers ?? {};
   const modelOptions = mapping?.pool.map((model) => model.id) ?? [];
   const modeSwitchBusy = busyKey?.startsWith("mode:") ?? false;
@@ -86,10 +89,10 @@ export default function Routing({ onRefresh }: Props) {
     const next = await setDefaultRoutingMode(nextMode);
     if (next) {
       applyConfig(next);
-      showNotice(`Default mode set to ${nextMode}.`);
+      showNotice(t.routing.msgDefaultSet(t.tags.mode(nextMode)));
       onRefresh?.();
     } else {
-      showNotice("Failed to update default mode.", "error");
+      showNotice(t.routing.msgDefaultFailed, "error");
     }
     setBusyKey(null);
   }
@@ -101,10 +104,10 @@ export default function Routing({ onRefresh }: Props) {
     const next = await resetRoutingConfig();
     if (next) {
       applyConfig(next);
-      showNotice("Routing config reset to discovery-managed defaults.");
+      showNotice(t.routing.msgResetAll);
       onRefresh?.();
     } else {
-      showNotice("Failed to reset routing config.", "error");
+      showNotice(t.routing.msgResetAllFailed, "error");
     }
     setBusyKey(null);
   }
@@ -124,7 +127,7 @@ export default function Routing({ onRefresh }: Props) {
     const draft = drafts[draftKey(mode, tier)] ?? createDraft();
     const primary = draft.primary.trim();
     if (!primary) {
-      showNotice(`Primary model is required to save ${mode} / ${tier}.`, "error");
+      showNotice(t.routing.msgPrimaryRequired(t.tags.mode(mode), t.common.tierLabel(tier)), "error");
       return;
     }
 
@@ -139,10 +142,10 @@ export default function Routing({ onRefresh }: Props) {
     );
     if (next) {
       applyConfig(next);
-      showNotice(`Saved override for ${mode} / ${tier}.`);
+      showNotice(t.routing.msgSaved(t.tags.mode(mode), t.common.tierLabel(tier)));
       onRefresh?.();
     } else {
-      showNotice(`Failed to save override for ${mode} / ${tier}.`, "error");
+      showNotice(t.routing.msgSaveFailed(t.tags.mode(mode), t.common.tierLabel(tier)), "error");
     }
     setBusyKey(null);
   }
@@ -153,10 +156,10 @@ export default function Routing({ onRefresh }: Props) {
     const next = await resetRoutingTier(mode, tier);
     if (next) {
       applyConfig(next);
-      showNotice(`Reset ${mode} / ${tier} to discovery-managed defaults.`);
+      showNotice(t.routing.msgResetTier(t.tags.mode(mode), t.common.tierLabel(tier)));
       onRefresh?.();
     } else {
-      showNotice(`Failed to reset ${mode} / ${tier}.`, "error");
+      showNotice(t.routing.msgResetTierFailed(t.tags.mode(mode), t.common.tierLabel(tier)), "error");
     }
     setBusyKey(null);
   }
@@ -182,21 +185,21 @@ export default function Routing({ onRefresh }: Props) {
 
       <div className="space-y-6 animate-fadeIn">
         <div>
-          <h1 className="font-display text-[36px] text-n-display tracking-tight">ROUTING</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.routing.title}</h1>
           <p className="mt-1 text-[13px] text-n-secondary">
-            Choose the default mode used when a request does not explicitly set a virtual model.
+            {t.routing.subtitle}
           </p>
         </div>
 
         <div className="rounded-card border border-n-border bg-n-surface p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-[640px]">
-              <div className="label">Default Mode</div>
+              <div className="label">{t.routing.defaultMode}</div>
               <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">
-                Choose the router's starting bias
+                {t.routing.chooseBias}
               </h2>
               <p className="mt-1 text-[13px] text-n-secondary">
-                Used when a request omits `model`. Explicit models still win.
+                {t.routing.explicitWins}
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -205,7 +208,7 @@ export default function Routing({ onRefresh }: Props) {
                 onClick={handleReset}
                 className="rounded-pill border border-n-border-vis px-4 py-2 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
               >
-                Reset All
+                {t.routing.resetAll}
               </button>
             </div>
           </div>
@@ -231,13 +234,13 @@ export default function Routing({ onRefresh }: Props) {
                     <div>
                       <div className="flex items-center gap-2">
                         <span className={`h-2 w-2 rounded-full ${active ? "bg-n-display" : "bg-n-disabled"}`} />
-                        <span className="font-mono text-[13px] font-semibold uppercase tracking-wider">{mode}</span>
+                        <span className="font-mono text-[13px] font-semibold uppercase tracking-wider">{t.tags.mode(mode)}</span>
                       </div>
-                      <div className="mt-2 text-[12px] text-n-secondary">{getModeMeta(mode).description}</div>
+                      <div className="mt-2 text-[12px] text-n-secondary">{getModeMeta(mode, t).description}</div>
                     </div>
                     {active ? (
                       <span className="label rounded-pill border border-n-border-vis px-2 py-0.5 text-[12px]">
-                        ACTIVE
+                        {t.common.active}
                       </span>
                     ) : null}
                   </div>
@@ -251,9 +254,9 @@ export default function Routing({ onRefresh }: Props) {
             <div className="flex items-start gap-3">
               <span className="mt-1 h-2 w-2 rounded-full bg-n-display" />
               <div>
-                <div className="label">Current behavior</div>
+                <div className="label">{t.routing.currentBehavior}</div>
                 <div className="mt-1 flex items-center gap-2">
-                  <span className="font-mono text-[14px] font-semibold uppercase text-n-display">{defaultMode}</span>
+                  <span className="font-mono text-[14px] font-semibold uppercase text-n-display">{t.tags.mode(defaultMode)}</span>
                   <span className="text-[12px] text-n-secondary">{modeMeta.description}</span>
                 </div>
                 <p className="mt-2 text-[13px] text-n-secondary">{modeMeta.summary}</p>
@@ -265,26 +268,26 @@ export default function Routing({ onRefresh }: Props) {
         <div className="rounded-card border border-n-border bg-n-surface p-6">
           <div className="flex items-start justify-between gap-6">
             <div>
-              <div className="label">Advanced Routing</div>
+              <div className="label">{t.routing.advancedRouting}</div>
               <h2 className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">
-                Override any mode, tier by tier
+                {t.routing.overrideTier}
               </h2>
               <p className="mt-1 text-[13px] text-n-secondary">
-                Defaults are discovery-managed. Add an explicit primary only when you want to pin behavior away from the live pool.
+                {t.routing.advancedDescription}
               </p>
             </div>
             <div className="border border-n-border rounded-compact px-4 py-3 text-right">
-              <div className="label">Model suggestions</div>
+              <div className="label">{t.routing.modelSuggestions}</div>
               <div className="mt-1 font-mono text-[14px] font-semibold text-n-display">{modelOptions.length}</div>
               <div className="mt-1 text-[12px] text-n-secondary">
-                {modelOptions.length > 0 ? "discovered for autocomplete" : "type any model id manually"}
+                {t.routing.suggestionsHelp(modelOptions.length)}
               </div>
             </div>
           </div>
 
           {/* Editor mode segmented control */}
           <div className="mt-6">
-            <div className="label">Edit mode</div>
+            <div className="label">{t.routing.editMode}</div>
             <div className="mt-2 inline-flex gap-[2px] rounded-compact bg-n-black p-[2px]">
               {MODES.map((mode) => {
                 const active = mode === editorMode;
@@ -296,13 +299,13 @@ export default function Routing({ onRefresh }: Props) {
                       active ? "bg-n-raised text-n-display" : "text-n-secondary hover:text-n-primary"
                     }`}
                   >
-                    {mode}
+                    {t.tags.mode(mode)}
                   </button>
                 );
               })}
             </div>
             <div className="mt-3 text-[13px] text-n-secondary">
-              Editing `{editorMode}`: {editModeMeta.description}.
+              {t.routing.editingMode(t.tags.mode(editorMode), editModeMeta.description)}
             </div>
           </div>
 
@@ -325,14 +328,15 @@ export default function Routing({ onRefresh }: Props) {
                 onChange={updateDraft}
                 onSave={handleSaveOverride}
                 onReset={handleResetOverride}
+                t={t}
               />
             ))}
           </div>
         </div>
 
         <div className="rounded-card border border-n-border bg-n-surface p-6">
-          <div className="label">CLI</div>
-          <div className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">Same switch from terminal</div>
+          <div className="label">{t.routing.cli}</div>
+          <div className="mt-2 text-[18px] font-semibold tracking-tight text-n-display">{t.routing.cliHelp}</div>
           <pre className="mt-4 overflow-x-auto rounded-compact border border-n-border bg-n-black px-4 py-4 font-mono text-[12px] leading-relaxed text-n-secondary">
 {`uncommon-route config show
 uncommon-route config set-default-mode ${defaultMode}
@@ -357,6 +361,7 @@ function EditableTierCard({
   onChange,
   onSave,
   onReset,
+  t,
 }: {
   mode: ModeName;
   tier: TierName;
@@ -367,6 +372,7 @@ function EditableTierCard({
   onChange: (mode: ModeName, tier: TierName, patch: Partial<DraftState>) => void;
   onSave: (mode: ModeName, tier: TierName) => Promise<void>;
   onReset: (mode: ModeName, tier: TierName) => Promise<void>;
+  t: Dictionary;
 }) {
   const primary = row?.primary?.trim() || "";
   const fallback = row?.fallback ?? [];
@@ -382,61 +388,59 @@ function EditableTierCard({
         <span className="font-mono text-[12px] font-semibold uppercase tracking-wider text-n-display">{tier}</span>
         {overridden ? (
           <span className="rounded-pill border border-n-accent px-2 py-0.5 font-mono text-[12px] uppercase tracking-wider text-n-accent">
-            OVERRIDE
+            {t.common.override}
           </span>
         ) : (
           <span className="rounded-pill border border-n-border-vis px-2 py-0.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary">
-            DEFAULT
+            {t.common.default}
           </span>
         )}
       </div>
 
       <div className="mt-4 font-mono text-[14px] font-semibold tracking-tight text-n-display">
-        {discoveryManaged ? "Discovery-managed" : primary}
+        {discoveryManaged ? t.routing.discoveryManaged : primary}
       </div>
       <div className="mt-1 text-[12px] text-n-secondary">
-        {discoveryManaged
-          ? "Chosen live from the discovered pool using the current mode policy."
-          : `${selectionMode} strategy`}
+        {discoveryManaged ? t.routing.chosenLive : t.routing.strategySuffix(selectionMode)}
       </div>
 
       <div className="mt-4 space-y-2">
-        <Row label="STRATEGY" value={selectionMode} />
+        <Row label={t.routing.strategy} value={selectionMode} />
         <Row
-          label="FALLBACK"
-          value={fallback.length > 0 ? `${fallback.length} model${fallback.length === 1 ? "" : "s"}` : "none"}
+          label={t.routing.fallback}
+          value={t.routing.fallbackCount(fallback.length)}
         />
       </div>
 
       <div className="mt-5 border-t border-n-border pt-4">
-        <div className="label">Edit Override</div>
+        <div className="label">{t.routing.editOverride}</div>
 
         <div className="mt-3 space-y-3">
           <div>
-            <label className="label mb-1.5 block">PRIMARY MODEL</label>
+            <label className="label mb-1.5 block">{t.routing.primaryModel}</label>
             <input
               list="routing-model-options"
               value={draft.primary}
               onChange={(e) => onChange(mode, tier, { primary: e.target.value })}
-              placeholder="e.g. openai/gpt-4o-mini"
+              placeholder={t.routing.primaryPlaceholder}
               disabled={!editable || saveBusy || resetBusy}
               className="w-full border-b border-n-border-vis bg-transparent px-0 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-display focus:outline-none disabled:opacity-50"
             />
           </div>
 
           <div>
-            <label className="label mb-1.5 block">FALLBACK MODELS</label>
+            <label className="label mb-1.5 block">{t.routing.fallbackModels}</label>
             <input
               value={draft.fallbackCsv}
               onChange={(e) => onChange(mode, tier, { fallbackCsv: e.target.value })}
-              placeholder="comma separated, optional"
+              placeholder={t.routing.fallbackPlaceholder}
               disabled={!editable || saveBusy || resetBusy}
               className="w-full border-b border-n-border-vis bg-transparent px-0 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-display focus:outline-none disabled:opacity-50"
             />
           </div>
 
           <div>
-            <div className="label mb-1.5 block">STRATEGY</div>
+            <div className="label mb-1.5 block">{t.routing.strategy}</div>
             <div className="inline-flex gap-[2px] rounded-compact bg-n-black p-[2px]">
               {(["adaptive", "hard-pin"] as const).map((value) => {
                 const active = draft.selectionMode === value;
@@ -463,14 +467,14 @@ function EditableTierCard({
             onClick={() => void onSave(mode, tier)}
             className="rounded-pill bg-n-display px-4 py-2.5 font-mono text-[12px] uppercase tracking-wider text-n-black transition-colors hover:bg-n-primary disabled:opacity-40"
           >
-            {saveBusy ? "SAVING..." : "SAVE OVERRIDE"}
+            {saveBusy ? t.routing.saving : t.routing.saveOverride}
           </button>
           <button
             disabled={!editable || !overridden || saveBusy || resetBusy}
             onClick={() => void onReset(mode, tier)}
             className="rounded-pill border border-n-border-vis px-4 py-2.5 font-mono text-[12px] uppercase tracking-wider text-n-secondary transition-colors hover:border-n-primary hover:text-n-primary disabled:opacity-40"
           >
-            {resetBusy ? "RESETTING..." : "RESET TO DISCOVERY"}
+            {resetBusy ? t.routing.resetting : t.routing.resetToDiscovery}
           </button>
         </div>
       </div>
@@ -487,23 +491,14 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function getModeMeta(mode: string) {
+function getModeMeta(mode: string, t: Dictionary) {
   switch (mode) {
     case "best":
-      return {
-        description: "highest quality",
-        summary: "Biases toward stronger answers and is the least price-sensitive.",
-      };
+      return t.routing.modeBest;
     case "fast":
-      return {
-        description: "lighter and faster",
-        summary: "Biases toward speed and cost-efficiency while staying capable.",
-      };
+      return t.routing.modeFast;
     default:
-      return {
-        description: "balanced default",
-        summary: "Balances quality, speed, and cost across the discovered pool.",
-      };
+      return t.routing.modeAuto;
   }
 }
 

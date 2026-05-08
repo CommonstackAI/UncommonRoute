@@ -164,15 +164,15 @@ resp = client.chat.completions.create(
 
 ## 工作原理
 
-每个请求会经过三个本地 signal，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
+每个请求会经过三个本地信号，先判断任务复杂度，再从你配置的 upstream 里选择最匹配的模型。
 
-| Signal | 看什么 | 典型开销 |
+| 信号 | 看什么 | 运行说明 |
 |---|---|---:|
-| Metadata | 对话结构、工具调用、上下文深度 | <1ms |
-| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | ~25–35ms |
-| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | <1ms |
+| Metadata | 对话结构、工具调用、上下文深度 | 很轻 |
+| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | 取决于本地运行时资产和缓存状态 |
+| Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | 很轻 |
 
-三个 signal 投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
+三个信号投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
 
 路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
 
@@ -193,7 +193,7 @@ UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterB
 
 也就是说，不是“少花钱但少做成任务”。在这组任务里，UncommonRoute 的任务通过数与全程 Opus 持平，实际 API 调用成本下降 53%。
 
-这里的“任务通过”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含 Table 4 里的 penalty cost。
+这里的“任务通过”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含论文 Table 3 里的 penalty cost。
 
 ### 复现
 
@@ -206,14 +206,7 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ### 路由开销
 
-本地 CPU，热进程：
-
-| 指标 | 延迟 |
-|---|:---:|
-| p50 | 25.6ms |
-| p90 | 32.1ms |
-
-冷启动需要加载 embedding 模型，可能要几秒；进程预热后，单次 `route()` 通常是几十毫秒。
+路由开销会受硬件、已安装的运行时资产、实际启用的信号影响。运行上面的命令可以得到当前 checkout 的 cold start，以及热进程下的 p50 / p90 / p99。
 
 ---
 

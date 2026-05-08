@@ -108,7 +108,7 @@ uncommon-route serve
 With the Dashboard, you can:
 
 - Preview how a prompt will be classified before sending it.
-- Inspect each routed request by session, including model, latency, cost, and signal readout.
+- Inspect each routed request per session, including model, latency, cost, and signal readout.
 - See which complexity classes and models are driving your spend.
 - Tune routing policy, fallbacks, budgets, provider keys, and model pools.
 - Rate decisions as `too strong`, `just right`, or `too weak`; those labels train a local model overlay without touching the base model.
@@ -166,11 +166,11 @@ resp = client.chat.completions.create(
 
 Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
 
-| Signal | What it looks at | Typical overhead |
+| Signal | What it looks at | Runtime note |
 |---|---|---:|
-| Metadata | Conversation structure, tool use, context depth | <1ms |
-| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
-| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
+| Metadata | Conversation structure, tool use, context depth | Cheap |
+| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | Depends on local runtime assets and cache state |
+| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | Cheap |
 
 The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
 
@@ -193,7 +193,7 @@ UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI
 
 Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, UncommonRoute matched Opus-only on tasks solved while cutting realized API spend by 53%.
 
-"Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 4.
+"Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 3 of the paper.
 
 ### Reproduce
 
@@ -206,14 +206,7 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ### Routing Overhead
 
-Local CPU, warm process:
-
-| Metric | Latency |
-|---|:---:|
-| p50 | 25.6ms |
-| p90 | 32.1ms |
-
-Cold start loads the embedding model and can take a few seconds. After warm-up, a single `route()` call typically takes tens of milliseconds.
+Routing overhead depends on hardware, installed runtime assets, and which signals are active. Run the command above to report cold start plus warm-process p50 / p90 / p99 for the current checkout.
 
 ---
 

@@ -8,7 +8,7 @@
 
 接入 Claude Code、Cursor、Codex 或 OpenAI SDK。UncommonRoute 在本地运行，把每次请求路由到最合适的模型。
 
-<strong>任务通过 75/100，对比全程 Opus 74/100；API 成本下降 53%。</strong>
+<strong>训练后的路由器：任务通过 75/100，对比全程 Opus 74/100；API 成本下降 53%。</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
@@ -24,12 +24,12 @@
 <a href="#工作原理">工作原理</a> ·
 <a href="#faq">FAQ</a>
 
-| 全程 Opus | UncommonRoute | 省下 |
+| 全程 Opus | UncommonRoute（训练后） | 省下 |
 |---:|---:|---:|
 | 74 / 100 任务通过 | **75 / 100 任务通过** | 质量持平 |
 | $54.73 API 成本 | **$25.66 API 成本** | **−53%** |
 
-<sub>数据来自 <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a> 的 100 个 held-out SWE-bench Verified case。复现命令见下文。</sub>
+<sub>数据来自训练后的 UncommonRoute 路由器在 <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a> 100 个 held-out SWE-bench Verified case 上的结果。说明见下文。</sub>
 
 </div>
 
@@ -182,25 +182,27 @@ UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进
 
 ## Benchmark
 
-UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench) 上评测。该评测包含 SWE-Bench、BFCL、mtRAG、QMSum、PinchBench 的 520 个实例，共 970 条路由器可见的任务前缀，并带有执行验证过的目标档位标签。端到端验证使用一组 100 个 held-out SWE-bench Verified case。
+UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench) 上评测。该评测包含 SWE-Bench、BFCL、mtRAG、QMSum、PinchBench 的 520 个实例，共 970 条路由器可见的任务前缀，并带有执行验证过的目标档位标签。TwinRouterBench 使用四个内部档位（`low` / `mid` / `mid_high` / `high`）评分；产品界面里展示为 `simple` / `medium` / `complex`。
+
+下面的端到端验证使用一组 100 个 held-out SWE-bench Verified case，报告的是论文 Table 3 里的训练后路由器结果。
 
 ### 任务通过率持平，API 成本少 53%
 
 | 策略 | 任务通过 | API 成本 | vs 全程 Opus |
 |---|:---:|:---:|:---:|
 | 全程 Opus 4.6 | 74 / 100 | $54.73 | — |
-| **UncommonRoute** | **75 / 100** | **$25.66** | **−53%** |
+| **UncommonRoute（训练后）** | **75 / 100** | **$25.66** | **−53%** |
 
-也就是说，不是“少花钱但少做成任务”。在这组任务里，UncommonRoute 的任务通过数与全程 Opus 持平，实际 API 调用成本下降 53%。
+也就是说，不是“少花钱但少做成任务”。在这组任务里，训练后的 UncommonRoute 路由器任务通过数与全程 Opus 持平，实际 API 调用成本下降 53%。
 
 这里的“任务通过”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含论文 Table 3 里的 penalty cost。
 
 ### 复现
 
+完整复现 Table 3 需要 TwinRouterBench 的发布包，因为它依赖锁定的 dynamic split、模型池、价格文件和 scorer。这个 repo 提供本地路由器本身，以及路由开销检查：
+
 ```bash
 python -m pip install -e ".[dev]"
-python -m pip install "git+https://github.com/CommonstackAI/TwinRouterBench.git"
-python scripts/eval_v2.py --split holdout
 python scripts/bench_overhead.py --iterations 50 --json
 ```
 

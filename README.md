@@ -8,7 +8,7 @@
 
 Plug it into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and routes each request to the right model.
 
-<strong>75/100 tasks solved vs 74/100 with Opus-only, at 53% lower API cost.</strong>
+<strong>Trained router: 75/100 tasks solved vs 74/100 with Opus-only, at 53% lower API cost.</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
@@ -24,12 +24,12 @@ Plug it into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and 
 <a href="#how-it-works">How It Works</a> ·
 <a href="#faq">FAQ</a>
 
-| | Opus-only | UncommonRoute | Saved |
+| | Opus-only | UncommonRoute (trained) | Saved |
 |---|:---:|:---:|:---:|
 | Tasks solved | 74 / 100 | **75 / 100** | Matched |
 | API cost | $54.73 | **$25.66** | **-53%** |
 
-<sub>Numbers from a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Reproduction commands below.</sub>
+<sub>Numbers from the trained UncommonRoute router on a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Details below.</sub>
 
 </div>
 
@@ -182,25 +182,27 @@ UncommonRoute also learns from local feedback: high-confidence agreement grows t
 
 ## Benchmark
 
-UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. The end-to-end validation below uses a 100-case held-out SWE-bench Verified split.
+UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. TwinRouterBench scores four internal tiers (`low` / `mid` / `mid_high` / `high`); the product UI presents routing decisions as `simple` / `medium` / `complex`.
+
+The end-to-end validation below uses a 100-case held-out SWE-bench Verified split and reports the trained-router row from Table 3 of the paper.
 
 ### Matched task quality, 53% lower API cost
 
 | Policy | Tasks solved | API cost | vs Opus-only |
 |---|:---:|:---:|:---:|
 | Opus 4.6 only | 74 / 100 | $54.73 | — |
-| **UncommonRoute** | **75 / 100** | **$25.66** | **-53%** |
+| **UncommonRoute (trained)** | **75 / 100** | **$25.66** | **-53%** |
 
-Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, UncommonRoute matched Opus-only on tasks solved while cutting realized API spend by 53%.
+Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, the trained UncommonRoute router matched Opus-only on tasks solved while cutting realized API spend by 53%.
 
 "Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 3 of the paper.
 
 ### Reproduce
 
+Full Table 3 reproduction lives in the TwinRouterBench release package because it needs the locked dynamic split, model pool, pricing files, and scorer. This repo includes the local router and an overhead check:
+
 ```bash
 python -m pip install -e ".[dev]"
-python -m pip install "git+https://github.com/CommonstackAI/TwinRouterBench.git"
-python scripts/eval_v2.py --split holdout
 python scripts/bench_overhead.py --iterations 50 --json
 ```
 

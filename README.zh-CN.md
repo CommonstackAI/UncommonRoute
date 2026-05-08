@@ -4,11 +4,11 @@
 
 <h1>UncommonRoute</h1>
 
-**任务完成质量不变，API 花费减少一半。**
+**API 花费减半，任务完成质量不打折。**
 
 接入 Claude Code、Cursor、Codex 或 OpenAI SDK。UncommonRoute 在本地运行，把每次请求路由到最合适的模型。
 
-<strong>训练后的路由器：任务通过 75/100，对比全程 Opus 74/100；API 成本下降 53%。</strong>
+<strong>训练后的路由器完成 75/100 个任务，全程 Opus 完成 74/100；API 成本下降 53%。</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
@@ -17,17 +17,17 @@
 
 <br><br>
 
-<a href="#30-秒跑起来">Quickstart</a> ·
+<a href="#30-秒跑起来">30 秒上手</a> ·
 <a href="#uncommonroute-如何帮你省钱">省钱逻辑</a> ·
 <a href="#可视化路由">Dashboard</a> ·
 <a href="#benchmark">Benchmark</a> ·
 <a href="#工作原理">工作原理</a> ·
 <a href="#faq">FAQ</a>
 
-| 全程 Opus | UncommonRoute（训练后） | 省下 |
-|---:|---:|---:|
-| 74 / 100 任务通过 | **75 / 100 任务通过** | 质量持平 |
-| $54.73 API 成本 | **$25.66 API 成本** | **−53%** |
+| | 全程 Opus | UncommonRoute（训练后） | 省下 |
+|---|:---:|:---:|:---:|
+| 任务完成 | 74 / 100 | **75 / 100** | 持平 |
+| API 成本 | $54.73 | **$25.66** | **−53%** |
 
 <sub>数据来自训练后的 UncommonRoute 路由器在 <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a> 100 个 held-out SWE-bench Verified case 上的结果。说明见下文。</sub>
 
@@ -80,7 +80,7 @@ uncommon-route doctor
 "设计一个分布式调度器"             -> complex
 ```
 
-simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的模型，complex 请求再调用你配置里的最强模型。所有判断都按请求独立完成，不会把整个会话固定在同一个模型上。
+simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的模型，complex 请求才走你配置里的最强模型。所有判断都按请求独立完成，不会把整个会话固定在同一个模型上。
 
 ---
 
@@ -88,7 +88,7 @@ simple 请求优先走轻量模型，medium 请求走能力和成本更匹配的
 
 如果你每天用 AI agent 写代码，很容易遇到一种浪费：改错字、补注释、运行简单测试，也默认调用最贵的模型。
 
-UncommonRoute 的边界很清楚：它不替代 Claude Code、Cursor 或 Codex，也不改变模型本身的能力。它专注于一件事：为每次请求选择最匹配的模型。
+UncommonRoute 只做一件事：它不替代 Claude Code、Cursor 或 Codex，也不改变模型本身的能力；它只负责为每次请求选择最匹配的模型。
 
 > 这个请求，最适合交给哪个模型？
 
@@ -111,9 +111,9 @@ Dashboard 主要解决五件事：
 - 按会话查看每一步路由决策，包括模型、延迟、成本和信号读数。
 - 看清楚哪些复杂度分类、哪些模型真正消耗了预算。
 - 调整路由策略、fallback、预算上限、provider key 和模型池。
-- 把路由结果标成 `too strong` / `just right` / `too weak`；这些标注会训练本地模型覆盖层，不会覆盖基础模型。
+- 把路由结果标成 `too strong` / `just right` / `too weak`；这些标注会训练一个本地适配层，它叠在基础分类器之上，不会改写基础模型。
 
-Feedback 是长期使用里很有价值的一块。如果某次路由太激进或太保守，你可以直接在 Dashboard 里纠正。训练在本地完成，基础模型保持不变，模型覆盖层也可以随时回滚。
+Feedback 是长期使用里很有价值的一块。如果某次路由太激进或太保守，你可以直接在 Dashboard 里纠正。训练在本地完成，基础模型保持不变，本地适配层可以随时回滚。
 
 ---
 
@@ -147,7 +147,7 @@ resp = client.chat.completions.create(
 
 ---
 
-## 为什么选 UncommonRoute
+## 核心亮点
 
 | 能力 | 结果 |
 |---|---|
@@ -157,7 +157,7 @@ resp = client.chat.completions.create(
 | 可解释决策 | 每次路由都能看到复杂度分类、置信度、信号读数、模型和成本 |
 | 可调整策略 | 支持 `auto` / `fast` / `best`，也支持按 simple / medium / complex 配置 override 和 fallback |
 | 预算封顶 | 可以设置请求级、小时级或每日 API 花费上限 |
-| 本地训练 | Feedback 会更新本地模型覆盖层；基础模型不会被覆盖，也可以随时回滚 |
+| 本地训练 | Feedback 会更新本地适配层；基础模型不会被改写，适配层可以随时回滚 |
 | 即插即用 | Claude Code、Cursor、Codex、OpenAI SDK、OpenClaw 都不用改业务代码 |
 
 ---
@@ -169,12 +169,12 @@ resp = client.chat.completions.create(
 | 信号 | 看什么 | 运行说明 |
 |---|---|---:|
 | Metadata | 对话结构、工具调用、上下文深度 | 很轻 |
-| Embedding | 用户请求、最近 agent 状态和元数据上的 BGE 分类器；不确定时退到 KNN | 取决于本地运行时资产和缓存状态 |
+| Embedding | 在用户请求、最近 agent 状态和元数据上运行 BGE 分类器；不确定时退到 KNN | 取决于本地运行时资产和缓存状态 |
 | Structural | 文本复杂度、对话复杂度；只在需要时激活，其余时候 shadow 跟踪 | 很轻 |
 
 三个信号投票后，由 ensemble 决定复杂度分类。Router 再根据分类、能力、transport、upstream 可用性和价格，在匹配的候选里选择成本更低的可用模型。上游价格未知时按保守估计处理。
 
-路由是**按请求 / 按 agent step**做的，不绑定整个会话。协议层限制仍然会遵守，例如 Anthropic thinking continuation 这类场景不会被随意打断。
+路由是**按请求 / 按 agent step**做的，不绑定整个会话。路由器仍然会遵守协议层约束，例如 Anthropic thinking continuation 不会被随意打断。
 
 UncommonRoute 也会从本地反馈里学习：高置信、一致的样本会进入 embedding 索引；低置信预测会向上升档，避免把复杂任务路由到能力不足的模型。
 
@@ -186,16 +186,16 @@ UncommonRoute 在 [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterB
 
 下面的端到端验证使用一组 100 个 held-out SWE-bench Verified case，报告的是论文 Table 3 里的训练后路由器结果。
 
-### 任务通过率持平，API 成本少 53%
+### 任务完成数持平，API 成本少 53%
 
-| 策略 | 任务通过 | API 成本 | vs 全程 Opus |
+| 策略 | 任务完成 | API 成本 | vs 全程 Opus |
 |---|:---:|:---:|:---:|
 | 全程 Opus 4.6 | 74 / 100 | $54.73 | — |
 | **UncommonRoute（训练后）** | **75 / 100** | **$25.66** | **−53%** |
 
-也就是说，不是“少花钱但少做成任务”。在这组任务里，训练后的 UncommonRoute 路由器任务通过数与全程 Opus 持平，实际 API 调用成本下降 53%。
+也就是说，不是“少花钱但少做成任务”。在这组任务里，训练后的 UncommonRoute 路由器任务完成数与全程 Opus 持平，实际 API 调用成本下降 53%。
 
-这里的“任务通过”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含论文 Table 3 里的 penalty cost。
+这里的“任务完成”表示 100 个 held-out SWE-bench Verified case 中成功解决的任务数；“API 成本”表示实际模型调用成本，不包含论文 Table 3 里的 penalty cost。
 
 ### 复现
 
@@ -208,7 +208,7 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ### 路由开销
 
-路由开销会受硬件、已安装的运行时资产、实际启用的信号影响。运行上面的命令可以得到当前 checkout 的 cold start，以及热进程下的 p50 / p90 / p99。
+路由开销会受硬件、已安装的运行时资产、实际启用的信号影响。运行上面的命令可以得到当前版本的 cold start，以及热进程下的 p50 / p90 / p99。
 
 ---
 
@@ -404,7 +404,7 @@ UncommonRoute 不是一味追求便宜。不确定或风险高的请求会向更
 <details>
 <summary><strong>Feedback 真的会训练东西吗？</strong></summary>
 
-会。Feedback 会更新本地模型覆盖层，带标注的本地 trace 也可以用于校准运行时置信度。基础模型不会被覆盖，模型覆盖层可以随时回滚。
+会。Feedback 会更新本地适配层，带标注的本地 trace 也可以用于校准运行时置信度。基础模型不会被改写，适配层可以随时回滚。
 
 </details>
 

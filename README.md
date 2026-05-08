@@ -6,9 +6,9 @@
 
 **Cut your API bill in half without giving up performance.**
 
-Plug it into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and routes each request to the right model.
+UncommonRoute plugs into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and routes each request to the right model.
 
-<strong>Trained router: 75/100 tasks solved vs 74/100 with Opus-only, at 53% lower API cost.</strong>
+<strong>On a held-out 100-case SWE-bench Verified split, the trained router solved 75/100 tasks vs 74/100 with Opus-only, at 53% lower API cost.</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
@@ -27,7 +27,7 @@ Plug it into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and 
 | | Opus-only | UncommonRoute (trained) | Saved |
 |---|:---:|:---:|:---:|
 | Tasks solved | 74 / 100 | **75 / 100** | Matched |
-| API cost | $54.73 | **$25.66** | **-53%** |
+| API cost | $54.73 | **$25.66** | **−53%** |
 
 <sub>Numbers from the trained UncommonRoute router on a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Details below.</sub>
 
@@ -98,7 +98,7 @@ Routing happens locally and independently for each agent step. You can inspect e
 
 ## Visual Routing
 
-UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, what it cost, and what you can tune next.
+UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, what it cost, and what's adjustable.
 
 ```bash
 uncommon-route serve
@@ -111,9 +111,9 @@ With the Dashboard, you can:
 - Inspect each routed request per session, including model, latency, cost, and signal readout.
 - See which complexity classes and models are driving your spend.
 - Tune routing policy, fallbacks, budgets, provider keys, and model pools.
-- Rate decisions as `too strong`, `just right`, or `too weak`; those labels train a local model overlay without touching the base model.
+- Rate decisions as `too strong`, `just right`, or `too weak`; those labels train a thin local overlay on top of the base classifier without touching the base model.
 
-That Feedback loop is the part that matters after day one. If UncommonRoute routes something too aggressively or too conservatively, you can correct it in the Dashboard. Training happens locally, the base model stays intact, and you can roll back the overlay anytime.
+That Feedback loop is the part that matters after day one. If UncommonRoute routes something too aggressively or too conservatively, you can correct it in the Dashboard. Training happens locally, the base model stays intact, and the overlay can be rolled back anytime.
 
 ---
 
@@ -157,7 +157,7 @@ resp = client.chat.completions.create(
 | Explainable decisions | See complexity, confidence, signal readout, selected model, and cost for each route |
 | Adjustable policy | Use `auto` / `fast` / `best`, or override simple / medium / complex with primary and fallback models |
 | Spend caps | Set per-request, hourly, or daily API spend limits |
-| Local training | Feedback updates a local model overlay; the base model is never overwritten and can be restored anytime |
+| Local training | Feedback updates a local model overlay. The base model is never overwritten, and the overlay can be rolled back anytime |
 | Drop-in integration | Claude Code, Cursor, Codex, OpenAI SDK, and OpenClaw work without application code changes |
 
 ---
@@ -191,7 +191,7 @@ The end-to-end validation below uses a 100-case held-out SWE-bench Verified spli
 | Policy | Tasks solved | API cost | vs Opus-only |
 |---|:---:|:---:|:---:|
 | Opus 4.6 only | 74 / 100 | $54.73 | — |
-| **UncommonRoute (trained)** | **75 / 100** | **$25.66** | **-53%** |
+| **UncommonRoute (trained)** | **75 / 100** | **$25.66** | **−53%** |
 
 Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, the trained UncommonRoute router matched Opus-only on tasks solved while cutting realized API spend by 53%.
 
@@ -208,7 +208,7 @@ python scripts/bench_overhead.py --iterations 50 --json
 
 ### Routing Overhead
 
-Routing overhead depends on hardware, installed runtime assets, and which signals are active. Run the command above to report cold start plus warm-process p50 / p90 / p99 for the current checkout.
+Routing overhead depends on hardware, installed runtime assets, and which signals are active. Run the command above to measure cold start plus warm-process p50 / p90 / p99 in your environment.
 
 ---
 
@@ -404,7 +404,7 @@ Yes. You can use Commonstack as a managed upstream or register your own provider
 <details>
 <summary><strong>Does feedback train anything?</strong></summary>
 
-Yes. Feedback updates a local model overlay and labeled traces can calibrate runtime confidence. The base model is never overwritten, and you can roll back the overlay.
+Yes. Feedback updates a local model overlay, and labeled traces can calibrate runtime confidence. The base model is never overwritten, and the overlay can be rolled back anytime.
 
 </details>
 

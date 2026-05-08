@@ -6,9 +6,9 @@
 
 **Cut your API bill in half without giving up performance.**
 
-UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs locally, analyzes task complexity, conversation structure, tool use, available models, and budget constraints, then routes each request to the right model for the job.
+Plug it into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and routes each request to the right model.
 
-<strong>On a held-out 100-case SWE-bench Verified split, UncommonRoute solved 75/100 tasks vs 74/100 for Opus-only. With task quality matched, API cost dropped by 53%.</strong>
+<strong>75/100 tasks solved vs 74/100 with Opus-only, at 53% lower API cost.</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>

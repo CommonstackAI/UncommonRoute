@@ -6,9 +6,9 @@
 
 **任务完成质量不变，API 花费减少一半。**
 
-UncommonRoute 接入 Claude Code、Cursor、Codex 和 OpenAI SDK，本地分析任务复杂度、上下文结构、工具调用、可用模型池和预算限制，再把请求路由到最合适的模型。
+接入 Claude Code、Cursor、Codex 或 OpenAI SDK。UncommonRoute 在本地运行，把每次请求路由到最合适的模型。
 
-<strong>在 100 个 held-out SWE-bench Verified 任务上，UncommonRoute 任务通过数 75/100，对比全程 Opus 74/100。任务完成质量不变的同时，API 成本下降 53%。</strong>
+<strong>任务通过 75/100，对比全程 Opus 74/100；API 成本下降 53%。</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>

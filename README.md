@@ -6,9 +6,9 @@
 
 **Cut your API bill in half without giving up performance.**
 
-UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs locally, analyzes task complexity, conversation structure, tool use, available models, and budget constraints, then routes each request to the right model for the job.
+UncommonRoute plugs into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs locally and routes each request to the right model.
 
-<strong>On a held-out 100-case SWE-bench Verified split, UncommonRoute solved 75/100 tasks vs 74/100 for Opus-only. With task quality matched, API cost dropped by 53%.</strong>
+<strong>On a held-out 100-case SWE-bench Verified split, the trained router solved 75/100 tasks vs 74/100 with Opus-only, at 53% lower API cost.</strong>
 
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
@@ -18,26 +18,18 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, and the OpenAI SDK. It runs
 <br><br>
 
 <a href="#quick-start">Quick Start</a> ·
+<a href="#how-uncommonroute-saves-money">Savings</a> ·
 <a href="#visual-routing">Dashboard</a> ·
-<a href="#supported-clients">Clients</a> ·
 <a href="#benchmark">Benchmark</a> ·
-<a href="#privacy">Privacy</a>
+<a href="#how-it-works">How It Works</a> ·
+<a href="#faq">FAQ</a>
 
-<br><br>
-
-```bash
-pipx install uncommon-route
-uncommon-route init
-```
-
-<br>
-
-| | Opus-only | UncommonRoute | Saved |
+| | Opus-only | UncommonRoute (trained) | Saved |
 |---|:---:|:---:|:---:|
 | Tasks solved | 74 / 100 | **75 / 100** | Matched |
-| API cost | $54.73 | **$25.66** | **-53%** |
+| API cost | $54.73 | **$25.66** | **−53%** |
 
-<sub>Numbers from a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Reproduction commands below.</sub>
+<sub>Numbers from the trained UncommonRoute router on a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Details below.</sub>
 
 </div>
 
@@ -76,28 +68,52 @@ uncommon-route doctor
 
 ---
 
+## How UncommonRoute Saves Money
+
+The savings don't come from using less AI. They come from not sending easy requests to frontier models.
+
+```text
+"hello"                         -> simple
+"fix a typo in the README"       -> simple
+"find and fix this failing test" -> medium
+"refactor this 500-line module"  -> medium / complex
+"design a distributed scheduler" -> complex
+```
+
+Simple requests go to lightweight models. Medium requests go to capable mid-tier models. Complex requests escalate to the strongest model you've configured. Each decision is made per request, so a single conversation isn't tied to one model.
+
+---
+
+## Why UncommonRoute
+
+If you use AI agents for coding every day, a lot of that spend goes toward work that doesn't need the most expensive model: typo fixes, small edits, simple test runs, short explanations.
+
+UncommonRoute does one thing. It doesn't replace Claude Code, Cursor, or Codex, and doesn't try to make cheaper models smarter. It focuses on one decision:
+
+> Which model is the right fit for this request?
+
+Routing happens locally and independently for each agent step. You can inspect every decision in the Dashboard instead of trusting a black-box proxy.
+
+---
+
 ## Visual Routing
 
-UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, its actual or estimated cost, and how to tune the policy.
+UncommonRoute isn't just a pass-through proxy. The Dashboard records and explains every routing decision: whether the request was classified as simple, medium, or complex, which model was selected, what it cost, and what's adjustable.
 
 ```bash
 uncommon-route serve
 # -> http://localhost:8403/dashboard/
 ```
 
-| Page | What it does |
-|---|---|
-| Home | Live requests, complexity distribution, model choices, and cost changes |
-| Playground | Type a prompt and preview complexity, confidence, estimated cost, and signal readout |
-| Explain | Inspect each routing decision per session, including model, latency, and cost |
-| Activity | See request complexity, served quality, transport paths, capability lanes, model usage, and cost distribution |
-| Routing | Configure `auto` / `fast` / `best`, or set primary and fallback models per complexity tier |
-| Models | Browse the active model pool, providers, capability tags, and input / output prices |
-| Connections | Manage the primary upstream and BYOK provider keys, and verify connection status |
-| Budget | Set per-request, hourly, or daily spend limits |
-| Feedback | Mark routes as `too strong`, `just right`, or `too weak` to improve the local classifier |
+With the Dashboard, you can:
 
-To kick the tires: type a prompt in Playground, inspect the predicted complexity, confidence, and cost estimate, then open Explain / Activity to trace real routing decisions.
+- Preview how a prompt will be classified before sending it.
+- Inspect each routed request per session, including model, latency, cost, and signal readout.
+- See which complexity classes and models are driving your spend.
+- Tune routing policy, fallbacks, budgets, provider keys, and model pools.
+- Rate decisions as `too strong`, `just right`, or `too weak`; those labels train a thin local overlay on top of the base classifier without touching the base model.
+
+That Feedback loop is the part that matters after day one. If UncommonRoute routes something too aggressively or too conservatively, you can correct it in the Dashboard. Training happens locally, the base model stays intact, and the overlay can be rolled back anytime.
 
 ---
 
@@ -131,34 +147,6 @@ resp = client.chat.completions.create(
 
 ---
 
-## How UncommonRoute Saves Money
-
-The savings don't come from using less AI. They come from not sending easy requests to frontier models.
-
-```text
-"hello"                         -> simple
-"fix a typo in the README"       -> simple
-"find and fix this failing test" -> medium
-"refactor this 500-line module"  -> medium / complex
-"design a distributed scheduler" -> complex
-```
-
-Simple requests go to lightweight models. Medium requests go to capable mid-tier models. Complex requests escalate to the strongest model you've configured. Each decision is made per request, so a single conversation isn't tied to one model.
-
----
-
-## Why UncommonRoute
-
-If you use AI agents for coding every day, a lot of that spend goes toward work that doesn't need the most expensive model: typo fixes, small edits, simple test runs, short explanations.
-
-UncommonRoute does one thing. It doesn't replace Claude Code, Cursor, or Codex, and doesn't try to make cheaper models smarter. It focuses on one decision:
-
-> Which model is the right fit for this request?
-
-Routing happens locally and independently for each agent step. You can inspect every decision in the Dashboard instead of trusting a black-box proxy.
-
----
-
 ## Highlights
 
 | Capability | Result |
@@ -169,63 +157,68 @@ Routing happens locally and independently for each agent step. You can inspect e
 | Explainable decisions | See complexity, confidence, signal readout, selected model, and cost for each route |
 | Adjustable policy | Use `auto` / `fast` / `best`, or override simple / medium / complex with primary and fallback models |
 | Spend caps | Set per-request, hourly, or daily API spend limits |
-| Local feedback | Mark routes as too strong, just right, or too weak to improve the classifier locally |
+| Local training | Feedback updates a local model overlay. The base model is never overwritten, and the overlay can be rolled back anytime |
 | Drop-in integration | Claude Code, Cursor, Codex, OpenAI SDK, and OpenClaw work without application code changes |
+
+---
+
+## How It Works
+
+Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
+
+| Signal | What it looks at | Runtime note |
+|---|---|---:|
+| Metadata | Conversation structure, tool use, context depth | Cheap |
+| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | Depends on local runtime assets and cache state |
+| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | Cheap |
+
+The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
+
+Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
+
+UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
 
 ---
 
 ## Benchmark
 
-UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. The end-to-end validation below uses a 100-case held-out SWE-bench Verified split.
+UncommonRoute is evaluated on [TwinRouterBench](https://github.com/CommonstackAI/TwinRouterBench): 970 router-visible prefixes from 520 instances across SWE-Bench, BFCL, mtRAG, QMSum, and PinchBench, with execution-verified target tier labels. TwinRouterBench scores four internal tiers (`low` / `mid` / `mid_high` / `high`); the product UI presents routing decisions as `simple` / `medium` / `complex`.
+
+The end-to-end validation below uses a 100-case held-out SWE-bench Verified split and reports the trained-router row from Table 3 of the paper.
 
 ### Matched task quality, 53% lower API cost
 
 | Policy | Tasks solved | API cost | vs Opus-only |
 |---|:---:|:---:|:---:|
 | Opus 4.6 only | 74 / 100 | $54.73 | — |
-| **UncommonRoute** | **75 / 100** | **$25.66** | **-53%** |
+| **UncommonRoute (trained)** | **75 / 100** | **$25.66** | **−53%** |
 
-Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, UncommonRoute matched Opus-only on tasks solved while cutting realized API spend by 53%.
+Put another way: this isn't a "spend less, solve fewer tasks" trade-off. On this split, the trained UncommonRoute router matched Opus-only on tasks solved while cutting realized API spend by 53%.
 
-"Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 4.
+"Tasks solved" means the number of successfully resolved tasks out of 100 held-out SWE-bench Verified cases. "API cost" is realized model-call spend and doesn't include the penalty cost reported in Table 3 of the paper.
 
 ### Reproduce
 
+Full Table 3 reproduction lives in the TwinRouterBench release package because it needs the locked dynamic split, model pool, pricing files, and scorer. This repo includes the local router and an overhead check:
+
 ```bash
 python -m pip install -e ".[dev]"
-python -m pip install "git+https://github.com/CommonstackAI/TwinRouterBench.git"
-python scripts/eval_v2.py --split holdout
 python scripts/bench_overhead.py --iterations 50 --json
 ```
 
 ### Routing Overhead
 
-Local CPU, warm process:
-
-| Metric | Latency |
-|---|:---:|
-| p50 | 25.6ms |
-| p90 | 32.1ms |
-
-Cold start loads the embedding model and can take a few seconds. After warm-up, a single `route()` call typically takes tens of milliseconds.
+Routing overhead depends on hardware, installed runtime assets, and which signals are active. Run the command above to measure cold start plus warm-process p50 / p90 / p99 in your environment.
 
 ---
 
-## Privacy
+## Who It's For
 
-Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
-
-```bash
-uncommon-route telemetry status
-```
-
-Diagnostic exports are local by default:
-
-```bash
-uncommon-route support bundle
-```
-
-The redacted support bundle is written to `~/.uncommon-route/support/`. It leaves your machine only if you choose to share it.
+- You use Claude Code, Cursor, Codex, or another coding agent every day.
+- Most of your spend goes to frontier models, but many requests don't need that tier.
+- You want lower API cost without sending prompts to an extra hosted router.
+- You need routing at request granularity, not one model choice for the entire session.
+- You want routing that is explainable, adjustable, and feedback-driven.
 
 ---
 
@@ -239,40 +232,6 @@ uncommon-route spend status
 ```
 
 You can also configure per-request, hourly, or daily limits in the Dashboard. Once a limit is reached, requests fall back to the lowest-cost available tier instead of failing outright.
-
----
-
-## How It Works
-
-Each request runs through three local signals. The router first classifies task complexity, then picks the best model from your configured upstream.
-
-| Signal | What it looks at | Typical overhead |
-|---|---|---:|
-| Metadata | Conversation structure, tool use, context depth | <1ms |
-| Embedding | BGE classifier over the request, recent agent state, and metadata; KNN fallback when uncertain | ~25-35ms |
-| Structural | Text and conversation complexity; active only when needed, shadow-tracked otherwise | <1ms |
-
-The signals vote, and the ensemble decides the complexity class. The router then weighs capabilities, transport, upstream availability, and price. From the matching candidates, it picks the lowest-cost option. Unknown upstream pricing is handled conservatively.
-
-Routing is **per request / per agent step**. The session isn't pinned to one model. Protocol constraints, such as Anthropic thinking continuations, are still respected.
-
-UncommonRoute also learns from local feedback: high-confidence agreement grows the embedding index, while low-confidence predictions escalate instead of silently sending complex work to an underpowered model.
-
----
-
-## Who It's For
-
-- You use Claude Code, Cursor, Codex, or another coding agent every day.
-- Most of your spend goes to frontier models, but many requests don't need that tier.
-- You want lower API cost without sending prompts to an extra hosted router.
-- You need routing at request granularity, not one model choice for the entire session.
-- You want routing that is explainable, adjustable, and feedback-driven.
-
-## Who It's Not For
-
-- You only call LLMs occasionally and your bill is already small.
-- You expect a router to make low-cost models fundamentally more capable. UncommonRoute doesn't make that claim.
-- You want every request to use the strongest model, no matter what. You can use `uncommon-route/best`, but the savings will be smaller.
 
 ---
 
@@ -330,6 +289,24 @@ Supported providers: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `min
 
 ---
 
+## Privacy
+
+Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
+
+```bash
+uncommon-route telemetry status
+```
+
+Diagnostic exports are local by default:
+
+```bash
+uncommon-route support bundle
+```
+
+The redacted support bundle is written to `~/.uncommon-route/support/`. It leaves your machine only if you choose to share it.
+
+---
+
 ## Diagnostics
 
 If you hit routing errors, upstream failures, or need to file an issue, export a redacted diagnostics bundle:
@@ -384,6 +361,52 @@ cd UncommonRoute
 pip install -e ".[dev]"
 python -m pytest tests -v
 ```
+
+---
+
+## FAQ
+
+<details>
+<summary><strong>Will this hurt quality?</strong></summary>
+
+UncommonRoute doesn't blindly chase the cheapest model. Uncertain or high-risk requests escalate to stronger models, and the held-out SWE-bench Verified result above shows matched task quality on that split.
+
+</details>
+
+<details>
+<summary><strong>Where do my prompts go?</strong></summary>
+
+Routing runs locally. Your prompt is sent to the upstream provider you configure, not to a separate hosted routing service.
+
+</details>
+
+<details>
+<summary><strong>What happens when the router is unsure?</strong></summary>
+
+It falls back conservatively: low-confidence decisions escalate instead of quietly sending complex work to an underpowered model.
+
+</details>
+
+<details>
+<summary><strong>Can I override the routing?</strong></summary>
+
+Yes. Use `auto`, `fast`, or `best`, or configure primary and fallback models for simple / medium / complex requests.
+
+</details>
+
+<details>
+<summary><strong>Can I use my own API keys?</strong></summary>
+
+Yes. You can use Commonstack as a managed upstream or register your own provider keys with BYOK.
+
+</details>
+
+<details>
+<summary><strong>Does feedback train anything?</strong></summary>
+
+Yes. Feedback updates a local model overlay, and labeled traces can calibrate runtime confidence. The base model is never overwritten, and the overlay can be rolled back anytime.
+
+</details>
 
 ---
 

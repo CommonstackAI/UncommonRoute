@@ -2541,6 +2541,9 @@ def _trace_decision_card(trace: "RequestTrace") -> dict[str, Any]:
         "capability_lane": trace.capability_lane,
         "raw_confidence": trace.raw_confidence,
         "latency_us": trace.latency_us,
+        "route_latency_ms": trace.route_latency_ms if trace.route_latency_ms > 0 else trace.latency_us / 1000.0,
+        "upstream_elapsed_ms": trace.upstream_elapsed_ms,
+        "first_token_ms": trace.first_token_ms,
         "estimated_cost": trace.estimated_cost,
         "route_reasoning": trace.route_reasoning,
         "feature_tags": list(trace.feature_tags or []),
@@ -3411,6 +3414,9 @@ def create_app(
             "avg_confidence": round(s.avg_confidence, 3),
             "avg_savings": round(s.avg_savings, 3),
             "avg_latency_ms": round(s.avg_latency_us / 1000.0, 3),
+            "avg_route_latency_ms": round(s.avg_route_latency_ms, 3),
+            "avg_upstream_elapsed_ms": round(s.avg_upstream_elapsed_ms, 3),
+            "avg_first_token_ms": round(s.avg_first_token_ms, 3),
             "avg_input_reduction_ratio": round(s.avg_input_reduction_ratio, 3),
             "avg_cache_hit_ratio": round(s.avg_cache_hit_ratio, 3),
             "total_estimated_cost": round(s.total_estimated_cost, 6),
@@ -4535,10 +4541,15 @@ def create_app(
                 model=selected_model,
                 mode=mode_value,
             )
-            fallback_models = [
-                fb.model for fb in decision.fallback_chain
-                if fb.model != selected_model and not _is_virtual_model_name(fb.model)
-            ]
+            fallback_models = []
+            for fb in decision.fallback_chain:
+                fb_model = fb.model
+                if fb_model == selected_model or _is_virtual_model_name(fb_model):
+                    continue
+                if _mapper.discovered and _mapper.is_available(fb_model) is False:
+                    logger.info("Skipping unavailable fallback model: %s", fb_model)
+                    continue
+                fallback_models.append(fb_model)
         else:
             selected_model = model
             tier_value = ""
@@ -4766,6 +4777,42 @@ def create_app(
             )
 
         current_attempt_trace: dict[str, Any] | None = None
+        attempt_start_ns: dict[int, int] = {}
+
+        def _elapsed_ms_since(start_ns: int | None) -> float:
+            if start_ns is None:
+                return 0.0
+            return max(0.0, (time.perf_counter_ns() - start_ns) / 1_000_000.0)
+
+        def _current_attempt_elapsed_ms() -> float:
+            if current_attempt_trace is None:
+                return 0.0
+            attempt_index = int(current_attempt_trace.get("attempt_index") or 0)
+            return _elapsed_ms_since(attempt_start_ns.get(attempt_index))
+
+        def _attempt_total_upstream_elapsed_ms() -> float:
+            values = []
+            for attempt_trace in attempts_payload:
+                try:
+                    elapsed = float(attempt_trace.get("upstream_elapsed_ms") or 0.0)
+                except (TypeError, ValueError):
+                    elapsed = 0.0
+                if elapsed > 0:
+                    values.append(elapsed)
+            return sum(values)
+
+        def _attempt_first_token_ms() -> float:
+            for attempt_trace in reversed(attempts_payload):
+                if not attempt_trace.get("success"):
+                    continue
+                for key in ("first_token_ms", "provider_ttft_ms"):
+                    try:
+                        value = float(attempt_trace.get(key) or 0.0)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    if value > 0:
+                        return value
+            return 0.0
 
         def _begin_attempt_trace(
             attempt_payload: dict[str, Any],
@@ -4773,13 +4820,17 @@ def create_app(
             fallback_from: str | None = None,
         ) -> None:
             nonlocal current_attempt_trace
+            attempt_index = len(attempts_payload) + 1
+            attempt_start_ns[attempt_index] = time.perf_counter_ns()
             provider_name = ""
             if attempt_payload.get("provider_entry") is not None:
                 provider_name = str(getattr(attempt_payload["provider_entry"], "name", "") or "")
+            selected_attempt_model = str(attempt_payload["selected_model"])
+            resolved_attempt_model = str(attempt_payload["resolved_model"])
             current_attempt_trace = {
-                "attempt_index": len(attempts_payload) + 1,
-                "selected_model": attempt_payload["selected_model"],
-                "resolved_model": attempt_payload["resolved_model"],
+                "attempt_index": attempt_index,
+                "selected_model": selected_attempt_model,
+                "resolved_model": resolved_attempt_model,
                 "provider_name": provider_name,
                 "target_url": attempt_payload["target_chat_url"],
                 "requested_transport": attempt_payload["transport_decision"].requested_transport,
@@ -4790,6 +4841,16 @@ def create_app(
                 "cache_family": _cache_family_name(attempt_payload["cache_plan"]),
                 "cache_breakpoints": attempt_payload["cache_plan"].cache_breakpoints,
                 "fallback_from": fallback_from or "",
+                "fallback_reason": (
+                    f"{fallback_from} unavailable -> {resolved_attempt_model}"
+                    if fallback_from else ""
+                ),
+                "started_at": time.time(),
+                "response_headers_ms": 0.0,
+                "upstream_elapsed_ms": 0.0,
+                "first_token_ms": 0.0,
+                "provider_ttft_ms": 0.0,
+                "tokens_per_second": 0.0,
                 "status_code": 0,
                 "success": False,
                 "error_code": "",
@@ -4803,16 +4864,45 @@ def create_app(
             success: bool = False,
             error_code: str = "",
             error_message: str = "",
+            response_headers: bool = False,
         ) -> None:
             if current_attempt_trace is None:
                 return
+            elapsed_ms = _current_attempt_elapsed_ms()
             if status_code is not None:
                 current_attempt_trace["status_code"] = status_code
             current_attempt_trace["success"] = success
+            if response_headers and not current_attempt_trace.get("response_headers_ms"):
+                current_attempt_trace["response_headers_ms"] = elapsed_ms
+            current_attempt_trace["upstream_elapsed_ms"] = elapsed_ms
             if error_code:
                 current_attempt_trace["error_code"] = error_code
             if error_message:
                 current_attempt_trace["error_message"] = error_message
+
+        def _mark_current_attempt_first_token() -> None:
+            if current_attempt_trace is None:
+                return
+            try:
+                current = float(current_attempt_trace.get("first_token_ms") or 0.0)
+            except (TypeError, ValueError):
+                current = 0.0
+            if current <= 0:
+                current_attempt_trace["first_token_ms"] = _current_attempt_elapsed_ms()
+
+        def _apply_current_attempt_usage_timings(usage_metrics: UsageMetrics | None) -> None:
+            if current_attempt_trace is None or usage_metrics is None:
+                return
+            if usage_metrics.ttft_ms is not None and usage_metrics.ttft_ms > 0:
+                current_attempt_trace["provider_ttft_ms"] = float(usage_metrics.ttft_ms)
+                try:
+                    first_token_ms = float(current_attempt_trace.get("first_token_ms") or 0.0)
+                except (TypeError, ValueError):
+                    first_token_ms = 0.0
+                if first_token_ms <= 0:
+                    current_attempt_trace["first_token_ms"] = float(usage_metrics.ttft_ms)
+            if usage_metrics.tps is not None and usage_metrics.tps > 0:
+                current_attempt_trace["tokens_per_second"] = float(usage_metrics.tps)
 
         def _append_blocked_attempt(
             model_name: str,
@@ -4834,6 +4924,13 @@ def create_app(
                 "cache_family": "",
                 "cache_breakpoints": 0,
                 "fallback_from": "",
+                "fallback_reason": "",
+                "started_at": time.time(),
+                "response_headers_ms": 0.0,
+                "upstream_elapsed_ms": 0.0,
+                "first_token_ms": 0.0,
+                "provider_ttft_ms": 0.0,
+                "tokens_per_second": 0.0,
                 "status_code": 0,
                 "success": False,
                 "error_code": error_code,
@@ -5080,6 +5177,9 @@ def create_app(
             confidence_value = confidence if is_virtual else 1.0
             savings_value = savings if is_virtual else 0.0
             timestamp_value = time.time()
+            route_latency_ms = route_latency_us / 1000.0
+            upstream_elapsed_ms = _attempt_total_upstream_elapsed_ms()
+            first_token_ms = _attempt_first_token_ms()
 
             if is_virtual or status_code == 200:
                 completed_record = RouteRecord(
@@ -5106,6 +5206,9 @@ def create_app(
                     actual_cost=actual_cost,
                     savings=savings_value,
                     latency_us=route_latency_us,
+                    route_latency_ms=route_latency_ms,
+                    upstream_elapsed_ms=upstream_elapsed_ms,
+                    first_token_ms=first_token_ms,
                     usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
                     usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
                     cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
@@ -5210,6 +5313,9 @@ def create_app(
                 actual_cost=actual_cost,
                 savings=savings_value,
                 latency_us=route_latency_us,
+                route_latency_ms=route_latency_ms,
+                upstream_elapsed_ms=upstream_elapsed_ms,
+                first_token_ms=first_token_ms,
                 usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
                 usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
                 cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
@@ -5293,6 +5399,8 @@ def create_app(
                         )
                         stream_ttft_ms = stream_usage.ttft_ms
                         stream_tps = stream_usage.tps
+                    _apply_current_attempt_usage_timings(stream_usage)
+                    _complete_attempt_trace(status_code=200, success=True)
 
                     if is_virtual:
                         _model_experience.observe(
@@ -5344,6 +5452,12 @@ def create_app(
 
                 async def _record_stream_failure() -> None:
                     await _spend_reservation.release(request_id)
+                    _complete_attempt_trace(
+                        status_code=502,
+                        success=False,
+                        error_code="stream_failure",
+                        error_message="Streaming response interrupted",
+                    )
                     if is_virtual:
                         _model_experience.observe(
                             selected_model,
@@ -5378,6 +5492,12 @@ def create_app(
                         await _spend_reservation.release(request_id)
                     except Exception:
                         pass
+                    _complete_attempt_trace(
+                        status_code=499,
+                        success=False,
+                        error_code="client_disconnected",
+                        error_message="Client closed connection before stream finalized",
+                    )
                     _record_route_trace(
                         status_code=499,
                         streaming=True,
@@ -5414,7 +5534,11 @@ def create_app(
                         )
                         resp = await _open_stream_attempt(attempt_payload)
                         if resp.status_code < 400:
-                            _complete_attempt_trace(status_code=resp.status_code, success=True)
+                            _complete_attempt_trace(
+                                status_code=resp.status_code,
+                                success=True,
+                                response_headers=True,
+                            )
                             if index > 0 and fallback_source_model is not None:
                                 _apply_attempt(attempt_payload, fallback_from=fallback_source_model)
                             return resp, None
@@ -5476,6 +5600,7 @@ def create_app(
                         try:
                             async for chunk in stream_resp.aiter_bytes():
                                 stream_chunks.append(chunk)
+                                _mark_current_attempt_first_token()
                                 if converter is None:
                                     yield chunk
                                 else:
@@ -5518,6 +5643,7 @@ def create_app(
                         try:
                             async for chunk in stream_resp.aiter_bytes():
                                 stream_chunks.append(chunk)
+                                _mark_current_attempt_first_token()
                                 for ev in converter.feed(chunk):
                                     yield ev
                             for ev in converter.finish():
@@ -5548,6 +5674,7 @@ def create_app(
                     try:
                         async for chunk in stream_resp.aiter_bytes():
                             stream_chunks.append(chunk)
+                            _mark_current_attempt_first_token()
                             yield _normalize_reasoning_content_chunk(chunk)
                         await _record_stream_success(
                             parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
@@ -5637,6 +5764,7 @@ def create_app(
                         _set_header(debug_headers, "x-uncommon-route-cache-hit-ratio", round(usage_metrics.cache_hit_ratio, 4))
                         _set_header(debug_headers, "x-uncommon-route-cache-read", usage_metrics.cache_read_input_tokens)
                         _set_header(debug_headers, "x-uncommon-route-cache-write", usage_metrics.cache_write_input_tokens)
+                    _apply_current_attempt_usage_timings(usage_metrics)
 
             if is_virtual:
                 if resp.status_code == 200:

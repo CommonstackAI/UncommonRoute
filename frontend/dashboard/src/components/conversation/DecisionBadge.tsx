@@ -11,7 +11,7 @@ function shortModel(model?: string) {
 export default function DecisionBadge({ decision }: { decision: DecisionCard }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const latencyMs = (decision.latency_us / 1000).toFixed(0);
+  const routeMs = (decision.route_latency_ms ?? decision.latency_us / 1000).toFixed(0);
   const cost = `$${decision.estimated_cost.toFixed(4)}`;
   return (
     <>
@@ -25,7 +25,7 @@ export default function DecisionBadge({ decision }: { decision: DecisionCard }) 
         <span className="text-n-disabled">·</span>
         <span>{cost}</span>
         <span className="text-n-disabled">·</span>
-        <span>{latencyMs}ms</span>
+        <span>route {routeMs}ms</span>
         <span className="ml-auto text-n-disabled">▸</span>
       </button>
       {open ? <DecisionModal decision={decision} onClose={() => setOpen(false)} /> : null}

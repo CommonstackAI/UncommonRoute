@@ -48,9 +48,11 @@ export default function DecisionDetail({ decision }: { decision: DecisionCard })
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-5 gap-3">
         <Mini label={t.explainer.confidence} value={decision.raw_confidence ? `${Math.round(decision.raw_confidence * 100)}%` : "—"} />
-        <Mini label={t.explainer.latency} value={`${(decision.latency_us / 1000).toFixed(1)}ms`} />
+        <Mini label={t.explainer.route} value={formatMs(decision.route_latency_ms ?? decision.latency_us / 1000)} />
+        <Mini label={t.explainer.upstream} value={formatOptionalMs(decision.upstream_elapsed_ms)} />
+        <Mini label={t.explainer.firstToken} value={formatOptionalMs(decision.first_token_ms)} />
         <Mini label={t.explainer.cost} value={`$${decision.estimated_cost.toFixed(4)}`} />
       </div>
 
@@ -117,8 +119,23 @@ function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
           {attempt.success ? t.common.ok : attempt.blocked ? t.common.blocked : `HTTP ${attempt.status_code || "—"}`}
         </span>
       </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-n-secondary">
+        {attempt.upstream_elapsed_ms ? <span>{t.explainer.upstream} {formatMs(attempt.upstream_elapsed_ms)}</span> : null}
+        {attempt.response_headers_ms ? <span>{t.explainer.responseHeaders} {formatMs(attempt.response_headers_ms)}</span> : null}
+        {attempt.first_token_ms ? <span>{t.explainer.firstToken} {formatMs(attempt.first_token_ms)}</span> : null}
+      </div>
     </div>
   );
+}
+
+function formatMs(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
+}
+
+function formatOptionalMs(value?: number): string {
+  if (!value || value <= 0) return "—";
+  return formatMs(value);
 }
 
 function TagRow({ title, items, format }: { title: string; items: string[] | undefined; format?: (raw: string) => string }) {

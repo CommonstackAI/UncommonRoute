@@ -127,9 +127,12 @@ export default function Activity({ stats }: Props) {
         </div>
         <div className="col-span-3">
           <OverviewCard
-            label={t.activity.avgLatency}
-            value={<>{stats.avg_latency_ms.toFixed(1)}ms</>}
-            meta={t.activity.routedTurns(stats.total_requests.toLocaleString())}
+            label={t.activity.routeLatency}
+            value={<>{(stats.avg_route_latency_ms ?? stats.avg_latency_ms).toFixed(1)}ms</>}
+            meta={t.activity.latencyBreakdown(
+              formatMs(stats.avg_upstream_elapsed_ms),
+              formatMs(stats.avg_first_token_ms),
+            )}
           />
         </div>
         <div className="col-span-3">
@@ -489,6 +492,12 @@ function formatTimeRange(seconds: number, t: Dictionary): string {
   if (seconds >= 3600) return t.activity.timeHours(Math.round(seconds / 3600));
   if (seconds >= 60) return t.activity.timeMinutes(Math.round(seconds / 60));
   return t.activity.timeSeconds(Math.round(seconds));
+}
+
+function formatMs(value?: number): string {
+  if (!value || value <= 0) return "n/a";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
 }
 
 function getUsageValue(

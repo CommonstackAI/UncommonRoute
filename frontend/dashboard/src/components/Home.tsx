@@ -37,6 +37,9 @@ interface TurnGroup {
   tierCounts: Array<[string, number]>;
   dominantTier: string;
   totalCost: number;
+  maxRouteMs: number;
+  maxUpstreamMs: number;
+  firstTokenMs: number;
   hasPending: boolean;
   hasRouted: boolean;
 }
@@ -55,6 +58,9 @@ function groupTurns(items: LiveRecent[]): TurnGroup[] {
         tierCounts: [],
         dominantTier: "",
         totalCost: 0,
+        maxRouteMs: 0,
+        maxUpstreamMs: 0,
+        firstTokenMs: 0,
         hasPending: false,
         hasRouted: false,
       };
@@ -64,6 +70,9 @@ function groupTurns(items: LiveRecent[]): TurnGroup[] {
     g.entries.push(r);
     if (r.prompt_preview && !g.representative.prompt_preview) g.representative = r;
     g.totalCost += r.cost ?? 0;
+    g.maxRouteMs = Math.max(g.maxRouteMs, r.route_latency_ms ?? ((r.latency_us ?? 0) / 1000));
+    g.maxUpstreamMs = Math.max(g.maxUpstreamMs, r.upstream_elapsed_ms ?? 0);
+    if (!g.firstTokenMs && (r.first_token_ms ?? 0) > 0) g.firstTokenMs = r.first_token_ms ?? 0;
     if (r.state === "pending") g.hasPending = true;
     if (r.state === "routed") g.hasRouted = true;
   }
@@ -274,6 +283,17 @@ export default function Home({ stats }: Props) {
                       )}
                       <span>·</span>
                       <span>{rep.transport || "openai"}</span>
+                      {g.maxUpstreamMs > 0 ? (
+                        <>
+                          <span>·</span>
+                          <span>upstream {formatMs(g.maxUpstreamMs)}</span>
+                        </>
+                      ) : g.maxRouteMs > 0 ? (
+                        <>
+                          <span>·</span>
+                          <span>route {formatMs(g.maxRouteMs)}</span>
+                        </>
+                      ) : null}
                     </div>
                   </div>
                   <div className="shrink-0 text-right">
@@ -298,4 +318,9 @@ export default function Home({ stats }: Props) {
       </div>
     </div>
   );
+}
+
+function formatMs(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
 }

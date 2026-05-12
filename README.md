@@ -10,19 +10,21 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs 
 
 <strong>On a held-out 100-case SWE-bench Verified split, the trained router solved 75/100 tasks vs 74/100 with Opus-only, at 53% lower API cost.</strong>
 
+<p>
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT"></a>
+</p>
 
-<br><br>
-
+<p>
 <a href="#quick-start">Quick Start</a> ·
 <a href="#how-uncommonroute-saves-money">Savings</a> ·
 <a href="#visual-routing">Dashboard</a> ·
 <a href="#benchmark">Benchmark</a> ·
 <a href="#how-it-works">How It Works</a> ·
 <a href="#faq">FAQ</a>
+</p>
 
 | | Opus-only | UncommonRoute (trained) | Saved |
 |---|:---:|:---:|:---:|
@@ -32,8 +34,6 @@ UncommonRoute plugs into Claude Code, Cursor, Codex, or the OpenAI SDK. It runs 
 <sub>Numbers from the trained UncommonRoute router on a held-out 100-case SWE-bench Verified split in <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a>. Details below.</sub>
 
 </div>
-
-<br>
 
 <p align="center">
   <img src="docs/assets/hero-home.png" alt="UncommonRoute Dashboard" width="800">
@@ -57,7 +57,7 @@ uncommon-route doctor
 <details>
 <summary>No <code>pipx</code>? Inside a venv?</summary>
 
-- **macOS**: `brew install pipx && pipx ensurepath`
+- **macOS**: `brew install pipx libomp && pipx ensurepath` (`libomp` is required by the trained classifier runtime)
 - **Ubuntu**: `sudo apt install pipx && pipx ensurepath`
 - **Fedora**: `sudo dnf install pipx && pipx ensurepath`
 - **Already inside a virtualenv**: `python3 -m pip install uncommon-route`
@@ -284,6 +284,8 @@ Supported providers: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `min
 | `UNCOMMON_ROUTE_UPSTREAM` | Upstream URL for the managed path, e.g. `https://api.commonstack.ai/v1`; ignored in BYOK mode |
 | `UNCOMMON_ROUTE_API_KEY` | API key used with `UNCOMMON_ROUTE_UPSTREAM`; not a fallback for per-provider keys |
 | `UNCOMMON_ROUTE_PORT` | Local proxy port, default 8403 |
+| `UNCOMMON_ROUTE_CAPTURE_CONTENT=0` | Disable local cold-content capture and artifact persistence |
+| `UNCOMMON_ROUTE_DISABLE_ARTIFACTS=1` | Disable local artifact/checkpoint persistence while keeping hot trace metrics |
 
 </details>
 
@@ -292,6 +294,8 @@ Supported providers: `commonstack`, `openai`, `anthropic`, `google`, `xai`, `min
 ## Privacy
 
 Routing runs on your machine. **Your prompts don't go through a separate routing service; they're sent only to the upstream provider you configure.**
+
+Local traces and large tool-output artifacts are written under `~/.uncommon-route/traces/` and `~/.uncommon-route/artifacts/`. Files are created with private `0600` permissions inside private local directories. Set `UNCOMMON_ROUTE_CAPTURE_CONTENT=0` to disable request/response cold-content capture and artifact persistence, or `UNCOMMON_ROUTE_DISABLE_ARTIFACTS=1` to disable artifact/checkpoint persistence only. For strict enterprise environments, exclude `~/.uncommon-route/` from cloud sync and backup tools.
 
 ```bash
 uncommon-route telemetry status

@@ -369,7 +369,11 @@ def _compose_deterministic(
         new_msg = dict(msg)
         compacted = _safe_compact_text(text)
 
-        if msg.get("role") == "tool" and estimate_tokens(compacted) >= policy.tool_offload_threshold_tokens:
+        if (
+            artifact_store.enabled
+            and msg.get("role") == "tool"
+            and estimate_tokens(compacted) >= policy.tool_offload_threshold_tokens
+        ):
             tool_call_id = str(msg.get("tool_call_id", ""))
             tool_name = _infer_tool_name(messages, idx, tool_call_id)
             content_type = "application/json" if _looks_like_json(compacted) else "text/plain"
@@ -413,6 +417,8 @@ async def _rehydrate_artifacts(
     *,
     request: Any,
 ) -> tuple[list[dict[str, Any]], int, int, int, int, float, float]:
+    if not artifact_store.enabled:
+        return messages, 0, 0, 0, 0, 0.0, 0.0
     latest_idx = _latest_user_index(messages)
     if latest_idx is None:
         return messages, 0, 0, 0, 0, 0.0, 0.0
@@ -480,6 +486,8 @@ async def _checkpoint_history(
     step_type: str,
     is_agentic: bool,
 ) -> tuple[list[dict[str, Any]], str, str, SemanticCallResult | None] | None:
+    if not artifact_store.enabled:
+        return None
     if step_type == "tool-selection" and policy.checkpoint_skip_tool_selection:
         return None
 

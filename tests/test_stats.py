@@ -278,12 +278,28 @@ class TestRouteStats:
     def test_avg_latency(self) -> None:
         rs = RouteStats(storage=InMemoryRouteStatsStorage())
         r1 = _make_record()
-        r1 = RouteRecord(**{**r1.__dict__, "latency_us": 100.0})
+        r1 = RouteRecord(**{
+            **r1.__dict__,
+            "latency_us": 100.0,
+            "route_latency_ms": 0.1,
+            "upstream_elapsed_ms": 250.0,
+            "first_token_ms": 80.0,
+        })
         r2 = _make_record()
-        r2 = RouteRecord(**{**r2.__dict__, "latency_us": 300.0})
+        r2 = RouteRecord(**{
+            **r2.__dict__,
+            "latency_us": 300.0,
+            "route_latency_ms": 0.3,
+            "upstream_elapsed_ms": 750.0,
+            "first_token_ms": 120.0,
+        })
         rs.record(r1)
         rs.record(r2)
-        assert abs(rs.summary().avg_latency_us - 200.0) < 0.1
+        summary = rs.summary()
+        assert abs(summary.avg_latency_us - 200.0) < 0.1
+        assert abs(summary.avg_route_latency_ms - 0.2) < 0.1
+        assert abs(summary.avg_upstream_elapsed_ms - 500.0) < 0.1
+        assert abs(summary.avg_first_token_ms - 100.0) < 0.1
 
 
 @pytest.fixture

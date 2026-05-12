@@ -70,6 +70,8 @@ export interface Dictionary {
     saved: string;
     belowBaseline: (v: string) => string;
     avgLatency: string;
+    routeLatency: string;
+    latencyBreakdown: (upstream: string, first: string) => string;
     routedTurns: (count: string) => string;
     optimization: string;
     optimizationMeta: (cacheHit: string, compaction: string) => string;
@@ -293,6 +295,11 @@ export interface Dictionary {
     routedTo: string;
     confidence: string;
     latency: string;
+    route: string;
+    upstream: string;
+    firstToken: string;
+    responseHeaders: string;
+    providerTtft: string;
     estCost: string;
     cost: string;
     requestId: string;

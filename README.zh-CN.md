@@ -10,19 +10,21 @@
 
 <strong>训练后的路由器完成 75/100 个任务，全程 Opus 完成 74/100；API 成本下降 53%。</strong>
 
+<p>
 <a href="https://pypi.org/project/uncommon-route/"><img src="https://img.shields.io/pypi/v/uncommon-route?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
 <a href="https://www.npmjs.com/package/@anjieyang/uncommon-route"><img src="https://img.shields.io/npm/v/@anjieyang/uncommon-route?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm"></a>
 <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11+-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT"></a>
+</p>
 
-<br><br>
-
+<p>
 <a href="#30-秒跑起来">30 秒上手</a> ·
 <a href="#uncommonroute-如何帮你省钱">省钱逻辑</a> ·
 <a href="#可视化路由">Dashboard</a> ·
 <a href="#benchmark">Benchmark</a> ·
 <a href="#工作原理">工作原理</a> ·
 <a href="#faq">FAQ</a>
+</p>
 
 | | 全程 Opus | UncommonRoute（训练后） | 省下 |
 |---|:---:|:---:|:---:|
@@ -32,8 +34,6 @@
 <sub>数据来自训练后的 UncommonRoute 路由器在 <a href="https://github.com/CommonstackAI/TwinRouterBench">TwinRouterBench</a> 100 个 held-out SWE-bench Verified case 上的结果。说明见下文。</sub>
 
 </div>
-
-<br>
 
 <p align="center">
   <img src="docs/assets/hero-home.png" alt="UncommonRoute Dashboard" width="800">
@@ -57,7 +57,7 @@ uncommon-route doctor
 <details>
 <summary>没有 <code>pipx</code>？在 venv 里？</summary>
 
-- **macOS**：`brew install pipx && pipx ensurepath`
+- **macOS**：`brew install pipx libomp && pipx ensurepath`（训练分类器运行时需要 `libomp`）
 - **Ubuntu**：`sudo apt install pipx && pipx ensurepath`
 - **Fedora**：`sudo dnf install pipx && pipx ensurepath`
 - **已经在 virtualenv 里**：`python3 -m pip install uncommon-route`
@@ -284,6 +284,8 @@ uncommon-route provider remove <name>
 | `UNCOMMON_ROUTE_UPSTREAM` | 托管路径的 upstream 地址，例如 `https://api.commonstack.ai/v1`；BYOK 模式下忽略 |
 | `UNCOMMON_ROUTE_API_KEY` | 配合 `UNCOMMON_ROUTE_UPSTREAM` 使用的 key，不是 per-provider key 的兜底 |
 | `UNCOMMON_ROUTE_PORT` | 本地 proxy 端口，默认 8403 |
+| `UNCOMMON_ROUTE_CAPTURE_CONTENT=0` | 关闭本地冷内容 capture 和 artifact 持久化 |
+| `UNCOMMON_ROUTE_DISABLE_ARTIFACTS=1` | 只关闭 artifact/checkpoint 持久化，保留热路径 trace 指标 |
 
 </details>
 
@@ -292,6 +294,8 @@ uncommon-route provider remove <name>
 ## 隐私
 
 路由在本地完成。**prompt 不会经过额外的云端路由器；它只会发给你配置的 upstream provider。**
+
+本地 trace 和大型 tool-output artifact 会写到 `~/.uncommon-route/traces/` 与 `~/.uncommon-route/artifacts/`。文件会在私有本地目录中以 `0600` 权限创建。设置 `UNCOMMON_ROUTE_CAPTURE_CONTENT=0` 可以关闭 request/response 冷内容 capture 和 artifact 持久化；设置 `UNCOMMON_ROUTE_DISABLE_ARTIFACTS=1` 可以只关闭 artifact/checkpoint 持久化。严格企业环境建议把 `~/.uncommon-route/` 排除在云同步和备份工具之外。
 
 ```bash
 uncommon-route telemetry status

@@ -42,6 +42,9 @@ export interface Stats {
   avg_confidence: number;
   avg_savings: number;
   avg_latency_ms: number;
+  avg_route_latency_ms: number;
+  avg_upstream_elapsed_ms: number;
+  avg_first_token_ms: number;
   avg_input_reduction_ratio: number;
   avg_cache_hit_ratio: number;
   total_estimated_cost: number;
@@ -350,6 +353,10 @@ export interface RecentRequest {
   method: string;
   cost: number;
   savings: number;
+  latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
   transport: string;
   cache_mode: string;
   cache_family: string;
@@ -395,6 +402,13 @@ export interface TraceAttempt {
   cache_family: string;
   cache_breakpoints: number;
   fallback_from: string;
+  fallback_reason?: string;
+  started_at?: number;
+  response_headers_ms?: number;
+  upstream_elapsed_ms?: number;
+  first_token_ms?: number;
+  provider_ttft_ms?: number;
+  tokens_per_second?: number;
   status_code: number;
   success: boolean;
   error_code: string;
@@ -434,6 +448,9 @@ export interface TraceRecord {
   actual_cost?: number | null;
   savings: number;
   latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
   usage_input_tokens: number;
   usage_output_tokens: number;
   cache_read_input_tokens: number;
@@ -532,6 +549,9 @@ export interface DecisionCard {
   capability_lane: string;
   raw_confidence: number;
   latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
   estimated_cost: number;
   route_reasoning: string;
   feature_tags: string[];

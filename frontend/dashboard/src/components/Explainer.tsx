@@ -175,9 +175,11 @@ export default function Explainer() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 min-w-[280px]">
+                  <div className="grid grid-cols-3 gap-3 min-w-[360px]">
                     <MiniMetric label={t.explainer.confidence} value={selected.raw_confidence ? `${Math.round(selected.raw_confidence * 100)}%` : "—"} />
-                    <MiniMetric label={t.explainer.latency} value={`${(selected.latency_us / 1000).toFixed(1)}ms`} />
+                    <MiniMetric label={t.explainer.route} value={formatMs(selected.route_latency_ms ?? selected.latency_us / 1000)} />
+                    <MiniMetric label={t.explainer.upstream} value={formatOptionalMs(selected.upstream_elapsed_ms)} />
+                    <MiniMetric label={t.explainer.firstToken} value={formatOptionalMs(selected.first_token_ms)} />
                     <MiniMetric label={t.explainer.estCost} value={`$${selected.estimated_cost.toFixed(4)}`} />
                     <MiniMetric label={t.explainer.requestId} value={selected.request_id} monoSmall />
                   </div>
@@ -348,6 +350,12 @@ function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
         <span className="truncate">{attempt.target_url || ""}</span>
         <span>{attempt.transport_preference_source ? prettifySource(attempt.transport_preference_source, t) : ""}</span>
       </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-n-secondary">
+        {attempt.upstream_elapsed_ms ? <span>{t.explainer.upstream} {formatMs(attempt.upstream_elapsed_ms)}</span> : null}
+        {attempt.response_headers_ms ? <span>{t.explainer.responseHeaders} {formatMs(attempt.response_headers_ms)}</span> : null}
+        {attempt.first_token_ms ? <span>{t.explainer.firstToken} {formatMs(attempt.first_token_ms)}</span> : null}
+        {attempt.provider_ttft_ms ? <span>{t.explainer.providerTtft} {formatMs(attempt.provider_ttft_ms)}</span> : null}
+      </div>
 
       {(attempt.error_code || attempt.error_message) ? (
         <div className="mt-3 font-mono text-[11px] text-n-accent">
@@ -435,6 +443,16 @@ function prettyTransport(transport?: string) {
     default:
       return transport || "—";
   }
+}
+
+function formatMs(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
+}
+
+function formatOptionalMs(value?: number): string {
+  if (!value || value <= 0) return "—";
+  return formatMs(value);
 }
 
 function prettyQuality(value?: string) {

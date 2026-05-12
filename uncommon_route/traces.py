@@ -68,6 +68,9 @@ class RequestTrace:
     actual_cost: float | None = None
     savings: float = 0.0
     latency_us: float = 0.0
+    route_latency_ms: float = 0.0
+    upstream_elapsed_ms: float = 0.0
+    first_token_ms: float = 0.0
     usage_input_tokens: int = 0
     usage_output_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -612,6 +615,9 @@ def _trace_payload(trace: RequestTrace) -> dict[str, Any]:
         "actual_cost": trace.actual_cost,
         "savings": trace.savings,
         "latency_us": trace.latency_us,
+        "route_latency_ms": trace.route_latency_ms if trace.route_latency_ms > 0 else trace.latency_us / 1000.0,
+        "upstream_elapsed_ms": trace.upstream_elapsed_ms,
+        "first_token_ms": trace.first_token_ms,
         "usage_input_tokens": trace.usage_input_tokens,
         "usage_output_tokens": trace.usage_output_tokens,
         "cache_read_input_tokens": trace.cache_read_input_tokens,

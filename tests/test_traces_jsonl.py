@@ -129,6 +129,9 @@ class TestRequestTraceNewFields:
         assert t.previous_response_id == ""
         assert t.user_agent == ""
         assert t.session_id_v2 == ""
+        assert t.route_latency_ms == 0.0
+        assert t.upstream_elapsed_ms == 0.0
+        assert t.first_token_ms == 0.0
 
     def test_content_fields_have_defaults(self) -> None:
         t = RequestTrace(timestamp=1.0, request_id="r", model="m", status_code=200)

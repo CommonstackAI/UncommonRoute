@@ -126,7 +126,7 @@ function TurnRow({
         <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[11px] text-n-secondary">
           <span className="truncate">{shortModel(turn.model) || "—"}</span>
           <span>
-            {prettyTransport(turn.transport)} · {(turn.latency_us / 1000).toFixed(1)}ms · {isError ? `ERR ${turn.status_code}` : `${turn.status_code}`}
+            {prettyTransport(turn.transport)} · {t.explainer.route} {formatMs(turn.route_latency_ms ?? turn.latency_us / 1000)} · {t.explainer.upstream} {formatOptionalMs(turn.upstream_elapsed_ms)} · {isError ? `ERR ${turn.status_code}` : `${turn.status_code}`}
           </span>
         </div>
       </button>
@@ -165,9 +165,11 @@ function TurnDecision({ turn, t }: { turn: TraceRecord; t: Dictionary }) {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-4 gap-3">
+        <div className="mt-4 grid grid-cols-6 gap-3">
           <MiniMetric label={t.explainer.confidence} value={turn.raw_confidence ? `${Math.round(turn.raw_confidence * 100)}%` : "—"} />
-          <MiniMetric label={t.explainer.latency} value={`${(turn.latency_us / 1000).toFixed(1)}ms`} />
+          <MiniMetric label={t.explainer.route} value={formatMs(turn.route_latency_ms ?? turn.latency_us / 1000)} />
+          <MiniMetric label={t.explainer.upstream} value={formatOptionalMs(turn.upstream_elapsed_ms)} />
+          <MiniMetric label={t.explainer.firstToken} value={formatOptionalMs(turn.first_token_ms)} />
           <MiniMetric label={t.explainer.cost} value={`$${turn.estimated_cost.toFixed(4)}`} />
           <MiniMetric label={t.explainer.requestId} value={turn.request_id} monoSmall />
         </div>
@@ -273,6 +275,11 @@ function AttemptRow({ attempt, t }: { attempt: TraceAttempt; t: Dictionary }) {
       {attempt.transport_reason ? (
         <div className="mt-2 text-[12px] text-n-primary">{attempt.transport_reason}</div>
       ) : null}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-n-secondary">
+        {attempt.upstream_elapsed_ms ? <span>{t.explainer.upstream} {formatMs(attempt.upstream_elapsed_ms)}</span> : null}
+        {attempt.response_headers_ms ? <span>{t.explainer.responseHeaders} {formatMs(attempt.response_headers_ms)}</span> : null}
+        {attempt.first_token_ms ? <span>{t.explainer.firstToken} {formatMs(attempt.first_token_ms)}</span> : null}
+      </div>
       {(attempt.error_code || attempt.error_message) ? (
         <div className="mt-2 font-mono text-[11px] text-n-accent">
           {attempt.error_code || "upstream_error"}
@@ -381,6 +388,16 @@ export function prettyTransport(transport?: string) {
     default:
       return transport || "—";
   }
+}
+
+function formatMs(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
+}
+
+function formatOptionalMs(value?: number): string {
+  if (!value || value <= 0) return "—";
+  return formatMs(value);
 }
 
 function prettyQuality(value?: string) {

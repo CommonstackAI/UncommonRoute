@@ -62,6 +62,9 @@ class RouteRecord:
     actual_cost: float | None = None
     savings: float = 0.0
     latency_us: float = 0.0
+    route_latency_ms: float = 0.0
+    upstream_elapsed_ms: float = 0.0
+    first_token_ms: float = 0.0
     usage_input_tokens: int = 0
     usage_output_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -144,6 +147,9 @@ class StatsSummary:
     avg_confidence: float
     avg_savings: float
     avg_latency_us: float
+    avg_route_latency_ms: float
+    avg_upstream_elapsed_ms: float
+    avg_first_token_ms: float
     avg_input_reduction_ratio: float
     avg_cache_hit_ratio: float
     total_estimated_cost: float
@@ -339,6 +345,8 @@ class RouteStats:
                 by_transport={}, by_cache_mode={}, by_cache_family={},
                 by_mode={}, by_method={}, complexity_distribution={},
                 avg_confidence=0.0, avg_savings=0.0, avg_latency_us=0.0,
+                avg_route_latency_ms=0.0, avg_upstream_elapsed_ms=0.0,
+                avg_first_token_ms=0.0,
                 avg_input_reduction_ratio=0.0, avg_cache_hit_ratio=0.0,
                 total_estimated_cost=0.0, total_baseline_cost=0.0, total_actual_cost=0.0,
                 total_savings_absolute=0.0, total_savings_ratio=0.0,
@@ -445,6 +453,16 @@ class RouteStats:
         total_compaction_savings = sum(_compaction_savings(r) for r in self._records)
         total_savings_absolute = total_baseline - total_act
         total_savings_ratio = (total_savings_absolute / total_baseline) if total_baseline > 0 else 0.0
+        route_latency_values = [
+            r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0
+            for r in self._records
+        ]
+        upstream_elapsed_values = [
+            r.upstream_elapsed_ms for r in self._records if r.upstream_elapsed_ms > 0
+        ]
+        first_token_values = [
+            r.first_token_ms for r in self._records if r.first_token_ms > 0
+        ]
 
         return StatsSummary(
             total_requests=n,
@@ -463,6 +481,15 @@ class RouteStats:
             avg_confidence=sum(r.confidence for r in self._records) / n,
             avg_savings=sum(r.savings for r in self._records) / n,
             avg_latency_us=sum(r.latency_us for r in self._records) / n,
+            avg_route_latency_ms=sum(route_latency_values) / len(route_latency_values),
+            avg_upstream_elapsed_ms=(
+                sum(upstream_elapsed_values) / len(upstream_elapsed_values)
+                if upstream_elapsed_values else 0.0
+            ),
+            avg_first_token_ms=(
+                sum(first_token_values) / len(first_token_values)
+                if first_token_values else 0.0
+            ),
             avg_input_reduction_ratio=(sum(ratios) / len(ratios)) if ratios else 0.0,
             avg_cache_hit_ratio=sum(r.cache_hit_ratio for r in self._records) / n,
             total_estimated_cost=total_est,
@@ -534,6 +561,9 @@ class RouteStats:
                 actual_cost=r.get("actual_cost"),
                 savings=r.get("savings", 0.0),
                 latency_us=r.get("latency_us", 0.0),
+                route_latency_ms=r.get("route_latency_ms", 0.0),
+                upstream_elapsed_ms=r.get("upstream_elapsed_ms", 0.0),
+                first_token_ms=r.get("first_token_ms", 0.0),
                 usage_input_tokens=r.get("usage_input_tokens", 0),
                 usage_output_tokens=r.get("usage_output_tokens", 0),
                 cache_read_input_tokens=r.get("cache_read_input_tokens", 0),
@@ -603,6 +633,10 @@ def record_to_recent_dict(r: RouteRecord) -> dict[str, Any]:
         "method": r.method,
         "cost": _effective_cost(r),
         "savings": r.savings,
+        "latency_us": r.latency_us,
+        "route_latency_ms": r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0,
+        "upstream_elapsed_ms": r.upstream_elapsed_ms,
+        "first_token_ms": r.first_token_ms,
         "raw_confidence": r.raw_confidence,
         "confidence_source": r.confidence_source,
         "transport": r.transport,
@@ -660,6 +694,9 @@ def _record_payload(r: RouteRecord) -> dict[str, Any]:
         "actual_cost": r.actual_cost,
         "savings": r.savings,
         "latency_us": r.latency_us,
+        "route_latency_ms": r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0,
+        "upstream_elapsed_ms": r.upstream_elapsed_ms,
+        "first_token_ms": r.first_token_ms,
         "usage_input_tokens": r.usage_input_tokens,
         "usage_output_tokens": r.usage_output_tokens,
         "cache_read_input_tokens": r.cache_read_input_tokens,

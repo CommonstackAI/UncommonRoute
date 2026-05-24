@@ -95,15 +95,13 @@ export default function MessageBubble({
 
 function UserBubble({ message, t }: { message: ConversationMessage; t: Dictionary }) {
   const [showWrapper, setShowWrapper] = useState(false);
-  const hasWrapper = SYSTEM_REMINDER_PATTERN.test(message.text);
   let displayText = message.text;
   let wrapperText = "";
-  if (hasWrapper) {
-    const m = message.text.match(/^([\s\S]*?<\/(system-reminder|command-name|local-command-stdout|command-message|command-args)>\s*)/i);
-    if (m) {
-      wrapperText = m[1];
-      displayText = message.text.slice(m[1].length);
-    }
+  while (SYSTEM_REMINDER_PATTERN.test(displayText)) {
+    const m = displayText.match(/^([\s\S]*?<\/(system-reminder|command-name|local-command-stdout|command-message|command-args)>\s*)/i);
+    if (!m) break;
+    wrapperText += m[1];
+    displayText = displayText.slice(m[1].length);
   }
 
   return (

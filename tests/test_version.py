@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import tomllib
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from uncommon_route import cli, proxy, support
 from uncommon_route.version import VERSION, get_version

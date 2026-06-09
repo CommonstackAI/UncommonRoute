@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as metadata_version
 from pathlib import Path
-import tomllib
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 def _version_from_pyproject() -> str | None:

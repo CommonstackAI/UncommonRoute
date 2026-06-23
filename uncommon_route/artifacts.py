@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -15,6 +16,37 @@ from uncommon_route.router.structural import estimate_tokens
 
 _DATA_DIR = data_dir()
 DEFAULT_ARTIFACTS_DIR = _DATA_DIR / "artifacts"
+_DISABLED_VALUES = {"0", "false", "no", "off", "disabled"}
+_ENABLED_VALUES = {"1", "true", "yes", "on", "enabled"}
+
+
+def content_persistence_enabled(env: dict[str, str] | None = None) -> bool:
+    if env is None:
+        env = os.environ
+    capture = str(env.get("UNCOMMON_ROUTE_CAPTURE_CONTENT", "1")).strip().lower()
+    if capture in _DISABLED_VALUES:
+        return False
+    disabled = str(env.get("UNCOMMON_ROUTE_DISABLE_ARTIFACTS", "")).strip().lower()
+    if disabled in _ENABLED_VALUES:
+        return False
+    return True
+
+
+def _write_private_text(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,14 +74,21 @@ class ArtifactStore:
         root: Path | None = None,
         *,
         now_fn: Any = None,
+        enabled: bool | None = None,
     ) -> None:
         self._root = root or DEFAULT_ARTIFACTS_DIR
         self._now = now_fn or time.time
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._enabled = content_persistence_enabled() if enabled is None else bool(enabled)
+        if self._enabled:
+            self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @property
     def root(self) -> Path:
         return self._root
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     def store_text(
         self,
@@ -63,6 +102,8 @@ class ArtifactStore:
         content_type: str = "text/plain",
         summary: str = "",
     ) -> ArtifactRecord:
+        if not self._enabled:
+            raise RuntimeError("Artifact storage is disabled")
         created_at = self._now()
         sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
         existing = self._find_existing(
@@ -76,7 +117,7 @@ class ArtifactStore:
         if existing is not None:
             if summary and not existing.summary:
                 updated = ArtifactRecord(**{**asdict(existing), "summary": summary})
-                self._meta_path(existing.id).write_text(json.dumps(asdict(updated), indent=2))
+                _write_private_text(self._meta_path(existing.id), json.dumps(asdict(updated), indent=2))
                 return updated
             return existing
         artifact_id = uuid.uuid4().hex[:12]
@@ -96,8 +137,8 @@ class ArtifactStore:
             preview=preview,
             summary=summary,
         )
-        self._content_path(artifact_id).write_text(content)
-        self._meta_path(artifact_id).write_text(json.dumps(asdict(record), indent=2))
+        _write_private_text(self._content_path(artifact_id), content)
+        _write_private_text(self._meta_path(artifact_id), json.dumps(asdict(record), indent=2))
         return record
 
     def update_summary(self, artifact_id: str, summary: str) -> dict[str, Any] | None:
@@ -105,10 +146,15 @@ class ArtifactStore:
         if artifact is None:
             return None
         artifact["summary"] = summary
-        self._meta_path(artifact_id).write_text(json.dumps({k: v for k, v in artifact.items() if k != "content"}, indent=2))
+        _write_private_text(
+            self._meta_path(artifact_id),
+            json.dumps({k: v for k, v in artifact.items() if k != "content"}, indent=2),
+        )
         return artifact
 
     def get(self, artifact_id: str) -> dict[str, Any] | None:
+        if not self._enabled:
+            return None
         meta_path = self._meta_path(artifact_id)
         content_path = self._content_path(artifact_id)
         if not meta_path.exists() or not content_path.exists():
@@ -118,6 +164,8 @@ class ArtifactStore:
         return meta
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self._enabled:
+            return []
         items: list[dict[str, Any]] = []
         for meta_path in sorted(self._root.glob("*.json"), reverse=True):
             try:
@@ -129,6 +177,8 @@ class ArtifactStore:
         return items
 
     def count(self) -> int:
+        if not self._enabled:
+            return 0
         return sum(1 for _ in self._root.glob("*.json"))
 
     def _find_existing(

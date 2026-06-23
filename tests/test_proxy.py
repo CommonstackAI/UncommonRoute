@@ -13,16 +13,26 @@ from starlette.testclient import TestClient
 from uncommon_route.artifacts import ArtifactStore
 from uncommon_route.composition import CompositionPolicy
 from uncommon_route.connections_store import ConnectionsStore, InMemoryConnectionsStorage
+from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.model_experience import InMemoryModelExperienceStorage, ModelExperienceStore
-from uncommon_route.proxy import _extract_current_message, _extract_prompt, create_app
+from uncommon_route.providers import ProviderEntry, ProvidersConfig
+from uncommon_route.proxy import (
+    _extract_current_message,
+    _extract_prompt,
+    _normalize_reasoning_content_chunk,
+    create_app,
+)
 from uncommon_route.router.config import routing_mode_from_model
 from uncommon_route.routing_config_store import InMemoryRoutingConfigStorage, RoutingConfigStore
+import uncommon_route.scene_store as scene_store_module
 from uncommon_route.semantic import SemanticCallResult, SideChannelConfig, SideChannelTaskConfig
 from uncommon_route.spend_control import InMemorySpendControlStorage, SpendControl
-from uncommon_route.traces import InMemoryTraceStorage, TraceStore
+from uncommon_route.traces import InMemoryTraceStorage, RequestTrace, TraceStore
 from uncommon_route.router.types import (
     CapabilityLane,
     FallbackOption,
+    ModelCapabilities,
+    ModelPricing,
     RoutingDecision,
     RoutingMode,
     ServedQuality,
@@ -49,6 +59,22 @@ class QualityFallbackSemanticCompressor(FakeSemanticCompressor):
             estimated_cost=0.001,
             quality_fallbacks=3,
         )
+
+
+def _build_test_mapper(*model_ids: str) -> ModelMapper:
+    mapper = ModelMapper("https://api.example.test/v1")
+    for model_id in model_ids:
+        provider = model_id.split("/", 1)[0] if "/" in model_id else "unknown"
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(1.0, 5.0),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._discovered = True
+    return mapper
 
 
 class TestPromptExtraction:
@@ -442,6 +468,45 @@ class TestPromptExtraction:
         assert prompt == "summarize this file"
 
 
+def test_reasoning_content_chunk_is_mirrored_into_content() -> None:
+    raw = (
+        "data: "
+        + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": None,
+                    "reasoning_content": "reasoned answer",
+                },
+                "finish_reason": None,
+            }],
+        })
+        + "\n\n"
+    ).encode()
+
+    out = _normalize_reasoning_content_chunk(raw)
+    payload = json.loads(out.decode().split("data: ", 1)[1])
+    delta = payload["choices"][0]["delta"]
+    assert delta["content"] == "reasoned answer"
+    assert delta["reasoning_content"] == "reasoned answer"
+
+
+def test_recursion_guard_blocks_virtual_model_before_upstream_call() -> None:
+    app = create_app(upstream="http://127.0.0.1:1/fake")
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "uncommon-route/auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        headers={"x-uncommon-route-recursion-guard": "1"},
+    )
+
+    assert resp.status_code == 400
+    assert "cannot be routed recursively" in resp.json()["error"]["message"]
+
+
 @pytest.fixture
 def client() -> TestClient:
     """Test client with in-memory spend control (no real upstream)."""
@@ -720,6 +785,65 @@ class TestSelectorEndpoint:
         assert data["step_type"] == "tool-selection"
         assert data["served_tier"] == "MEDIUM"
 
+    def test_selector_preview_caps_claude_code_title_sidechannel_to_simple(self, client: TestClient) -> None:
+        resp = client.post("/v1/selector", json={
+            "model": "uncommon-route/auto",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Claude Code. Generate a concise, sentence-case title "
+                        'for this coding session. Return JSON with a single "title" field.'
+                    ),
+                },
+                {"role": "user", "content": "帮我创建一个新的 Python 项目目录，叫 weather-cli"},
+            ],
+            "stream": True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["served_tier"] == "SIMPLE"
+        assert data["served_quality"] == "economy"
+        assert "tier-cap-preserved(title-generation)" in data["reasoning"]
+
+    def test_selector_preview_ignores_wrapper_context_for_followup_floor(self, client: TestClient) -> None:
+        resp = client.post("/v1/selector", json={
+            "model": "uncommon-route/auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "<system-reminder>\n"
+                                "Design a distributed platform with CRDTs, websocket fanout, "
+                                "permission boundaries, audit logging, and rollout plans.\n"
+                                "</system-reminder>"
+                            ),
+                        },
+                        {"type": "text", "text": "hello"},
+                    ],
+                },
+                {"role": "assistant", "content": "Hi."},
+                {"role": "user", "content": "帮我创建一个新的 Python 项目目录，叫 weather-cli"},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run shell commands",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "context-followup-floor=COMPLEX" not in data["reasoning"]
+        assert data["served_tier"] in {"SIMPLE", "MEDIUM"}
+
     def test_route_preview_uses_live_selector_router(self, client: TestClient) -> None:
         resp = client.post("/v1/route-preview", json={
             "prompt": "Create a Python CLI that fetches weather and add tests.",
@@ -770,6 +894,170 @@ class TestSelectorEndpoint:
 
 
 class TestFallbackAttribution:
+    def test_transport_disconnect_tries_fallback_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            return RoutingDecision(
+                model="primary-model",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="test route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+                fallback_chain=[
+                    FallbackOption("primary-model", 0.001, 100),
+                    FallbackOption("fallback-model", 0.001, 100),
+                ],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            calls.append(str(body.get("model")))
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("server disconnected")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": body.get("model"),
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                        "ttft": 0.5,
+                        "tps": 20,
+                    },
+                },
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage())
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+                model_mapper=_build_test_mapper("primary-model", "fallback-model"),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert calls == ["primary-model", "fallback-model"]
+            assert resp.headers["x-uncommon-route-model"] == "fallback-model"
+            assert resp.headers["x-uncommon-route-capability-lane"] == "general"
+            assert resp.headers["x-uncommon-route-lane"] == "general"
+            request_id = resp.headers["x-uncommon-route-request-id"]
+            trace = traces.find(request_id)
+            assert trace is not None
+            assert trace["model"] == "fallback-model"
+            assert trace["method"] == "fallback"
+            assert trace["attempts_payload"][0]["status_code"] == 502
+            assert trace["attempts_payload"][1]["status_code"] == 200
+            assert trace["route_latency_ms"] >= 0
+            assert trace["upstream_elapsed_ms"] > 0
+            assert trace["attempts_payload"][0]["upstream_elapsed_ms"] > 0
+            assert trace["attempts_payload"][1]["upstream_elapsed_ms"] > 0
+            assert trace["attempts_payload"][1]["fallback_reason"]
+            assert trace["first_token_ms"] == 500.0
+            assert trace["attempts_payload"][1]["first_token_ms"] == 500.0
+            assert trace["attempts_payload"][1]["tokens_per_second"] == 20.0
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_unavailable_discovered_models_are_filtered_from_fallback_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            return RoutingDecision(
+                model="primary-model",
+                tier=Tier.MEDIUM,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.BALANCED,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=None,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="test route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+                fallback_chain=[
+                    FallbackOption("primary-model", 0.001, 100),
+                    FallbackOption("missing-model", 0.001, 100),
+                    FallbackOption("fallback-model", 0.001, 100),
+                ],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            model = str(body.get("model"))
+            calls.append(model)
+            if model == "primary-model":
+                return httpx.Response(404, json={"error": {"message": "model not found"}})
+            if model == "missing-model":
+                raise AssertionError("unavailable fallback model should have been filtered")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                },
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage())
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+                model_mapper=_build_test_mapper("primary-model", "fallback-model"),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert calls == ["primary-model", "fallback-model"]
+            trace = traces.find(resp.headers["x-uncommon-route-request-id"])
+            assert trace is not None
+            assert [attempt["selected_model"] for attempt in trace["attempts_payload"]] == [
+                "primary-model",
+                "fallback-model",
+            ]
+        finally:
+            asyncio.run(async_client.aclose())
+
     def test_failed_fallback_response_is_attributed_to_fallback_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
 
@@ -829,6 +1117,327 @@ class TestFallbackAttribution:
             assert trace["fallback_reason"]
             assert trace["attempts_payload"][0]["selected_model"] == "primary/model"
             assert trace["attempts_payload"][1]["selected_model"] == "fallback/model"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
+class TestRoutingContinuity:
+    def test_agent_tool_session_keeps_full_route_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="anthropic/claude-opus-4-5",
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.BALANCED,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.9,
+                method="pool",
+                reasoning="session route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_session_sticky",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "anthropic/claude-opus-4-5",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="anthropic/claude-opus-4-5",
+            status_code=200,
+            api_format="openai",
+            endpoint="chat_completions",
+            is_virtual=True,
+            session_id="agent-session",
+            step_type="tool-selection",
+            transport="openai-chat",
+            served_quality="premium",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                model_mapper=_build_test_mapper(
+                    "anthropic/claude-opus-4-5",
+                    "anthropic/claude-sonnet-4-6",
+                ),
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [{"role": "user", "content": "Continue the coding task."}],
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "read_file", "parameters": {"type": "object"}},
+                    }],
+                },
+                headers={"x-session-id": "agent-session"},
+            )
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == [
+                "anthropic/claude-opus-4-5",
+                "anthropic/claude-sonnet-4-6",
+            ]
+            assert captured["body"]["model"] == "anthropic/claude-opus-4-5"
+            trace = traces.find(resp.headers["x-uncommon-route-request-id"])
+            assert trace is not None
+            assert "session-sticky" not in trace["route_reasoning"]
+            assert "previous-model" not in trace["route_reasoning"]
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_semantic_tool_failure_keeps_full_route_pool_and_records_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            available_models = list(kwargs.get("available_models") or [])
+            routed["available_models"] = available_models
+            selected_model = available_models[0]
+            return RoutingDecision(
+                model=selected_model,
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.BALANCED,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="pool",
+                reasoning="semantic failure route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_semantic_retry",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": captured["body"].get("model", "google/gemini-2.5-pro"),
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "retrying"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        traces = TraceStore(storage=InMemoryTraceStorage(), now_fn=lambda: 1.0)
+        traces.record(RequestTrace(
+            timestamp=1.0,
+            request_id="prev_req",
+            requested_model="uncommon-route/auto",
+            model="google/gemini-2.5-pro",
+            status_code=200,
+            api_format="openai",
+            endpoint="chat_completions",
+            is_virtual=True,
+            session_id="agent-session",
+            step_type="tool-result-followup",
+            transport="openai-chat",
+            served_quality="premium",
+        ))
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                model_mapper=_build_test_mapper(
+                    "google/gemini-2.5-pro",
+                    "anthropic/claude-opus-4-6",
+                    "openai/gpt-5.4-2026-03-05",
+                ),
+                trace_store=traces,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "uncommon-route/auto",
+                    "messages": [
+                        {"role": "user", "content": "Run the tests and fix the bug."},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_tests",
+                                    "arguments": json.dumps({"command": "pytest"}),
+                                },
+                            }],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_1",
+                            "content": (
+                                "pytest verification failed: 1 failed\n"
+                                "AssertionError: expected 2 actual 3\n"
+                                "<returncode>1</returncode>"
+                            ),
+                        },
+                    ],
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "run_tests", "parameters": {"type": "object"}},
+                    }],
+                },
+                headers={"x-session-id": "agent-session"},
+            )
+
+            assert resp.status_code == 200
+            assert set(routed["available_models"]) == {
+                "google/gemini-2.5-pro",
+                "anthropic/claude-opus-4-6",
+                "openai/gpt-5.4-2026-03-05",
+            }
+            assert "google/gemini-2.5-pro" in routed["available_models"]
+            assert captured["body"]["model"] == routed["available_models"][0]
+            trace = traces.find(resp.headers["x-uncommon-route-request-id"])
+            assert trace is not None
+            assert "session-sticky" not in trace["route_reasoning"]
+            assert "session-retry" not in trace["route_reasoning"]
+            assert trace["routing_features_payload"]["verification_failed"] is True
+            assert trace["routing_features_payload"]["failure_kind"] == "semantic"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_byok_custom_models_are_injected_into_virtual_route_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+        captured: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            routed["available_models"] = list(kwargs.get("available_models") or [])
+            return RoutingDecision(
+                model="custom/private-model",
+                tier=Tier.SIMPLE,
+                capability_lane=CapabilityLane.GENERAL,
+                served_quality=ServedQuality.ECONOMY,
+                served_quality_target=ServedQuality.ECONOMY,
+                served_quality_floor=ServedQuality.ECONOMY,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.8,
+                method="byok-preferred (custom/private-model) | pool",
+                reasoning="custom BYOK route",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_byok_custom",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "custom/private-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        providers = ProvidersConfig(providers={
+            "custom": ProviderEntry(
+                name="custom",
+                api_key="sk-custom",
+                base_url="https://custom.example/v1",
+                models=["custom/private-model"],
+            ),
+        })
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                providers_config=providers,
+                model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert resp.status_code == 200
+            assert routed["available_models"] == [
+                "openai/gpt-4o-mini",
+                "custom/private-model",
+            ]
+            assert captured["url"] == "https://custom.example/v1/chat/completions"
+            assert captured["headers"]["authorization"] == "Bearer sk-custom"
+            assert captured["body"]["model"] == "custom/private-model"
         finally:
             asyncio.run(async_client.aclose())
 
@@ -954,6 +1563,98 @@ class TestRoutingConfigEndpoint:
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["fallback"] == []
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["overridden"] is False
         assert reset_data["modes"]["auto"]["tiers"]["SIMPLE"]["selection_mode"] == "adaptive"
+
+
+class TestScenesEndpoint:
+    def test_post_scene_requires_admin_token(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scene_store_module, "_SCENES_FILE", tmp_path / "scenes.json")
+        monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
+        app = create_app(upstream="http://127.0.0.1:1/fake")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        denied = client.post("/v1/scenes", json={
+            "action": "add",
+            "name": "coding",
+            "primary": "anthropic/claude-sonnet-4.6",
+        })
+        assert denied.status_code == 401
+
+        allowed = client.post(
+            "/v1/scenes",
+            headers={"authorization": "Bearer test-admin"},
+            json={
+                "action": "add",
+                "name": "coding",
+                "primary": "anthropic/claude-sonnet-4.6",
+            },
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["scene"]["name"] == "coding"
+
+    def test_header_scene_routes_real_model_through_hard_pin(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(scene_store_module, "_SCENES_FILE", tmp_path / "scenes.json")
+        monkeypatch.setenv("UNCOMMON_ROUTE_ADMIN_TOKEN", "test-admin")
+        posted_models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            posted_models.append(str(body.get("model")))
+            return httpx.Response(200, json={
+                "id": "chatcmpl_scene",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            })
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+
+        try:
+            app = create_app(
+                upstream="https://api.example.test/v1",
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            scene = client.post(
+                "/v1/scenes",
+                headers={"authorization": "Bearer test-admin"},
+                json={
+                    "action": "add",
+                    "name": "private",
+                    "primary": "anthropic/claude-opus-4.6",
+                    "hard_pin": True,
+                },
+            )
+            assert scene.status_code == 200
+
+            resp = client.post(
+                "/v1/chat/completions",
+                headers={"x-uncommon-route-scene": "private"},
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            assert resp.status_code == 200
+            assert posted_models == ["claude-opus-4.6"]
+            assert resp.headers["x-uncommon-route-mode"] == "auto"
+            assert resp.headers["x-uncommon-route-model"] == "anthropic/claude-opus-4.6"
+            assert resp.headers["x-uncommon-route-method"] == "scene:private:hard-pin"
+        finally:
+            asyncio.run(async_client.aclose())
 
 
 class TestChatCompletions:

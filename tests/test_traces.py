@@ -31,8 +31,8 @@ def trace_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 class TestTraceStore:
     def test_trace_store_persists_records_and_feedback(self, tmp_path) -> None:
-        path = tmp_path / "traces.json"
-        traces = TraceStore(storage=FileTraceStorage(path=path))
+        traces_dir = tmp_path / "traces"
+        traces = TraceStore(storage=FileTraceStorage(base_dir=traces_dir), hot_days=99)
         traces.record(RequestTrace(
             timestamp=time.time(),
             request_id="req-trace-001",
@@ -72,7 +72,7 @@ class TestTraceStore:
 
         assert updated is True
 
-        reloaded = TraceStore(storage=FileTraceStorage(path=path))
+        reloaded = TraceStore(storage=FileTraceStorage(base_dir=traces_dir), hot_days=99)
         detail = reloaded.find("req-trace-001")
         assert detail is not None
         assert detail["requested_transport"] == "anthropic-messages"

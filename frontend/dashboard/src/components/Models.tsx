@@ -1,12 +1,14 @@
 import { useState, useMemo } from "react";
 import type { Mapping } from "../api";
 import { Search } from "lucide-react";
+import { useT } from "../i18n";
 
 interface Props {
   mapping: Mapping | null;
 }
 
 export default function Models({ mapping }: Props) {
+  const t = useT();
   const [search, setSearch] = useState("");
   const pool = mapping?.pool ?? [];
 
@@ -35,16 +37,16 @@ export default function Models({ mapping }: Props) {
     <div className="space-y-6 animate-fadeIn">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-[36px] text-n-display tracking-tight">MODELS</h1>
+          <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.models.title}</h1>
           <p className="mt-1 text-[13px] text-n-secondary">
-            {pool.length} models from {new Set(pool.map(m => m.provider)).size} providers
+            {t.models.summary(pool.length, new Set(pool.map(m => m.provider)).size)}
           </p>
         </div>
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-n-disabled" strokeWidth={1.5} />
           <input
             type="text"
-            placeholder="Filter models..."
+            placeholder={t.models.filterPlaceholder}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-64 rounded-compact border border-n-border bg-n-surface pl-9 pr-4 py-2 font-mono text-[13px] text-n-primary placeholder-n-disabled focus:border-n-border-vis focus:outline-none transition-colors"
@@ -64,9 +66,9 @@ export default function Models({ mapping }: Props) {
           <table className="w-full">
             <thead>
               <tr className="border-b border-n-border">
-                <th className="label px-5 py-3 text-left">MODEL</th>
-                <th className="label px-5 py-3 text-left">CAPABILITIES</th>
-                <th className="label px-5 py-3 text-right">IN / OUT</th>
+                <th className="label px-5 py-3 text-left">{t.models.model}</th>
+                <th className="label px-5 py-3 text-left">{t.models.capabilities}</th>
+                <th className="label px-5 py-3 text-right">{t.models.inOut}</th>
               </tr>
             </thead>
             <tbody>
@@ -78,10 +80,10 @@ export default function Models({ mapping }: Props) {
                     <td className="px-5 py-3 font-mono text-[13px] text-n-primary">{coreName}</td>
                     <td className="px-5 py-3">
                       <div className="flex gap-1.5">
-                        {c.reasoning && <Tag>REASONING</Tag>}
-                        {c.vision && <Tag>VISION</Tag>}
-                        {c.tool_calling && <Tag>TOOLS</Tag>}
-                        {c.free && <Tag accent>FREE</Tag>}
+                        {c.reasoning && <Tag>{t.models.reasoning}</Tag>}
+                        {c.vision && <Tag>{t.models.vision}</Tag>}
+                        {c.tool_calling && <Tag>{t.models.tools}</Tag>}
+                        {c.free && <Tag accent>{t.models.free}</Tag>}
                       </div>
                     </td>
                     <td className="px-5 py-3 text-right font-mono text-[12px] text-n-secondary">
@@ -97,9 +99,7 @@ export default function Models({ mapping }: Props) {
 
       {providers.length === 0 && (
         <div className="py-20 text-center font-mono text-[14px] text-n-disabled">
-          {pool.length === 0
-            ? "Connect an upstream provider to discover available models."
-            : "No models match your search."}
+          {pool.length === 0 ? t.models.emptyConnect : t.models.emptyNoMatch}
         </div>
       )}
     </div>

@@ -68,14 +68,19 @@ from uncommon_route.router.quality import (
     normalize_served_quality,
     request_capability_lane,
 )
+from uncommon_route.router.signal_tuning import (
+    DEFAULT_SIGNAL_TUNING,
+    contextual_followup_floor_from_text,
+    system_prompt_is_title_generation_sidechannel,
+    system_prompt_has_structured_output_constraint,
+    text_substance_score,
+    vision_prompt_needs_medium_floor,
+)
 from uncommon_route.router.structural import estimate_tokens, estimate_output_budget
 from uncommon_route.router.types import (
-    CapabilityLane,
     ModelPricing,
     RequestRequirements,
-    RoutingFailureCode,
     RoutingFeatures,
-    RoutingInfeasibility,
     RoutingInfeasibleError,
     RoutingMode,
     ServedQuality,
@@ -84,10 +89,16 @@ from uncommon_route.router.types import (
 )
 from uncommon_route.semantic import SemanticCallResult, SemanticCompressor
 from uncommon_route.semantic import SideChannelTaskConfig, score_semantic_quality
-from uncommon_route.session import derive_session_id
+from uncommon_route.session import RecentSessions, derive_session_id, derive_session_id_v2
+from uncommon_route.normalize import (
+    hash16,
+    normalize_message_text,
+    normalize_messages_to_hashes,
+)
 from uncommon_route.spend_control import SpendControl
-from uncommon_route.stats import RouteRecord, RouteStats
+from uncommon_route.stats import RouteRecord, RouteStats, record_to_recent_dict
 from uncommon_route.traces import RequestTrace, TraceStore, prompt_hash as trace_prompt_hash
+from uncommon_route.events import get_bus
 from uncommon_route.feedback import FeedbackCollector
 from uncommon_route.model_experience import ModelExperienceStore
 from uncommon_route.paths import data_dir
@@ -100,6 +111,7 @@ from uncommon_route.providers import (
 )
 from uncommon_route.model_map import ModelMapper
 from uncommon_route.routing_config_store import RoutingConfigStore
+from uncommon_route.scene_store import SceneConfig, SceneStore, _serialize_scene
 from uncommon_route.connections_store import ConnectionsStore, mask_api_key, resolve_primary_connection
 from uncommon_route.anthropic_compat import (
     anthropic_to_openai_request,
@@ -116,13 +128,19 @@ from uncommon_route.responses_compat import (
     responses_to_openai_chat_request,
 )
 from uncommon_route.version import VERSION
+from uncommon_route.content_capture import (
+    extract_assistant_blocks_anthropic,
+    extract_assistant_blocks_openai_chat,
+    extract_assistant_blocks_openai_responses,
+    parse_stream_assistant_content,
+    truncate_content_payload,
+)
 
 logger = logging.getLogger("uncommon-route")
 _debug_log = logging.getLogger("uncommon_route.debug_routing")
 
 DEFAULT_UPSTREAM = ""
 DEFAULT_PORT = int(os.environ.get("UNCOMMON_ROUTE_PORT", "8403"))
-
 _RECURSION_GUARD_HEADER = "x-uncommon-route-recursion-guard"
 _ORIGINAL_MODEL_HEADER = "x-uncommon-route-original-model"
 
@@ -617,9 +635,123 @@ def _recursion_guard_header_value(guard_secret: str) -> str:
     return guard_secret or "1"
 
 
+def _normalize_reasoning_content_chunk(raw: bytes) -> bytes:
+    """Mirror reasoning_content into content for clients that only read content."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+
+    lines = text.split("\n")
+    changed = False
+    for idx, line in enumerate(lines):
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            continue
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content and not delta.get("content"):
+            delta["content"] = reasoning_content
+            lines[idx] = f"data: {json.dumps(data, ensure_ascii=False)}"
+            changed = True
+    if not changed:
+        return raw
+    return "\n".join(lines).encode("utf-8")
+
+
 def _is_virtual_model_name(model: str) -> bool:
     normalized = str(model or "").strip().lower()
     return routing_mode_from_model(normalized) is not None
+
+
+def _capture_enabled() -> bool:
+    return os.environ.get("UNCOMMON_ROUTE_CAPTURE_CONTENT", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
+def _build_capture_dict(
+    body: dict, text: str, calls: list[dict[str, Any]], finish: str
+) -> dict[str, Any]:
+    sys_field = body.get("system", "")
+    if isinstance(sys_field, list):
+        system_text = " ".join(
+            (b.get("text") or "")
+            for b in sys_field
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        system_text = str(sys_field) if sys_field else ""
+    raw_tools = body.get("tools") or body.get("customTools") or []
+    raw = {
+        "request_messages": list(body.get("messages") or []),
+        "request_system": system_text,
+        "request_tools_count": len(raw_tools) if isinstance(raw_tools, list) else 0,
+        "response_text": text,
+        "response_tool_calls": calls,
+        "response_finish_reason": finish,
+        "content_truncated": False,
+    }
+    cap_bytes = _content_cap_bytes()
+    if cap_bytes <= 0:
+        raw["content_truncated"] = False
+        return raw
+    truncated, was_trunc = truncate_content_payload(raw, cap_bytes=cap_bytes)
+    truncated["content_truncated"] = was_trunc
+    return truncated
+
+
+def _content_cap_bytes() -> int:
+    """Per-row size cap for captured content. 0 disables truncation entirely."""
+    raw = os.environ.get("UNCOMMON_ROUTE_CONTENT_CAP_BYTES", "").strip()
+    if not raw:
+        return 256 * 1024
+    try:
+        return int(raw)
+    except ValueError:
+        return 256 * 1024
+
+
+def _capture_non_streaming(
+    body: dict, response_content: bytes, transport: str
+) -> dict[str, Any]:
+    """Return cold-field dict to merge into a RequestTrace, or {} if disabled."""
+    if not _capture_enabled():
+        return {}
+    if transport == "anthropic-messages":
+        text, calls, finish = extract_assistant_blocks_anthropic(response_content)
+    elif transport == "openai-chat":
+        text, calls, finish = extract_assistant_blocks_openai_chat(response_content)
+    elif transport == "openai-responses":
+        text, calls, finish = extract_assistant_blocks_openai_responses(response_content)
+    else:
+        return {}
+    return _build_capture_dict(body, text, calls, finish)
+
+
+def _capture_streaming(
+    body: dict, stream_chunks: list[bytes], transport: str
+) -> dict[str, Any]:
+    if not _capture_enabled():
+        return {}
+    text, calls, finish = parse_stream_assistant_content(stream_chunks, transport)
+    return _build_capture_dict(body, text, calls, finish)
 
 
 class UpstreamSemanticCompressor:
@@ -839,6 +971,75 @@ def _resolve_session_id(request: Request, body: dict) -> str | None:
     return derive_session_id(messages)
 
 
+# Process-wide registry for derive_session_id_v2 (shadow mode).
+_SESSION_V2_REGISTRY = RecentSessions(
+    capacity=int(os.environ.get("UNCOMMON_ROUTE_SESSION_TABLE_SIZE", "5000")),
+    ttl_seconds=float(os.environ.get("UNCOMMON_ROUTE_SESSION_TTL_S", "21600")),
+)
+
+
+def _extract_session_v2_inputs(
+    request: Request, body: dict
+) -> dict[str, Any]:
+    """Compute session_id_v2 inputs and shadow output for this request.
+
+    Returns a dict suitable for **-splatting into RequestTrace(...).
+    """
+    messages = body.get("messages") or []
+    msg_hashes = normalize_messages_to_hashes(messages)
+    first_user_v2 = ""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            first_user_v2 = hash16(normalize_message_text(m))
+            break
+    system_text = ""
+    sys_field = body.get("system")
+    if isinstance(sys_field, str):
+        system_text = sys_field
+    elif isinstance(sys_field, list):
+        system_text = " ".join(
+            (b.get("text") or "")
+            for b in sys_field
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "system":
+                system_text = normalize_message_text(m)
+                break
+    system_h = hash16(system_text) if system_text else ""
+
+    metadata_uid = ""
+    md = body.get("metadata") or {}
+    if isinstance(md, dict):
+        metadata_uid = str(md.get("user_id", "") or "")
+
+    prev_response = str(body.get("previous_response_id", "") or "")
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    user_agent = headers.get("user-agent", "")
+
+    sid_v2 = derive_session_id_v2(
+        msg_hashes=msg_hashes,
+        first_user_v2=first_user_v2,
+        system_hash=system_h,
+        metadata_uid=metadata_uid,
+        prev_response=prev_response,
+        registry=_SESSION_V2_REGISTRY,
+        now=time.time(),
+    )
+
+    return {
+        "messages_count": len(messages),
+        "msg_hashes": msg_hashes,
+        "first_user_hash_v2": first_user_v2,
+        "system_hash": system_h,
+        "metadata_user_id": metadata_uid,
+        "previous_response_id": prev_response,
+        "user_agent": user_agent,
+        "session_id_v2": sid_v2,
+    }
+
+
 def _classify_step(body: dict) -> tuple[str, list[str]]:
     """Classify the current agentic step from the request body.
 
@@ -859,7 +1060,7 @@ def _classify_step(body: dict) -> tuple[str, list[str]]:
     tool_names: list[str] = []
     for t in raw_tools:
         fn = t.get("function") or t.get("definition") or {}
-        name = fn.get("name", "")
+        name = fn.get("name") or t.get("name") or ""
         if name:
             tool_names.append(name)
 
@@ -906,6 +1107,58 @@ def _has_vision_content(value: Any) -> bool:
     return False
 
 
+def _body_has_structured_output_directive(messages: list[Any]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        if system_prompt_has_structured_output_constraint(_content_text(message.get("content", ""))):
+            return True
+    return False
+
+
+def _body_has_title_generation_sidechannel(messages: list[Any]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        if system_prompt_is_title_generation_sidechannel(_content_text(message.get("content", ""))):
+            return True
+    return False
+
+
+def _contextual_followup_floor(messages: list[Any], prompt: str) -> Tier | None:
+    user_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    if len(user_indexes) < 2:
+        return None
+
+    latest_index = user_indexes[-1]
+    latest = prompt or _extract_user_prompt_text(messages[latest_index].get("content", ""))
+    prior_parts: list[str] = []
+    for message in messages[:latest_index]:
+        if not isinstance(message, dict) or message.get("role") == "system":
+            continue
+        if message.get("role") == "user":
+            text = _extract_user_prompt_text(message.get("content", ""))
+        else:
+            text = _content_text(message.get("content", ""))
+        if text.strip():
+            prior_parts.append(text)
+    prior_context = "\n".join(prior_parts)
+    return contextual_followup_floor_from_text(
+        prior_text=prior_context,
+        latest_text=latest,
+    )
+
+
+def _vision_analysis_floor(has_vision: bool, prompt: str) -> Tier | None:
+    if vision_prompt_needs_medium_floor(has_vision=has_vision, prompt=prompt):
+        return Tier.MEDIUM
+    return None
+
+
 _HIGH_RISK_TOOL_MARKERS = (
     "traceback",
     "exception",
@@ -937,35 +1190,6 @@ _HIGH_RISK_TOOL_MARKERS = (
     "堆栈",
     "超时",
     "拒绝连接",
-)
-
-_HIGH_RISK_PROMPT_MARKERS = (
-    "fix",
-    "debug",
-    "root cause",
-    "regression",
-    "failing",
-    "failed test",
-    "implement",
-    "refactor",
-    "migrate",
-    "security",
-    "deploy",
-    "release",
-    "production",
-    "修复",
-    "调试",
-    "排查",
-    "定位",
-    "根因",
-    "回归",
-    "失败",
-    "实现",
-    "重构",
-    "迁移",
-    "安全",
-    "部署",
-    "发布",
 )
 
 _RETRY_PROMPT_MARKERS = (
@@ -1348,6 +1572,7 @@ def _tool_result_is_environment_recovery(text: str, is_error: bool, command: str
 _REASONING_DISABLED_VALUES = {"", "none", "off", "false", "disabled", "disable"}
 _REASONING_FLOOR_VALUES = {"medium", "high", "xhigh", "x-high", "max"}
 _TIER_RANK = {Tier.SIMPLE: 0, Tier.MEDIUM: 1, Tier.COMPLEX: 2}
+_SUGGESTION_MODE_RE = re.compile(r"^\s*\[SUGGESTION MODE:", re.IGNORECASE)
 
 
 def _max_tier(left: Tier | None, right: Tier | None) -> Tier | None:
@@ -1400,9 +1625,16 @@ def _reasoning_preference(body: dict[str, Any]) -> tuple[bool, Tier | None]:
         mark(thinking, floor_medium=True)
 
     if _contains_anthropic_thinking_blocks(body):
-        mark("medium", floor_medium=True)
+        # Prior signed thinking blocks are a transport/model-continuity
+        # constraint, not evidence that the latest user ask is complex.
+        pass
 
     return prefers_reasoning, tier_floor
+
+
+def _is_suggestion_mode_prompt(prompt: str) -> bool:
+    """Detect Claude Code's autocomplete prompt wrapper."""
+    return bool(_SUGGESTION_MODE_RE.match(str(prompt or "")))
 
 
 def _estimate_step_risk(
@@ -1417,10 +1649,13 @@ def _estimate_step_risk(
     tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(messages, step_type)
     previous_tool_result_text, previous_tool_result_is_error = _latest_tool_result_signal(messages)
     prompt_text = str(prompt or "")
-    prompt_has_high_risk_marker = _contains_risk_marker(prompt_text, _HIGH_RISK_PROMPT_MARKERS)
-
-    if wants_structured_output:
-        return "high"
+    if _is_suggestion_mode_prompt(prompt_text):
+        return "low"
+    prompt_has_high_risk_shape = (
+        needs_tool_calling
+        and text_substance_score(prompt_text)
+        >= DEFAULT_SIGNAL_TUNING.tool_prompt_high_risk_substance_score
+    )
 
     if step_type == "tool-result-followup":
         if tool_result_is_error:
@@ -1440,7 +1675,7 @@ def _estimate_step_risk(
             or _contains_tool_failure_signal(previous_tool_result_text)
         )
     )
-    if retrying_previous_tool or prompt_has_high_risk_marker:
+    if retrying_previous_tool or prompt_has_high_risk_shape:
         return "high"
 
     if step_type == "tool-selection" and len(prompt_text) <= 40 and len(tool_names) <= 6:
@@ -1489,7 +1724,7 @@ def _extract_routing_features(
         derived_tool_names: list[str] = []
         for tool in raw_tools:
             fn = tool.get("function") or tool.get("definition") or {}
-            name = str(fn.get("name") or "").strip()
+            name = str(fn.get("name") or tool.get("name") or "").strip()
             if name:
                 derived_tool_names.append(name)
         normalized_tool_names = tuple(derived_tool_names)
@@ -1497,6 +1732,8 @@ def _extract_routing_features(
     has_vision = any(_has_vision_content(msg.get("content")) for msg in messages if isinstance(msg, dict))
     needs_tool_calling = bool(raw_tools)
     has_tool_results = step_type == "tool-result-followup"
+    suggestion_mode = _is_suggestion_mode_prompt(prompt)
+    title_generation_sidechannel = _body_has_title_generation_sidechannel(messages)
 
     response_format = body.get("response_format")
     response_format_name: str | None = None
@@ -1507,16 +1744,36 @@ def _extract_routing_features(
     elif isinstance(response_format, str):
         response_format_name = response_format.strip().lower() or None
         wants_structured_output = response_format_name in {"json", "json_schema"}
+    if (
+        not title_generation_sidechannel
+        and not wants_structured_output
+        and _body_has_structured_output_directive(messages)
+    ):
+        response_format_name = "system"
+        wants_structured_output = True
 
-    step_risk = _estimate_step_risk(
-        messages=messages,
-        step_type=step_type,
-        tool_names=normalized_tool_names,
-        prompt=prompt,
-        needs_tool_calling=needs_tool_calling,
-        wants_structured_output=wants_structured_output,
+    step_risk = (
+        "low"
+        if title_generation_sidechannel
+        else _estimate_step_risk(
+            messages=messages,
+            step_type=step_type,
+            tool_names=normalized_tool_names,
+            prompt=prompt,
+            needs_tool_calling=needs_tool_calling,
+            wants_structured_output=wants_structured_output,
+        )
     )
-    tier_floor = Tier.MEDIUM if step_risk == "high" else None
+    contextual_floor = (
+        None
+        if suggestion_mode or title_generation_sidechannel
+        else _contextual_followup_floor(messages, prompt)
+    )
+    if contextual_floor is not None and step_risk == "low":
+        step_risk = "normal"
+    tier_floor = Tier.MEDIUM if step_risk == "high" or wants_structured_output else None
+    tier_floor = _max_tier(tier_floor, contextual_floor)
+    tier_floor = _max_tier(tier_floor, _vision_analysis_floor(has_vision, prompt))
     tool_result_text, tool_result_is_error, tool_command = _current_step_tool_result_context(
         messages,
         step_type,
@@ -1543,17 +1800,25 @@ def _extract_routing_features(
         and _tool_result_is_short_success_observation(tool_result_text, tool_result_is_error, tool_command)
     )
     tier_cap = (
-        Tier.MEDIUM
-        if step_risk == "low"
-        or environment_recovery
-        or invocation_recovery
-        or routine_success
-        or short_success_observation
-        else None
+        Tier.SIMPLE
+        if suggestion_mode or title_generation_sidechannel
+        else (
+            Tier.MEDIUM
+            if step_risk == "low"
+            or environment_recovery
+            or invocation_recovery
+            or routine_success
+            or short_success_observation
+            else None
+        )
     )
     tier_cap_reason = ""
     if tier_cap is not None:
-        if environment_recovery:
+        if suggestion_mode:
+            tier_cap_reason = "suggestion-mode"
+        elif title_generation_sidechannel:
+            tier_cap_reason = "title-generation"
+        elif environment_recovery:
             tier_cap_reason = "environment-recovery"
         elif invocation_recovery:
             tier_cap_reason = "invocation-recovery"
@@ -1868,6 +2133,8 @@ def _anthropic_transport_base(base_url: str, family: str) -> str:
     lower = root.lower()
     if "commonstack.ai" in lower:
         return root
+    if "openrouter.ai" in lower:
+        return root
     if "/anthropic" in lower:
         return root
     if lower.endswith("/v1"):
@@ -1919,7 +2186,7 @@ def _supports_native_anthropic_transport(
         return True
     if "api.minimax.io" in target_lower or "api.minimaxi.com" in target_lower:
         return True
-    return upstream_provider in {"minimax", "commonstack"}
+    return upstream_provider in {"minimax", "commonstack", "openrouter"}
 
 
 def _choose_transport(
@@ -2024,88 +2291,6 @@ def _choose_transport(
     )
 
 
-def _requires_transport_safe_candidates(
-    *,
-    api_format: str,
-    endpoint_name: str,
-    step_type: str,
-    has_tools: bool,
-    has_tool_results: bool,
-) -> bool:
-    requested_transport = _requested_transport_name(
-        api_format=api_format,
-        endpoint_name=endpoint_name,
-    )
-    if requested_transport != "anthropic-messages":
-        return False
-    return (
-        step_type in {"tool-selection", "tool-result-followup"}
-        or has_tools
-        or has_tool_results
-    )
-
-
-def _filter_transport_compatible_models(
-    *,
-    available_models: list[str],
-    api_format: str,
-    endpoint_name: str,
-    upstream_provider: str,
-    upstream_base: str,
-    step_type: str,
-    has_tools: bool,
-    has_tool_results: bool,
-    anthropic_beta_present: bool,
-    providers_config: ProvidersConfig,
-) -> tuple[list[str], str]:
-    if not available_models:
-        return [], ""
-    if not _requires_transport_safe_candidates(
-        api_format=api_format,
-        endpoint_name=endpoint_name,
-        step_type=step_type,
-        has_tools=has_tools,
-        has_tool_results=has_tool_results,
-    ):
-        return list(available_models), ""
-
-    compatible: list[str] = []
-    for model_name in available_models:
-        transport_decision = _choose_transport(
-            api_format=api_format,
-            endpoint_name=endpoint_name,
-            selected_model=model_name,
-            provider_entry=providers_config.get_for_model(model_name),
-            upstream_provider=upstream_provider,
-            upstream_base=upstream_base,
-            step_type=step_type,
-            has_tools=has_tools,
-            has_tool_results=has_tool_results,
-            anthropic_beta_present=anthropic_beta_present,
-        )
-        if transport_decision.native_anthropic_transport:
-            compatible.append(model_name)
-
-    if compatible:
-        note = f"transport-filter=anthropic-native-tools({len(compatible)}/{len(available_models)})"
-        return compatible, note
-
-    raise RoutingInfeasibleError(
-        RoutingInfeasibility(
-            code=RoutingFailureCode.ROUTING_CONSTRAINTS_UNMET,
-            message=(
-                "Anthropic tool semantics require native anthropic transport, "
-                "but no compatible models are available for the current upstream"
-            ),
-            available_model_count=len(available_models),
-            candidate_count=0,
-            constraint_tags=("transport-safe",),
-            failed_constraints=("anthropic-native-transport",),
-            missing_capabilities=("anthropic-tool-transport",),
-        )
-    )
-
-
 def _can_reuse_native_anthropic_body(
     *,
     upstream_body: dict[str, Any],
@@ -2137,86 +2322,19 @@ def _contains_anthropic_thinking_blocks(body: dict[str, Any] | None) -> bool:
     return False
 
 
-def _anthropic_thinking_enabled(body: dict[str, Any] | None) -> bool:
-    if not isinstance(body, dict):
-        return False
-    thinking = body.get("thinking")
-    if not isinstance(thinking, dict):
-        return False
-    thinking_type = str(thinking.get("type") or "").strip().lower()
-    return bool(thinking_type and thinking_type != "disabled")
-
-
-def _supports_anthropic_thinking_payload(model: str) -> bool:
-    value = str(model or "").strip().lower()
-    provider, _, core = value.partition("/")
-    if not core:
-        core = provider
-        provider = ""
-    core = re.sub(r"(\d)\.(\d)", r"\1-\2", core)
-
-    if provider == "anthropic":
-        if "haiku" in core:
-            return False
-        return (
-            "claude-opus-4" in core
-            or "claude-sonnet-4" in core
-            or "claude-3-7-sonnet" in core
-            or "claude-sonnet-3-7" in core
-        )
-    if provider == "minimax":
-        return "minimax-m2-7" in core or "minimax-m2-5" in core
-    return False
-
-
-def _filter_anthropic_thinking_context(
-    *,
+def _merge_available_models(
     available_models: list[str],
-    api_format: str,
-    endpoint_name: str,
-    session_id: str | None,
-    source_body: dict[str, Any] | None,
-    trace_store: TraceStore,
-) -> tuple[list[str], str]:
-    if not available_models:
-        return [], ""
-    if _requested_transport_name(api_format=api_format, endpoint_name=endpoint_name) != "anthropic-messages":
-        return list(available_models), ""
-    if not (
-        _anthropic_thinking_enabled(source_body)
-        or _contains_anthropic_thinking_blocks(source_body)
-    ):
-        return list(available_models), ""
-
-    previous_note = ""
-    previous_trace = trace_store.latest_for_session(
-        session_id,
-        step_types=("tool-selection", "tool-result-followup", "general"),
-    ) if session_id else None
-    if (
-        previous_trace is not None
-        and previous_trace.status_code < 400
-        and previous_trace.api_format == "anthropic"
-        and previous_trace.transport == "anthropic-messages"
-    ):
-        previous_model = str(previous_trace.model or "").strip()
-        if previous_model:
-            if previous_model in available_models:
-                previous_note = f";previous={previous_model}"
-            else:
-                previous_note = f";previous-unavailable={previous_model}"
-
-    compatible_models = [
-        model for model in available_models if _supports_anthropic_thinking_payload(model)
-    ]
-    if not compatible_models:
-        return list(available_models), f"thinking-context=no-compatible-pool{previous_note}"
-    if len(compatible_models) == len(available_models):
-        return list(available_models), f"thinking-context=compatible-pool{previous_note}"
-    return compatible_models, (
-        f"thinking-context=compatible-pool({len(compatible_models)}/{len(available_models)})"
-        f"{previous_note}"
-    )
+    extra_models: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for model in [*available_models, *(extra_models or ())]:
+        model_id = str(model or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        merged.append(model_id)
+    return merged
 
 
 def _reuse_anthropic_source_body(
@@ -2373,9 +2491,13 @@ def _serialize_routing_features(features: RoutingFeatures) -> dict[str, object]:
         "tier_cap": features.tier_cap.value if features.tier_cap is not None else None,
         "tier_cap_reason": features.tier_cap_reason,
         "session_present": features.session_present,
+        "agent_step_count": features.agent_step_count,
+        "agent_pressure": round(features.agent_pressure, 6),
         "capability_lane": features.capability_lane.value if features.capability_lane is not None else None,
         "previous_served_quality": features.previous_served_quality.value if features.previous_served_quality is not None else None,
         "continuity_quality_floor": features.continuity_quality_floor.value if features.continuity_quality_floor is not None else None,
+        "verification_failed": features.verification_failed,
+        "failure_kind": features.failure_kind,
         "tags": list(features.tags()),
     }
 
@@ -2418,6 +2540,221 @@ def _normalize_selector_body(
     if not payload.get("model"):
         payload["model"] = VIRTUAL_MODEL_IDS[default_mode]
     return payload, None
+
+
+def _flatten_tool_result(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(str(b.get("text", "")))
+        return " ".join(parts)
+    return str(content) if content else ""
+
+
+def _trace_decision_card(trace: "RequestTrace") -> dict[str, Any]:
+    """Subset of the trace useful for the UI as a decision card."""
+    return {
+        "model": trace.model,
+        "decision_tier": trace.decision_tier or trace.tier,
+        "served_quality": trace.served_quality,
+        "capability_lane": trace.capability_lane,
+        "raw_confidence": trace.raw_confidence,
+        "latency_us": trace.latency_us,
+        "route_latency_ms": trace.route_latency_ms if trace.route_latency_ms > 0 else trace.latency_us / 1000.0,
+        "upstream_elapsed_ms": trace.upstream_elapsed_ms,
+        "first_token_ms": trace.first_token_ms,
+        "estimated_cost": trace.estimated_cost,
+        "route_reasoning": trace.route_reasoning,
+        "feature_tags": list(trace.feature_tags or []),
+        "constraint_tags": list(trace.constraint_tags or []),
+        "hint_tags": list(trace.hint_tags or []),
+        "transport": trace.transport,
+        "transport_reason": trace.transport_reason,
+        "attempts_payload": list(trace.attempts_payload or []),
+        "fallback_reason": trace.fallback_reason,
+    }
+
+
+def _assemble_conversation(
+    traces: "TraceStore", session_id: str
+) -> dict[str, Any] | None:
+    # 1. Pull all hot rows for this session_id.
+    matching = [r for r in traces._records if r.session_id == session_id]
+    if not matching:
+        return None
+    matching.sort(key=lambda r: r.timestamp)
+
+    # 2. Pull cold fields per turn.
+    cold_by_id: dict[str, dict[str, Any]] = {}
+    for t in matching:
+        cold = traces.load_content(t.request_id)
+        if cold is not None:
+            cold_by_id[t.request_id] = cold
+
+    has_any_content = any(
+        (c.get("request_messages") or c.get("response_text"))
+        for c in cold_by_id.values()
+    )
+
+    # 3. Compact-break detection from msg_hashes.
+    breaks: list[int] = []
+    for k in range(1, len(matching)):
+        prev = list(matching[k - 1].msg_hashes or [])
+        curr = list(matching[k].msg_hashes or [])
+        if not prev or not curr:
+            continue
+        if curr[: len(prev)] != prev:
+            breaks.append(k)
+
+    if not has_any_content:
+        # Surface turn-level decisions only (no message bodies).
+        decisions = [
+            {
+                "role": "assistant",
+                "text": "",
+                "tool_calls": [],
+                "ts": t.timestamp,
+                "request_id": t.request_id,
+                "decision": _trace_decision_card(t),
+            }
+            for t in matching
+        ]
+        return {
+            "session_id": session_id,
+            "turn_count": len(matching),
+            "content_available": False,
+            "compact_breaks": breaks,
+            "messages": decisions,
+        }
+
+    # 4. Build backbone from the LAST turn's request_messages.
+    last_turn = matching[-1]
+    last_cold = cold_by_id.get(last_turn.request_id, {})
+    backbone = list(last_cold.get("request_messages") or [])
+
+    # 5. Walk backbone, expand into chat messages with decisions.
+    #
+    # Alignment: each captured turn's response goes into the NEXT turn's
+    # backbone as an assistant message — except the LAST captured turn's
+    # response, which is standalone (appended in step 6). So:
+    #   backbone_assistants_count + 1 captured-or-skipped turns total
+    #   the LAST (matching_count - 1) backbone assistants align with
+    #     matching[0..matching_count-2]
+    #   any earlier backbone assistants are PRE-CAPTURE (no decision)
+    backbone_assistants_count = sum(
+        1 for m in backbone
+        if isinstance(m, dict) and m.get("role") == "assistant"
+    )
+    align_offset = max(0, backbone_assistants_count - (len(matching) - 1))
+
+    out_messages: list[dict[str, Any]] = []
+    assistant_idx = 0
+    for m in backbone:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user":
+            # May carry tool_results inside content blocks.
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        out_messages.append({
+                            "role": "tool_result",
+                            "tool_use_id": b.get("tool_use_id", ""),
+                            "text": _flatten_tool_result(b.get("content", "")),
+                            "from_request_id": last_turn.request_id,
+                        })
+                # Surface any plain user text alongside tool_results.
+                text = " ".join(
+                    str(b.get("text", ""))
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+                if text:
+                    out_messages.append({
+                        "role": "user",
+                        "text": text,
+                        "ts": None,
+                        "from_request_id": last_turn.request_id,
+                    })
+            else:
+                out_messages.append({
+                    "role": "user",
+                    "text": str(content),
+                    "ts": None,
+                    "from_request_id": last_turn.request_id,
+                })
+        elif role == "assistant":
+            text = ""
+            calls: list[dict[str, Any]] = []
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "text":
+                            text += str(b.get("text", ""))
+                        elif b.get("type") == "tool_use":
+                            calls.append({
+                                "id": b.get("id", ""),
+                                "name": b.get("name", ""),
+                                "input": b.get("input", {}),
+                            })
+            else:
+                text = str(content)
+
+            mapped_idx = assistant_idx - align_offset
+            if 0 <= mapped_idx < len(matching) - 1:
+                decision_trace = matching[mapped_idx]
+                entry = {
+                    "role": "assistant",
+                    "text": text,
+                    "tool_calls": calls,
+                    "ts": decision_trace.timestamp,
+                    "request_id": decision_trace.request_id,
+                    "decision": _trace_decision_card(decision_trace),
+                }
+            else:
+                # Pre-capture assistant — no decision card available.
+                entry = {
+                    "role": "assistant",
+                    "text": text,
+                    "tool_calls": calls,
+                    "ts": None,
+                    "request_id": None,
+                    "decision": None,
+                }
+            out_messages.append(entry)
+            assistant_idx += 1
+        elif role == "tool":
+            out_messages.append({
+                "role": "tool_result",
+                "tool_use_id": m.get("tool_call_id", ""),
+                "text": str(content),
+                "from_request_id": last_turn.request_id,
+            })
+        # role == "system": skip (system prompt is not a conversation turn for UI)
+
+    # 6. Append the LAST turn's response (assistant_N — not yet in the backbone).
+    final = matching[-1]
+    out_messages.append({
+        "role": "assistant",
+        "text": last_cold.get("response_text", "") or "",
+        "tool_calls": list(last_cold.get("response_tool_calls") or []),
+        "ts": final.timestamp,
+        "request_id": final.request_id,
+        "decision": _trace_decision_card(final),
+    })
+
+    return {
+        "session_id": session_id,
+        "turn_count": len(matching),
+        "content_available": True,
+        "compact_breaks": breaks,
+        "messages": out_messages,
+    }
 
 
 def create_app(
@@ -2466,6 +2803,7 @@ def create_app(
     _semantic = semantic_compressor
     _routing_store = routing_config_store or RoutingConfigStore()
     _routing_config = _routing_store.config()
+    _scene_store = SceneStore()
     _responses_history: dict[str, list[dict[str, Any]]] = {}
     forced_messages_mode_raw = str(os.environ.get("UNCOMMON_ROUTE_FORCE_MESSAGES_DEFAULT_MODE", "")).strip()
     forced_messages_upstream_model = str(
@@ -2716,23 +3054,14 @@ def create_app(
         session_id: str | None,
         has_tools: bool,
     ) -> RoutingFeatures:
-        transport_safe_lane = _requires_transport_safe_candidates(
-            api_format=api_format,
-            endpoint_name=endpoint_name,
-            step_type=features.step_type,
-            has_tools=has_tools,
-            has_tool_results=features.has_tool_results,
-        )
         capability_lane = features.capability_lane
         if capability_lane is None:
-            if transport_safe_lane:
-                capability_lane = CapabilityLane.ANTHROPIC_TOOL_SAFE
-            else:
-                capability_lane = request_capability_lane(features)
+            capability_lane = request_capability_lane(features)
 
         previous_served_quality: ServedQuality | None = None
         continuity_quality_floor: ServedQuality | None = None
-        if session_id:
+        protocol_side_channel = features.tier_cap_reason == "suggestion-mode"
+        if session_id and not protocol_side_channel:
             latest_session_trace = _traces.latest_for_session(session_id)
             if latest_session_trace is not None:
                 previous_served_quality = normalize_served_quality(latest_session_trace.served_quality)
@@ -2782,21 +3111,10 @@ def create_app(
         )
         ctx_features = extract_context_features(body, step_type, prompt)
         user_keyed = _providers.keyed_models() or None
-        available_models = _circuit_breaker.filter_available(
-            _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
-        )
-        available_models, transport_pool_note = _filter_transport_compatible_models(
-            available_models=available_models,
-            api_format="openai",
-            endpoint_name="chat_completions",
-            upstream_provider=_mapper.provider,
-            upstream_base=upstream,
-            step_type=step_type,
-            has_tools=bool(body.get("tools") or body.get("customTools")),
-            has_tool_results=routing_features.has_tool_results,
-            anthropic_beta_present=False,
-            providers_config=_providers,
-        )
+        base_available_models = _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+        if user_keyed:
+            base_available_models = _merge_available_models(base_available_models, sorted(user_keyed))
+        available_models = _circuit_breaker.filter_available(base_available_models)
         decision = route(
             prompt,
             system_prompt,
@@ -2815,8 +3133,6 @@ def create_app(
             record_lifecycle=False,
         )
         reasoning = decision.reasoning
-        if transport_pool_note:
-            reasoning = f"{reasoning} | {transport_pool_note}"
 
         effective_requirements = decision.routing_features.request_requirements()
         effective_hints = decision.routing_features.workload_hints()
@@ -3121,6 +3437,9 @@ def create_app(
             "avg_confidence": round(s.avg_confidence, 3),
             "avg_savings": round(s.avg_savings, 3),
             "avg_latency_ms": round(s.avg_latency_us / 1000.0, 3),
+            "avg_route_latency_ms": round(s.avg_route_latency_ms, 3),
+            "avg_upstream_elapsed_ms": round(s.avg_upstream_elapsed_ms, 3),
+            "avg_first_token_ms": round(s.avg_first_token_ms, 3),
             "avg_input_reduction_ratio": round(s.avg_input_reduction_ratio, 3),
             "avg_cache_hit_ratio": round(s.avg_cache_hit_ratio, 3),
             "total_estimated_cost": round(s.total_estimated_cost, 6),
@@ -3283,6 +3602,86 @@ def create_app(
         _refresh_active_pricing()
         return JSONResponse(payload)
 
+    async def handle_scenes(request: Request) -> JSONResponse:
+        """GET /v1/scenes — list all scenes.  POST /v1/scenes — add/remove/import."""
+        if request.method == "GET":
+            return JSONResponse(_scene_store.export())
+
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+        body = await request.json()
+        action = str(body.get("action", "")).strip().lower()
+        try:
+            if action == "add":
+                name = str(body.get("name", "")).strip()
+                primary = str(body.get("primary", "")).strip()
+                if not name or not primary:
+                    return JSONResponse({"error": "name and primary are required"}, status_code=400)
+                fallback_raw = body.get("fallback", [])
+                if isinstance(fallback_raw, str):
+                    fallback = [p.strip() for p in fallback_raw.split(",") if p.strip()]
+                elif isinstance(fallback_raw, list):
+                    fallback = [str(f).strip() for f in fallback_raw if str(f).strip()]
+                else:
+                    fallback = []
+                tier_floor_raw = body.get("tier_floor")
+                tier_floor = Tier(str(tier_floor_raw).upper()) if tier_floor_raw else None
+                tier_cap_raw = body.get("tier_cap")
+                tier_cap = Tier(str(tier_cap_raw).upper()) if tier_cap_raw else None
+                allowed_providers_raw = body.get("allowed_providers", [])
+                allowed_providers = (
+                    [str(p).strip() for p in allowed_providers_raw if str(p).strip()]
+                    if isinstance(allowed_providers_raw, list) else []
+                )
+                max_cost_raw = body.get("max_cost_per_request")
+                max_cost = float(max_cost_raw) if max_cost_raw is not None else None
+                if max_cost is not None and max_cost <= 0:
+                    return JSONResponse({"error": "max_cost_per_request must be positive"}, status_code=400)
+                scene = SceneConfig(
+                    name=name,
+                    primary=primary,
+                    fallback=fallback,
+                    hard_pin=bool(body.get("hard_pin", False)),
+                    description=str(body.get("description", "")),
+                    tier_floor=tier_floor,
+                    tier_cap=tier_cap,
+                    allowed_providers=allowed_providers,
+                    max_cost_per_request=max_cost,
+                )
+                stored = _scene_store.add(scene)
+                return JSONResponse({"ok": True, "scene": _serialize_scene_response(stored)})
+            elif action == "remove":
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    return JSONResponse({"error": "name is required"}, status_code=400)
+                removed = _scene_store.remove(name)
+                return JSONResponse({"ok": removed, "name": name})
+            elif action == "import":
+                data = body.get("data", {})
+                count = _scene_store.import_scenes(data)
+                return JSONResponse({"ok": True, "imported": count})
+            else:
+                return JSONResponse(
+                    {"error": "Invalid action", "allowed": ["add", "remove", "import"]},
+                    status_code=400,
+                )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    async def handle_scene_detail(request: Request) -> JSONResponse:
+        """GET /v1/scenes/<name> — get one scene."""
+        name = request.path_params["name"]
+        scene = _scene_store.get(name)
+        if scene is None:
+            return JSONResponse({"error": f"Scene '{name}' not found"}, status_code=404)
+        return JSONResponse(_serialize_scene_response(scene))
+
+    def _serialize_scene_response(scene: SceneConfig) -> dict:
+        data = _serialize_scene(scene)
+        data["model_pool"] = scene.model_pool()
+        return data
+
     async def handle_artifacts(request: Request) -> JSONResponse:
         limit = int(request.query_params.get("limit", "50"))
         return JSONResponse({
@@ -3334,6 +3733,17 @@ def create_app(
                 to_tier=result.to_tier,
                 reason=result.reason,
             )
+            get_bus().publish({
+                "type": "feedback_updated",
+                "request_id": request_id,
+                "feedback_signal": signal,
+                "feedback_ok": result.ok,
+                "feedback_action": result.action,
+                "feedback_from_tier": result.from_tier,
+                "feedback_to_tier": result.to_tier,
+                "feedback_reason": result.reason,
+                "feedback_submitted_at": time.time(),
+            })
             _traces.record_feedback(
                 request_id,
                 signal=signal,
@@ -3378,6 +3788,40 @@ def create_app(
                 break
         return JSONResponse(visible_records)
 
+    async def handle_events_stream(request: Request) -> Response:
+        """GET /v1/events/stream — Server-Sent Events for live dashboard updates."""
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+
+        bus = get_bus()
+        queue = await bus.subscribe()
+
+        async def _gen() -> AsyncGenerator[bytes, None]:
+            yield b": connected\n\n"
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        payload = json.dumps(event, default=str)
+                        yield f"data: {payload}\n\n".encode("utf-8")
+                    except asyncio.TimeoutError:
+                        yield b": keepalive\n\n"
+            finally:
+                await bus.unsubscribe(queue)
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     async def handle_traces(request: Request) -> JSONResponse:
         denied = _admin_auth_failure(request)
         if denied is not None:
@@ -3399,6 +3843,19 @@ def create_app(
         if trace is None:
             return JSONResponse({"error": "Trace not found", "request_id": request_id}, status_code=404)
         return JSONResponse(trace)
+
+    async def handle_session_conversation(request: Request) -> JSONResponse:
+        denied = _admin_auth_failure(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"]).strip()
+        out = _assemble_conversation(_traces, session_id)
+        if out is None:
+            return JSONResponse(
+                {"error": "Session not found", "session_id": session_id},
+                status_code=404,
+            )
+        return JSONResponse(out)
 
     async def handle_v2_metrics(request: Request) -> JSONResponse:
         """GET /v1/v2-metrics — v2 routing metrics snapshot."""
@@ -3546,6 +4003,11 @@ def create_app(
         attempts_payload: list[dict[str, Any]] = []
         session_id: str | None = None
         request_id = uuid.uuid4().hex[:12]
+        get_bus().publish({
+            "type": "request_started",
+            "request_id": request_id,
+            "timestamp": time.time(),
+        })
         debug_headers: dict[str, str] = {}
         prompt_preview = ""
         prompt_hash_value = ""
@@ -3589,6 +4051,7 @@ def create_app(
         prompt_preview = (_pv + "...") if len(prompt) > 80 else _pv
         prompt_hash_value = trace_prompt_hash(prompt)
         session_id = _resolve_session_id(request, body)
+        turn_id = f"{session_id or '_'}:{prompt_hash_value}" if prompt_hash_value else ""
         step_type, tool_names = _classify_step(body)
         _set_header(debug_headers, "x-uncommon-route-request-id", request_id)
 
@@ -3613,6 +4076,41 @@ def create_app(
                     retrial_previous.prompt_hash,
                     retrial_previous.model,
                 )
+
+        # ── Scene resolution ───────────────────────────────────────────
+        # Trigger precedence:
+        #   1. x-uncommon-route-scene header
+        #   2. Virtual model ID: uncommon-route/scene/<name>
+        #   3. (Future: OpenClaw session → scene mapping via plugin)
+        _scene_name: str | None = None
+        _active_scene: SceneConfig | None = None
+
+        # Check header first (highest priority)
+        _scene_header = request.headers.get("x-uncommon-route-scene", "").strip()
+        if _scene_header:
+            _scene_name = _scene_header
+
+        # Check virtual model ID: uncommon-route/scene/<name>
+        if not _scene_name and model.startswith("uncommon-route/scene/"):
+            _scene_name = model[len("uncommon-route/scene/"):].strip()
+            # Treat scene requests as virtual (need routing)
+            if not is_virtual:
+                is_virtual = True
+                routing_mode = RoutingMode.AUTO
+                mode_value = routing_mode.value
+
+        if _scene_name:
+            _active_scene = _scene_store.resolve(_scene_name)
+            if _active_scene:
+                if not is_virtual:
+                    is_virtual = True
+                    routing_mode = RoutingMode.AUTO
+                mode_value = routing_mode.value if routing_mode else ""
+                logger.info(
+                    "Scene '%s' active: primary=%s hard_pin=%s",
+                    _active_scene.name, _active_scene.primary, _active_scene.hard_pin,
+                )
+                route_method = f"scene:{_active_scene.name}"
 
         if is_virtual:
             _set_header(debug_headers, "x-uncommon-route-mode", mode_value)
@@ -3645,51 +4143,96 @@ def create_app(
             hints = routing_features.workload_hints()
             step_type = routing_features.step_type
             user_keyed = _providers.keyed_models() or None
-            route_pool_notes: list[str] = []
             try:
-                route_available_models = _circuit_breaker.filter_available(
-                    _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
-                )
-                route_available_models, transport_pool_note = _filter_transport_compatible_models(
-                    available_models=route_available_models,
-                    api_format=api_format,
-                    endpoint_name=endpoint_name,
-                    upstream_provider=_mapper.provider,
-                    upstream_base=upstream,
-                    step_type=step_type,
-                    has_tools=bool(body.get("tools") or body.get("customTools")),
-                    has_tool_results=routing_features.has_tool_results,
-                    anthropic_beta_present=bool(request.headers.get("anthropic-beta")),
-                    providers_config=_providers,
-                )
-                if transport_pool_note:
-                    route_pool_notes.append(transport_pool_note)
-                route_available_models, thinking_lock_note = _filter_anthropic_thinking_context(
-                    available_models=route_available_models,
-                    api_format=api_format,
-                    endpoint_name=endpoint_name,
-                    session_id=session_id,
-                    source_body=source_body,
-                    trace_store=_traces,
-                )
-                if thinking_lock_note:
-                    route_pool_notes.append(thinking_lock_note)
-                decision = route(
-                    prompt,
-                    system_prompt,
-                    max_tokens,
-                    config=_routing_config,
-                    routing_mode=routing_mode or RoutingMode.AUTO,
-                    routing_features=routing_features,
-                    user_keyed_models=user_keyed,
-                    model_experience=_model_experience,
-                    route_confidence_calibrator=_route_confidence,
-                    context_features=ctx_features,
-                    pricing=_get_pricing(),
-                    available_models=route_available_models or None,
-                    model_capabilities=_routing_config.model_capabilities,
-                    messages=body.get("messages"),
-                )
+                base_available_models = _mapper.routable_models if _mapper.discovered else list(DEFAULT_MODEL_PRICING.keys())
+                if user_keyed:
+                    base_available_models = _merge_available_models(base_available_models, sorted(user_keyed))
+                route_available_models = _circuit_breaker.filter_available(base_available_models)
+                if _active_scene and not _active_scene.hard_pin:
+                    scene_pool = _active_scene.model_pool()
+                    available_scene_models = [m for m in scene_pool if m in route_available_models]
+                    route_available_models = available_scene_models or scene_pool
+
+                if _active_scene and _active_scene.hard_pin:
+                    from uncommon_route.router.types import (
+                        AnswerDepth,
+                        FallbackOption,
+                        RoutingDecision,
+                    )
+
+                    scene_pool = _active_scene.model_pool()
+                    scene_tier = _active_scene.tier_floor or Tier.COMPLEX
+                    scene_budget = estimate_output_budget(prompt, scene_tier.value)
+                    scene_output_budget = min(max_tokens, scene_budget)
+                    input_token_estimate = estimate_tokens(prompt)
+                    scene_cost = _estimate_cost(
+                        _active_scene.primary,
+                        input_token_estimate,
+                        scene_output_budget,
+                    )
+                    scene_baseline = _estimate_baseline_cost(
+                        input_token_estimate,
+                        scene_output_budget,
+                    )
+                    scene_lane = request_capability_lane(routing_features)
+                    scene_quality = model_served_quality(
+                        _active_scene.primary,
+                        scene_lane,
+                        _routing_config.model_capabilities.get(_active_scene.primary),
+                    )
+                    decision = RoutingDecision(
+                        model=_active_scene.primary,
+                        tier=scene_tier,
+                        capability_lane=scene_lane,
+                        served_quality=scene_quality,
+                        served_quality_target=scene_quality,
+                        served_quality_floor=routing_features.continuity_quality_floor,
+                        continuity_quality_floor=routing_features.continuity_quality_floor,
+                        mode=routing_mode or RoutingMode.AUTO,
+                        confidence=1.0,
+                        method=f"scene:{_active_scene.name}:hard-pin",
+                        reasoning=f"scene={_active_scene.name} hard-pin -> {_active_scene.primary}",
+                        cost_estimate=scene_cost,
+                        baseline_cost=scene_baseline,
+                        savings=(
+                            max(0.0, (scene_baseline - scene_cost) / scene_baseline)
+                            if scene_baseline > 0
+                            else 0.0
+                        ),
+                        raw_confidence=1.0,
+                        confidence_source="scene",
+                        complexity=1.0,
+                        constraints=_active_scene.as_routing_constraints(),
+                        workload_hints=hints,
+                        routing_features=routing_features,
+                        answer_depth=AnswerDepth.STANDARD,
+                        suggested_output_budget=scene_output_budget,
+                        fallback_chain=[
+                            FallbackOption(model=m, cost_estimate=0.0, suggested_output_budget=scene_output_budget)
+                            for m in scene_pool[1:]
+                        ],
+                    )
+                else:
+                    scene_constraints = _active_scene.as_routing_constraints() if _active_scene else None
+                    decision = route(
+                        prompt,
+                        system_prompt,
+                        max_tokens,
+                        config=_routing_config,
+                        routing_mode=routing_mode or RoutingMode.AUTO,
+                        routing_features=routing_features,
+                        routing_constraints=scene_constraints,
+                        user_keyed_models=user_keyed,
+                        model_experience=_model_experience,
+                        route_confidence_calibrator=_route_confidence,
+                        context_features=ctx_features,
+                        pricing=_get_pricing(),
+                        available_models=route_available_models or None,
+                        model_capabilities=_routing_config.model_capabilities,
+                        messages=body.get("messages"),
+                        tier_floor=_active_scene.tier_floor if _active_scene else None,
+                        tier_cap=_active_scene.tier_cap if _active_scene else None,
+                    )
             except RoutingInfeasibleError as exc:
                 route_latency_us = (time.perf_counter_ns() - route_start) / 1000
                 route_reasoning = exc.infeasibility.message
@@ -3699,7 +4242,7 @@ def create_app(
                     else capability_lane_value
                 )
                 timestamp_value = time.time()
-                _stats.record(RouteRecord(
+                infeasible_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -3724,6 +4267,7 @@ def create_app(
                     latency_us=route_latency_us,
                     transport=transport_decision.selected_transport,
                     session_id=session_id,
+                    turn_id=turn_id,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
                     route_reasoning=route_reasoning,
@@ -3732,7 +4276,12 @@ def create_app(
                     error_code=exc.infeasibility.code.value,
                     error_stage="routing",
                     error_message=exc.infeasibility.message,
-                ))
+                )
+                _stats.record(infeasible_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(infeasible_record),
+                })
                 _traces.record(RequestTrace(
                     timestamp=timestamp_value,
                     request_id=request_id,
@@ -3765,6 +4314,7 @@ def create_app(
                     error_code=exc.infeasibility.code.value,
                     error_stage="routing",
                     error_message=exc.infeasibility.message,
+                    **_extract_session_v2_inputs(request, source_body or body),
                 ))
                 return _routing_infeasible_response(
                     exc,
@@ -3788,6 +4338,17 @@ def create_app(
                 )
             tier_value = decision.tier.value
             decision_tier = tier_value
+            route_method = decision.method
+            get_bus().publish({
+                "type": "request_routed",
+                "request_id": request_id,
+                "turn_id": turn_id,
+                "tier": tier_value,
+                "model": selected_model,
+                "method": route_method,
+                "transport": transport_decision.selected_transport,
+                "prompt_preview": prompt_preview,
+            })
             served_quality_value = decision.served_quality.value
             served_quality_target_value = decision.served_quality_target.value
             served_quality_floor_value = (
@@ -3806,14 +4367,10 @@ def create_app(
                 )
             reasoning = decision.reasoning
             route_reasoning = decision.reasoning
-            if route_pool_notes:
-                route_reasoning = f"{route_reasoning} | {' | '.join(route_pool_notes)}"
-                reasoning = route_reasoning
             estimated_cost = decision.cost_estimate
             baseline_cost = decision.baseline_cost
             confidence = decision.confidence
             savings = decision.savings
-            route_method = "pool"
             mode_value = decision.mode.value
             raw_confidence = decision.raw_confidence
             confidence_source = decision.confidence_source
@@ -3896,7 +4453,7 @@ def create_app(
             check = await _spend_reservation.reserve(request_id, estimated_cost)
             if not check.allowed:
                 timestamp_value = time.time()
-                _stats.record(RouteRecord(
+                spend_blocked_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -3921,6 +4478,7 @@ def create_app(
                     latency_us=(time.perf_counter_ns() - route_start) / 1000,
                     transport=transport_decision.selected_transport,
                     session_id=session_id,
+                    turn_id=turn_id,
                     step_type=step_type,
                     request_id=request_id,
                     prompt_preview=prompt_preview,
@@ -3936,7 +4494,12 @@ def create_app(
                     error_code="spend_limit_exceeded",
                     error_stage="guardrail",
                     error_message=check.reason or "Spending limit exceeded",
-                ))
+                )
+                _stats.record(spend_blocked_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(spend_blocked_record),
+                })
                 _traces.record(RequestTrace(
                     timestamp=timestamp_value,
                     request_id=request_id,
@@ -3989,6 +4552,7 @@ def create_app(
                     error_code="spend_limit_exceeded",
                     error_stage="guardrail",
                     error_message=check.reason or "Spending limit exceeded",
+                    **_extract_session_v2_inputs(request, source_body or body),
                 ))
                 return _spend_error(check, api_format=api_format, headers=debug_headers)
 
@@ -4000,10 +4564,15 @@ def create_app(
                 model=selected_model,
                 mode=mode_value,
             )
-            fallback_models = [
-                fb.model for fb in decision.fallback_chain
-                if fb.model != selected_model and not _is_virtual_model_name(fb.model)
-            ]
+            fallback_models = []
+            for fb in decision.fallback_chain:
+                fb_model = fb.model
+                if fb_model == selected_model or _is_virtual_model_name(fb_model):
+                    continue
+                if _mapper.discovered and _mapper.is_available(fb_model) is False:
+                    logger.info("Skipping unavailable fallback model: %s", fb_model)
+                    continue
+                fallback_models.append(fb_model)
         else:
             selected_model = model
             tier_value = ""
@@ -4092,7 +4661,7 @@ def create_app(
             resolved_model = model_name
             if not attempt_provider_entry:
                 resolved_model = _mapper.resolve(model_name)
-                attempt_upstream_body["model"] = resolved_model
+            attempt_upstream_body["model"] = resolved_model
 
             attempt_has_tools = bool(
                 attempt_upstream_body.get("tools")
@@ -4234,6 +4803,42 @@ def create_app(
             )
 
         current_attempt_trace: dict[str, Any] | None = None
+        attempt_start_ns: dict[int, int] = {}
+
+        def _elapsed_ms_since(start_ns: int | None) -> float:
+            if start_ns is None:
+                return 0.0
+            return max(0.0, (time.perf_counter_ns() - start_ns) / 1_000_000.0)
+
+        def _current_attempt_elapsed_ms() -> float:
+            if current_attempt_trace is None:
+                return 0.0
+            attempt_index = int(current_attempt_trace.get("attempt_index") or 0)
+            return _elapsed_ms_since(attempt_start_ns.get(attempt_index))
+
+        def _attempt_total_upstream_elapsed_ms() -> float:
+            values = []
+            for attempt_trace in attempts_payload:
+                try:
+                    elapsed = float(attempt_trace.get("upstream_elapsed_ms") or 0.0)
+                except (TypeError, ValueError):
+                    elapsed = 0.0
+                if elapsed > 0:
+                    values.append(elapsed)
+            return sum(values)
+
+        def _attempt_first_token_ms() -> float:
+            for attempt_trace in reversed(attempts_payload):
+                if not attempt_trace.get("success"):
+                    continue
+                for key in ("first_token_ms", "provider_ttft_ms"):
+                    try:
+                        value = float(attempt_trace.get(key) or 0.0)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    if value > 0:
+                        return value
+            return 0.0
 
         def _begin_attempt_trace(
             attempt_payload: dict[str, Any],
@@ -4241,13 +4846,17 @@ def create_app(
             fallback_from: str | None = None,
         ) -> None:
             nonlocal current_attempt_trace
+            attempt_index = len(attempts_payload) + 1
+            attempt_start_ns[attempt_index] = time.perf_counter_ns()
             provider_name = ""
             if attempt_payload.get("provider_entry") is not None:
                 provider_name = str(getattr(attempt_payload["provider_entry"], "name", "") or "")
+            selected_attempt_model = str(attempt_payload["selected_model"])
+            resolved_attempt_model = str(attempt_payload["resolved_model"])
             current_attempt_trace = {
-                "attempt_index": len(attempts_payload) + 1,
-                "selected_model": attempt_payload["selected_model"],
-                "resolved_model": attempt_payload["resolved_model"],
+                "attempt_index": attempt_index,
+                "selected_model": selected_attempt_model,
+                "resolved_model": resolved_attempt_model,
                 "provider_name": provider_name,
                 "target_url": attempt_payload["target_chat_url"],
                 "requested_transport": attempt_payload["transport_decision"].requested_transport,
@@ -4258,6 +4867,16 @@ def create_app(
                 "cache_family": _cache_family_name(attempt_payload["cache_plan"]),
                 "cache_breakpoints": attempt_payload["cache_plan"].cache_breakpoints,
                 "fallback_from": fallback_from or "",
+                "fallback_reason": (
+                    f"{fallback_from} unavailable -> {resolved_attempt_model}"
+                    if fallback_from else ""
+                ),
+                "started_at": time.time(),
+                "response_headers_ms": 0.0,
+                "upstream_elapsed_ms": 0.0,
+                "first_token_ms": 0.0,
+                "provider_ttft_ms": 0.0,
+                "tokens_per_second": 0.0,
                 "status_code": 0,
                 "success": False,
                 "error_code": "",
@@ -4271,16 +4890,45 @@ def create_app(
             success: bool = False,
             error_code: str = "",
             error_message: str = "",
+            response_headers: bool = False,
         ) -> None:
             if current_attempt_trace is None:
                 return
+            elapsed_ms = _current_attempt_elapsed_ms()
             if status_code is not None:
                 current_attempt_trace["status_code"] = status_code
             current_attempt_trace["success"] = success
+            if response_headers and not current_attempt_trace.get("response_headers_ms"):
+                current_attempt_trace["response_headers_ms"] = elapsed_ms
+            current_attempt_trace["upstream_elapsed_ms"] = elapsed_ms
             if error_code:
                 current_attempt_trace["error_code"] = error_code
             if error_message:
                 current_attempt_trace["error_message"] = error_message
+
+        def _mark_current_attempt_first_token() -> None:
+            if current_attempt_trace is None:
+                return
+            try:
+                current = float(current_attempt_trace.get("first_token_ms") or 0.0)
+            except (TypeError, ValueError):
+                current = 0.0
+            if current <= 0:
+                current_attempt_trace["first_token_ms"] = _current_attempt_elapsed_ms()
+
+        def _apply_current_attempt_usage_timings(usage_metrics: UsageMetrics | None) -> None:
+            if current_attempt_trace is None or usage_metrics is None:
+                return
+            if usage_metrics.ttft_ms is not None and usage_metrics.ttft_ms > 0:
+                current_attempt_trace["provider_ttft_ms"] = float(usage_metrics.ttft_ms)
+                try:
+                    first_token_ms = float(current_attempt_trace.get("first_token_ms") or 0.0)
+                except (TypeError, ValueError):
+                    first_token_ms = 0.0
+                if first_token_ms <= 0:
+                    current_attempt_trace["first_token_ms"] = float(usage_metrics.ttft_ms)
+            if usage_metrics.tps is not None and usage_metrics.tps > 0:
+                current_attempt_trace["tokens_per_second"] = float(usage_metrics.tps)
 
         def _append_blocked_attempt(
             model_name: str,
@@ -4302,6 +4950,13 @@ def create_app(
                 "cache_family": "",
                 "cache_breakpoints": 0,
                 "fallback_from": "",
+                "fallback_reason": "",
+                "started_at": time.time(),
+                "response_headers_ms": 0.0,
+                "upstream_elapsed_ms": 0.0,
+                "first_token_ms": 0.0,
+                "provider_ttft_ms": 0.0,
+                "tokens_per_second": 0.0,
                 "status_code": 0,
                 "success": False,
                 "error_code": error_code,
@@ -4315,10 +4970,12 @@ def create_app(
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
             _set_header(debug_headers, "x-uncommon-route-tier", tier_value)
             _set_header(debug_headers, "x-uncommon-route-decision-tier", decision_tier or tier_value)
+            _set_header(debug_headers, "x-uncommon-route-method", route_method)
             if served_quality_value:
                 _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
             if capability_lane_value:
                 _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
+                _set_header(debug_headers, "x-uncommon-route-lane", capability_lane_value)
             _set_header(debug_headers, "x-uncommon-route-step", step_type)
             _set_header(debug_headers, "x-uncommon-route-input-before", input_tokens_before)
             _set_header(debug_headers, "x-uncommon-route-input-after", input_tokens_after)
@@ -4351,10 +5008,12 @@ def create_app(
             if not is_virtual:
                 return
             _set_header(debug_headers, "x-uncommon-route-model", selected_model)
+            _set_header(debug_headers, "x-uncommon-route-method", route_method)
             if served_quality_value:
                 _set_header(debug_headers, "x-uncommon-route-served-quality", served_quality_value)
             if capability_lane_value:
                 _set_header(debug_headers, "x-uncommon-route-capability-lane", capability_lane_value)
+                _set_header(debug_headers, "x-uncommon-route-lane", capability_lane_value)
             _set_route_strategy_headers(
                 debug_headers,
                 transport_decision=transport_decision,
@@ -4433,6 +5092,33 @@ def create_app(
                 return True
             return status_code in (400, 404, 422) and _is_model_error(content)
 
+        def _transport_error_response(exc: httpx.TransportError) -> httpx.Response:
+            status_code = 504 if isinstance(exc, httpx.TimeoutException) else 502
+            error_type = "timeout" if status_code == 504 else "proxy_error"
+            if status_code == 504:
+                message = "Upstream request timed out"
+            elif isinstance(exc, httpx.ConnectError):
+                message = f"Upstream unreachable: {upstream_chat}"
+            else:
+                message = "Upstream disconnected before sending a response"
+            detail = str(exc).strip()
+            if detail:
+                message = f"{message}: {detail}"
+            return httpx.Response(
+                status_code,
+                json={"error": {"message": message, "type": error_type}},
+            )
+
+        async def _post_non_stream_attempt(attempt_payload: dict[str, Any]) -> httpx.Response:
+            try:
+                return await _get_client().post(
+                    attempt_payload["target_chat_url"],
+                    json=attempt_payload["transport_body"],
+                    headers=attempt_payload["headers"],
+                )
+            except httpx.TransportError as exc:
+                return _transport_error_response(exc)
+
         def _build_proxy_response(
             *,
             status_code: int,
@@ -4510,14 +5196,19 @@ def create_app(
             error_code: str = "",
             error_stage: str = "",
             error_message: str = "",
+            response_content: bytes | None = None,
+            stream_chunks: list[bytes] | None = None,
         ) -> None:
             method_value = route_method if is_virtual else "passthrough"
             confidence_value = confidence if is_virtual else 1.0
             savings_value = savings if is_virtual else 0.0
             timestamp_value = time.time()
+            route_latency_ms = route_latency_us / 1000.0
+            upstream_elapsed_ms = _attempt_total_upstream_elapsed_ms()
+            first_token_ms = _attempt_first_token_ms()
 
             if is_virtual or status_code == 200:
-                _stats.record(RouteRecord(
+                completed_record = RouteRecord(
                     timestamp=timestamp_value,
                     requested_model=requested_model,
                     mode=mode_value,
@@ -4541,6 +5232,9 @@ def create_app(
                     actual_cost=actual_cost,
                     savings=savings_value,
                     latency_us=route_latency_us,
+                    route_latency_ms=route_latency_ms,
+                    upstream_elapsed_ms=upstream_elapsed_ms,
+                    first_token_ms=first_token_ms,
                     usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
                     usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
                     cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
@@ -4563,6 +5257,7 @@ def create_app(
                     sidechannel_estimated_cost=sidechannel_estimated_cost,
                     sidechannel_actual_cost=sidechannel_actual_cost,
                     session_id=session_id,
+                    turn_id=turn_id,
                     step_type=step_type,
                     fallback_reason=fallback_reason,
                     streaming=streaming,
@@ -4581,7 +5276,32 @@ def create_app(
                     error_code=error_code,
                     error_stage=error_stage,
                     error_message=error_message,
-                ))
+                )
+                _stats.record(completed_record)
+                get_bus().publish({
+                    "type": "request_completed",
+                    "record": record_to_recent_dict(completed_record),
+                })
+
+            transport_for_capture = transport_decision.selected_transport
+            # The Responses API raw body has no `messages` field (it uses
+            # `input`/`previous_response_id`); use the converted chat-shape
+            # body so request_messages captures the full backbone. Other
+            # wire formats keep their original source_body to preserve shape
+            # (Anthropic blocks etc.). Decide by endpoint, not upstream
+            # transport — Responses ingress is normalized to openai-chat
+            # before reaching the upstream.
+            if endpoint_name == "responses":
+                capture_body = body
+            else:
+                capture_body = source_body or body
+
+            def _capture_for_record(content, chunks):
+                if content is not None:
+                    return _capture_non_streaming(capture_body, content, transport_for_capture)
+                if chunks is not None:
+                    return _capture_streaming(capture_body, chunks, transport_for_capture)
+                return {}
 
             _traces.record(RequestTrace(
                 timestamp=timestamp_value,
@@ -4619,6 +5339,9 @@ def create_app(
                 actual_cost=actual_cost,
                 savings=savings_value,
                 latency_us=route_latency_us,
+                route_latency_ms=route_latency_ms,
+                upstream_elapsed_ms=upstream_elapsed_ms,
+                first_token_ms=first_token_ms,
                 usage_input_tokens=usage_metrics.input_tokens_total if usage_metrics else 0,
                 usage_output_tokens=usage_metrics.output_tokens if usage_metrics else 0,
                 cache_read_input_tokens=usage_metrics.cache_read_input_tokens if usage_metrics else 0,
@@ -4656,6 +5379,8 @@ def create_app(
                 error_code=error_code,
                 error_stage=error_stage,
                 error_message=error_message,
+                **_extract_session_v2_inputs(request, source_body or body),
+                **_capture_for_record(response_content, stream_chunks),
             ))
 
         def _record_response_error(response: Response, *, streaming: bool) -> None:
@@ -4675,9 +5400,20 @@ def create_app(
                 error_message=derived_error_message,
             )
 
+        # Tracks whether the streaming path has completed a record() call.
+        # Needed because Starlette cancels the response generator when the
+        # client disconnects, raising CancelledError that bypasses
+        # `except Exception` and would otherwise leave the row stuck in
+        # routed state on the dashboard.
+        stream_record_state = {"done": False}
+
         try:
             if is_streaming:
-                async def _record_stream_success(stream_usage: UsageMetrics | None) -> None:
+                async def _record_stream_success(
+                    stream_usage: UsageMetrics | None,
+                    *,
+                    stream_chunks: list[bytes] | None = None,
+                ) -> None:
                     stream_actual_cost: float | None = None
                     stream_ttft_ms: float | None = None
                     stream_tps: float | None = None
@@ -4689,6 +5425,8 @@ def create_app(
                         )
                         stream_ttft_ms = stream_usage.ttft_ms
                         stream_tps = stream_usage.tps
+                    _apply_current_attempt_usage_timings(stream_usage)
+                    _complete_attempt_trace(status_code=200, success=True)
 
                     if is_virtual:
                         _model_experience.observe(
@@ -4726,6 +5464,7 @@ def create_app(
                             actual_cost=stream_actual_cost,
                             usage_metrics=stream_usage,
                             streaming=True,
+                            stream_chunks=stream_chunks,
                         )
                     else:
                         _record_route_trace(
@@ -4733,10 +5472,18 @@ def create_app(
                             actual_cost=stream_actual_cost,
                             usage_metrics=stream_usage,
                             streaming=True,
+                            stream_chunks=stream_chunks,
                         )
+                    stream_record_state["done"] = True
 
                 async def _record_stream_failure() -> None:
                     await _spend_reservation.release(request_id)
+                    _complete_attempt_trace(
+                        status_code=502,
+                        success=False,
+                        error_code="stream_failure",
+                        error_message="Streaming response interrupted",
+                    )
                     if is_virtual:
                         _model_experience.observe(
                             selected_model,
@@ -4760,6 +5507,32 @@ def create_app(
                             error_stage="stream",
                             error_message="Streaming response interrupted",
                         )
+                    stream_record_state["done"] = True
+
+                async def _record_stream_aborted(
+                    stream_chunks: list[bytes] | None = None,
+                ) -> None:
+                    if stream_record_state["done"]:
+                        return
+                    try:
+                        await _spend_reservation.release(request_id)
+                    except Exception:
+                        pass
+                    _complete_attempt_trace(
+                        status_code=499,
+                        success=False,
+                        error_code="client_disconnected",
+                        error_message="Client closed connection before stream finalized",
+                    )
+                    _record_route_trace(
+                        status_code=499,
+                        streaming=True,
+                        error_code="client_disconnected",
+                        error_stage="stream",
+                        error_message="Client closed connection before stream finalized",
+                        stream_chunks=stream_chunks,
+                    )
+                    stream_record_state["done"] = True
 
                 async def _open_stream_attempt(attempt_payload: dict[str, Any]) -> httpx.Response:
                     client = _get_client()
@@ -4787,7 +5560,11 @@ def create_app(
                         )
                         resp = await _open_stream_attempt(attempt_payload)
                         if resp.status_code < 400:
-                            _complete_attempt_trace(status_code=resp.status_code, success=True)
+                            _complete_attempt_trace(
+                                status_code=resp.status_code,
+                                success=True,
+                                response_headers=True,
+                            )
                             if index > 0 and fallback_source_model is not None:
                                 _apply_attempt(attempt_payload, fallback_from=fallback_source_model)
                             return resp, None
@@ -4849,6 +5626,7 @@ def create_app(
                         try:
                             async for chunk in stream_resp.aiter_bytes():
                                 stream_chunks.append(chunk)
+                                _mark_current_attempt_first_token()
                                 if converter is None:
                                     yield chunk
                                 else:
@@ -4858,12 +5636,14 @@ def create_app(
                                 for ev in converter.finish():
                                     yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                stream_chunks=stream_chunks,
                             )
                         except Exception:
                             await _record_stream_failure()
                             raise
                         finally:
+                            await _record_stream_aborted(stream_chunks=stream_chunks)
                             await stream_resp.aclose()
 
                     return StreamingResponse(
@@ -4889,17 +5669,20 @@ def create_app(
                         try:
                             async for chunk in stream_resp.aiter_bytes():
                                 stream_chunks.append(chunk)
+                                _mark_current_attempt_first_token()
                                 for ev in converter.feed(chunk):
                                     yield ev
                             for ev in converter.finish():
                                 yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                stream_chunks=stream_chunks,
                             )
                         except Exception:
                             await _record_stream_failure()
                             raise
                         finally:
+                            await _record_stream_aborted(stream_chunks=stream_chunks)
                             await stream_resp.aclose()
 
                     return StreamingResponse(
@@ -4917,14 +5700,17 @@ def create_app(
                     try:
                         async for chunk in stream_resp.aiter_bytes():
                             stream_chunks.append(chunk)
-                            yield chunk
+                            _mark_current_attempt_first_token()
+                            yield _normalize_reasoning_content_chunk(chunk)
                         await _record_stream_success(
-                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing())
+                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                            stream_chunks=stream_chunks,
                         )
                     except Exception:
                         await _record_stream_failure()
                         raise
                     finally:
+                        await _record_stream_aborted(stream_chunks=stream_chunks)
                         await stream_resp.aclose()
 
                 return StreamingResponse(
@@ -4937,9 +5723,8 @@ def create_app(
                     },
                 )
 
-            client = _get_client()
             _begin_attempt_trace(attempt)
-            resp = await client.post(target_chat_url, json=transport_body, headers=fwd_headers)
+            resp = await _post_non_stream_attempt(attempt)
             initial_error_code = ""
             initial_error_message = ""
             if resp.status_code < 400:
@@ -4962,11 +5747,7 @@ def create_app(
                         return spend_error
                     fb_attempt = _prepare_attempt(fb_model)
                     _begin_attempt_trace(fb_attempt, fallback_from=fallback_source_model)
-                    retry = await client.post(
-                        fb_attempt["target_chat_url"],
-                        json=fb_attempt["transport_body"],
-                        headers=fb_attempt["headers"],
-                    )
+                    retry = await _post_non_stream_attempt(fb_attempt)
                     retry_error_code = ""
                     retry_error_message = ""
                     if retry.status_code < 400:
@@ -5009,6 +5790,7 @@ def create_app(
                         _set_header(debug_headers, "x-uncommon-route-cache-hit-ratio", round(usage_metrics.cache_hit_ratio, 4))
                         _set_header(debug_headers, "x-uncommon-route-cache-read", usage_metrics.cache_read_input_tokens)
                         _set_header(debug_headers, "x-uncommon-route-cache-write", usage_metrics.cache_write_input_tokens)
+                    _apply_current_attempt_usage_timings(usage_metrics)
 
             if is_virtual:
                 if resp.status_code == 200:
@@ -5085,6 +5867,7 @@ def create_app(
                     error_code=upstream_error_code,
                     error_stage=upstream_error_stage,
                     error_message=upstream_error_message,
+                    response_content=resp.content,
                 )
                 # ─── v2 telemetry Stage 2: complete record with outcome ───
                 try:
@@ -5112,6 +5895,7 @@ def create_app(
                     error_code=passthrough_error_code,
                     error_stage=passthrough_error_stage,
                     error_message=passthrough_error_message,
+                    response_content=resp.content,
                 )
 
             return _build_proxy_response(
@@ -5232,7 +6016,9 @@ def create_app(
             default_model=VIRTUAL_MODEL_IDS[_routing_store.default_mode()],
         )
         response_id = f"resp_{uuid.uuid4().hex[:24]}"
-        upstream_resp = await _handle_chat_core(body, request, endpoint_name="responses")
+        upstream_resp = await _handle_chat_core(
+            body, request, endpoint_name="responses", source_body=raw,
+        )
 
         if upstream_resp.status_code != 200:
             return upstream_resp
@@ -5324,12 +6110,20 @@ def create_app(
         Route("/v1/stats", handle_stats, methods=["GET", "POST"]),
         Route("/v1/selector", handle_selector, methods=["GET", "POST"]),
         Route("/v1/routing-config", handle_routing_config, methods=["GET", "POST"]),
+        Route("/v1/scenes", handle_scenes, methods=["GET", "POST"]),
+        Route("/v1/scenes/{name:str}", handle_scene_detail, methods=["GET"]),
         Route("/v1/artifacts", handle_artifacts, methods=["GET"]),
         Route("/v1/artifacts/{artifact_id:str}", handle_artifact, methods=["GET"]),
         Route("/v1/feedback", handle_feedback, methods=["GET", "POST"]),
         Route("/v1/stats/recent", handle_recent, methods=["GET"]),
+        Route("/v1/events/stream", handle_events_stream, methods=["GET"]),
         Route("/v1/traces", handle_traces, methods=["GET"]),
         Route("/v1/traces/{request_id:str}", handle_trace_detail, methods=["GET"]),
+        Route(
+            "/v1/sessions/{session_id:str}/conversation",
+            handle_session_conversation,
+            methods=["GET"],
+        ),
         Route("/v1/route-preview", handle_route_preview, methods=["POST"]),
         Route("/v1/v2-metrics", handle_v2_metrics, methods=["GET"]),
     ]

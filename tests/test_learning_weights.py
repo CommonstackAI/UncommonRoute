@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 from uncommon_route.learning.weights import SignalWeightTracker
 
 
@@ -17,7 +15,6 @@ def test_correct_signal_weight_increases():
 
 def test_abstaining_signal_not_updated():
     tracker = SignalWeightTracker(initial_weights=[0.5, 0.5])
-    old_w1 = tracker.weights[1]
     tracker.update(predictions=[1, None], abstained=[False, True], actual_tier=1)
     # Abstaining signal weight changes only due to normalization
     # but should not be directly penalized/rewarded

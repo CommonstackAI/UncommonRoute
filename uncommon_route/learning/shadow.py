@@ -9,10 +9,8 @@ After `promote_after` consecutive positive windows, Signal B is auto-promoted.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 logger = logging.getLogger("uncommon-route.shadow")
 

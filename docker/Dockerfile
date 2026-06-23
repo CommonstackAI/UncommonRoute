@@ -17,11 +17,11 @@ RUN groupadd --system uncommon-route \
 COPY . /app
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN pip install --upgrade pip \
+RUN python -m pip install --upgrade pip \
     && if [ -n "${UNCOMMON_ROUTE_INSTALL_EXTRAS}" ]; then \
-         pip install ".[${UNCOMMON_ROUTE_INSTALL_EXTRAS}]"; \
+         python -m pip install ".[${UNCOMMON_ROUTE_INSTALL_EXTRAS}]"; \
        else \
-         pip install .; \
+         python -m pip install .; \
        fi \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
     && mkdir -p /data \

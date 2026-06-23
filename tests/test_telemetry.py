@@ -1,8 +1,6 @@
 """E2E tests for telemetry: opt-in logic, record lifecycle, buffer, privacy."""
 
-import json
 import os
-from pathlib import Path
 from unittest import mock
 
 import numpy as np

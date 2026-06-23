@@ -56,7 +56,7 @@ def test_embedding_signal_abstains_when_no_index(tmp_path):
     assert vote.abstained
 
 
-def test_embedding_signal_warns_when_auto_classifier_cannot_load(tmp_path, monkeypatch, caplog):
+def test_embedding_signal_warns_when_auto_classifier_cannot_load(tmp_path, monkeypatch, caplog, capsys):
     _make_seed_index(tmp_path)
     (tmp_path / "embedding_classifier.pkl").write_bytes(b"not actually used")
 
@@ -73,8 +73,11 @@ def test_embedding_signal_warns_when_auto_classifier_cannot_load(tmp_path, monke
         )
 
     assert sig._classifier is None
-    assert "Failed to auto-load embedding classifier" in caplog.text
+    assert "Embedding classifier failed to load" in caplog.text
     assert "xgboost" in caplog.text
+    stderr = capsys.readouterr().err
+    assert "Routing will continue with weaker metadata/structural signals" in stderr
+    assert "brew install libomp" in stderr
 
 
 def test_extract_last_user_message():
@@ -85,6 +88,23 @@ def test_extract_last_user_message():
         {"role": "user", "content": "Second question"},
     ]
     assert _extract_last_user_message(messages) == "Second question"
+
+
+def test_extract_last_user_message_strips_client_wrapper_blocks():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<system-reminder>\nThe following skills are available for use with the Skill tool.\n</system-reminder>",
+                },
+                {"type": "text", "text": "hello"},
+            ],
+        },
+    ]
+
+    assert _extract_last_user_message(messages) == "hello"
 
 
 def test_extract_last_user_message_empty():

@@ -70,6 +70,7 @@ Commands:
   stats [sub]                       Routing analytics (summary|history|reset)
   explain <prompt>                  Show v2 signal breakdown for a prompt
   telemetry [sub]                   Anonymous data sharing (status|enable|disable|show-sent|flush)
+  traces purge                      Delete all stored trace JSONL files
   --version                         Show version
 
 Route options:
@@ -123,6 +124,12 @@ Stats subcommands:
   stats history [--limit <n>]         Recent routing decisions
   stats reset                         Clear all stats
 
+Scene subcommands:
+  scene list                          List named routing scenes
+  scene add <name> <primary> [...]    Add or update a routing scene
+  scene show <name>                   Show one routing scene
+  scene remove <name>                 Remove one routing scene
+
 Config subcommands:
   config show [--json]                Show active default mode and tier overrides
   config set-default-mode <mode>      Set the default mode used when no model is specified
@@ -147,13 +154,14 @@ Examples:
   uncommon-route support bundle
   uncommon-route spend set hourly 5.00
   uncommon-route provider add deepseek sk-...
+  uncommon-route scene add coding anthropic/claude-sonnet-4.6 openai/gpt-5.2
   uncommon-route config set-default-mode fast
   uncommon-route config set-tier auto SIMPLE openai/gpt-4o-mini --fallback moonshot/kimi-k2.5 --strategy hard-pin
 """)
 
 
 def _print_init_help() -> None:
-    print("""Usage: uncommon-route init [--port <n>]
+    print("""Usage: uncommon-route init [--port <n>] [--tui] [--lang en|zh]
 
 Interactive first-run setup.
 
@@ -164,9 +172,15 @@ What it can do:
   - Configure Claude Code / Codex / OpenAI SDK shell exports
   - Optionally start the proxy in background
 
+Flags:
+  --tui          Launch the Textual UI (requires `pip install 'uncommon-route[tui]'`)
+  --lang en|zh   Skip the language picker and use the given language
+
 Examples:
   uncommon-route init
+  uncommon-route init --tui
   uncommon-route init --port 8404
+  uncommon-route init --lang zh
 """)
 
 
@@ -240,7 +254,7 @@ Diagnostics helpers:
 def _print_provider_help() -> None:
     print("""Usage:
   uncommon-route provider list
-  uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>]
+  uncommon-route provider add <name> <api_key> [--plan <plan>] [--url <base_url>] [--models <model1,model2>]
   uncommon-route provider remove <name>
   uncommon-route provider models
 
@@ -256,6 +270,20 @@ Classify a prompt and show the routing decision without sending it upstream.
 """)
 
 
+def _print_scene_help() -> None:
+    print("""Usage: uncommon-route scene <list|add|show|remove> [...]
+
+Manage named routing scenes.
+
+Examples:
+  uncommon-route scene list
+  uncommon-route scene add coding anthropic/claude-sonnet-4.6 openai/gpt-5.2
+  uncommon-route scene add private anthropic/claude-opus-4.6 --hard-pin --description "private chat"
+  uncommon-route scene show coding
+  uncommon-route scene remove coding
+""")
+
+
 def _print_generic_subcommand_help(cmd: str) -> None:
     printers = {
         "init": _print_init_help,
@@ -266,13 +294,14 @@ def _print_generic_subcommand_help(cmd: str) -> None:
         "support": _print_support_help,
         "provider": _print_provider_help,
         "route": _print_route_help,
+        "scene": _print_scene_help,
     }
     printer = printers.get(cmd, _print_help)
     printer()
 
 
 def _wants_help(args: list[str]) -> bool:
-    return bool(args) and args[0] in {"-h", "--help"}
+    return any(arg in {"-h", "--help"} for arg in args)
 
 
 def _detect_rc_path() -> tuple[str, Path]:
@@ -813,59 +842,202 @@ def _cmd_logs(args: list[str]) -> None:
         print(line)
 
 
+_ANSI_RESET = "\x1b[0m"
+_ANSI_DIM = "\x1b[2m"
+_ANSI_BOLD = "\x1b[1m"
+_ANSI_ORANGE = "\x1b[33m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_RED = "\x1b[31m"
+
+# Commonstack brand indigo blended 60% with white so the logo lifts off
+# a dark terminal background — the raw #1A1A71 reads almost black.
+# Resulting color: #7676AA (RGB 118, 118, 170).
+_BRAND_INDIGO_TRUECOLOR = "\x1b[38;2;118;118;170m"
+_BRAND_INDIGO_256 = "\x1b[38;5;103m"  # closest 256-color match (~#8787AF)
+_BRAND_INDIGO_BASIC = "\x1b[94m"  # bright blue fallback
+
+
+def _supports_color() -> bool:
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("NO_COLOR") != "1"
+        and os.environ.get("TERM", "").lower() != "dumb"
+    )
+
+
+def _truecolor_supported() -> bool:
+    return _supports_color() and os.environ.get("COLORTERM", "").lower() in {"truecolor", "24bit"}
+
+
+def _brand_indigo_code() -> str:
+    if not _supports_color():
+        return ""
+    if _truecolor_supported():
+        return _BRAND_INDIGO_TRUECOLOR
+    if "256" in os.environ.get("TERM", "").lower():
+        return _BRAND_INDIGO_256
+    return _BRAND_INDIGO_BASIC
+
+
+def _c(text: str, code: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{code}{text}{_ANSI_RESET}"
+
+
+_INIT_LOGO_LINES = (
+    "██   ██   ██████ ",
+    "██   ██   ██   ██",
+    "██   ██   ██████ ",
+    "██   ██   ██   ██",
+    " █████    ██   ██",
+)
+
+
+def _print_init_logo(subtitle: str) -> None:
+    print()
+    if _supports_color():
+        logo_code = _brand_indigo_code() + _ANSI_BOLD
+        for line in _INIT_LOGO_LINES:
+            print(f"  {_c(line, logo_code)}")
+        print()
+        print(f"  {_c(subtitle, _ANSI_DIM)}")
+    else:
+        print("  UncommonRoute")
+        print(f"  {subtitle}")
+    print()
+
+
+def _section_header(label: str) -> None:
+    print()
+    print(f"  {_c(label, _ANSI_BOLD)}")
+    print(f"  {_c('─' * max(20, len(label) + 4), _ANSI_DIM)}")
+
+
+def _ok(msg: str) -> None:
+    print(f"  {_c('✓', _ANSI_GREEN)} {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  {_c('!', _ANSI_ORANGE)} {msg}")
+
+
+def _fail(msg: str) -> None:
+    print(f"  {_c('✗', _ANSI_RED)} {msg}")
+
+
+def _pick_init_language(prompter: TerminalPrompter) -> str:
+    """Step 0 — pick interface language. Returns 'en' or 'zh'."""
+    from uncommon_route.tui.i18n import t as translate
+
+    choice = prompter.choose(
+        translate("cli.lang_picker", "en"),
+        [
+            MenuOption("en", translate("cli.lang.en_label", "en")),
+            MenuOption("zh", translate("cli.lang.zh_label", "en")),
+        ],
+    )
+    return choice.value
+
+
 def _cmd_init(args: list[str]) -> None:
     from uncommon_route.providers import KNOWN_BASE_URLS, add_provider, load_providers
+    from uncommon_route.tui.i18n import SUPPORTED_LANGS
+    from uncommon_route.tui.i18n import t as translate
 
-    flags, _ = _parse_flags(args, {"port": True})
+    flags, _ = _parse_flags(args, {"port": True, "tui": False, "lang": True})
     port = int(flags.get("port", 8403))
+
+    if flags.get("tui") or os.environ.get("UNCOMMON_ROUTE_TUI") == "1":
+        try:
+            from uncommon_route.tui.init_app import run_init_tui
+        except ImportError:
+            print("  ! Textual is not installed. Install the optional extra:", file=sys.stderr)
+            print("      pip install 'uncommon-route[tui]'", file=sys.stderr)
+            sys.exit(1)
+
+        rc_display, rc_path = _detect_rc_path()
+
+        def _render(client: str, port: int) -> list[str]:
+            return _render_client_exports(client, port=port)
+
+        run_init_tui(
+            rc_path=rc_path,
+            rc_display=rc_display,
+            render_exports=_render,
+            start_background_proxy=_start_background_proxy,
+            port=port,
+        )
+        return
+
     prompter = TerminalPrompter()
     store = ConnectionsStore()
 
-    print()
-    print("  UncommonRoute setup wizard")
-    print("  ─────────────────────────────────────────────")
-    print("  This will help you choose a connection path, configure a client,")
-    print("  and optionally start the proxy in background.")
+    # Step 0 — language. --lang flag short-circuits the picker (handy for CI/scripts).
+    lang_flag = str(flags.get("lang", "")).strip().lower()
+    if lang_flag in SUPPORTED_LANGS:
+        lang = lang_flag
+    else:
+        _print_init_logo("UncommonRoute  ·  local llm router")
+        try:
+            lang = _pick_init_language(prompter)
+        except KeyboardInterrupt:
+            print()
+            print("  Setup cancelled.")
+            sys.exit(130)
+
+    def t(key: str, **fmt: object) -> str:
+        return translate(key, lang, **fmt)
+
+    if lang_flag in SUPPORTED_LANGS:
+        # When language was passed via --lang we still owe the user a logo + intro.
+        _print_init_logo(t("splash.subtitle"))
+
+    print(f"  {_c(t('cli.title'), _ANSI_BOLD)}")
+    print(f"  {_c('─' * 50, _ANSI_DIM)}")
+    print(f"  {t('cli.intro')}")
     print()
 
     try:
+        # Connection step
+        _section_header(t("cli.section.connection"))
         connection_choice = prompter.choose(
-            "How do you want UncommonRoute to connect upstream?",
+            t("upstream.title"),
             [
-                MenuOption("commonstack", "Commonstack managed upstream", "recommended for first-time setup"),
-                MenuOption("local", "Local or custom upstream", "for Ollama, gateways, or self-hosted APIs"),
-                MenuOption("byok", "Bring your own provider keys", "register OpenAI / Anthropic / Google keys directly"),
-                MenuOption("skip", "Skip connection setup for now", "only configure the client side"),
+                MenuOption("commonstack", t("upstream.choice.commonstack"), t("cli.upstream.commonstack_hint")),
+                MenuOption("local", t("upstream.choice.local"), t("cli.upstream.local_hint")),
+                MenuOption("byok", t("upstream.choice.byok"), t("cli.upstream.byok_hint")),
+                MenuOption("skip", t("upstream.choice.skip"), t("cli.upstream.skip_hint")),
             ],
         )
 
         configured_connection = "none"
         if connection_choice.value == "commonstack":
             upstream = prompter.ask(
-                "Commonstack upstream URL",
+                t("cli.upstream.commonstack_url_prompt"),
                 default="https://api.commonstack.ai/v1",
             )
-            api_key = prompter.ask("Commonstack API key", secret=True)
+            api_key = prompter.ask(t("cli.upstream.commonstack_key_prompt"), secret=True)
             store.set_primary(upstream=upstream, api_key=api_key)
             configured_connection = "commonstack"
-            print(f"  ✓ Saved primary upstream: {upstream}")
+            _ok(t("cli.status.saved_upstream", url=upstream))
             print()
         elif connection_choice.value == "local":
             existing = store.primary()
             default_upstream = existing.upstream or "http://127.0.0.1:11434/v1"
-            upstream = prompter.ask("Local/custom upstream URL", default=default_upstream)
+            upstream = prompter.ask(t("cli.upstream.local_url_prompt"), default=default_upstream)
             api_key = prompter.ask(
-                "API key (leave blank if not needed)",
+                t("cli.upstream.local_key_prompt"),
                 secret=True,
                 allow_empty=True,
             )
             store.set_primary(upstream=upstream, api_key=api_key)
             configured_connection = "local"
-            print(f"  ✓ Saved primary upstream: {upstream}")
+            _ok(t("cli.status.saved_upstream", url=upstream))
             if api_key:
-                print("  ✓ Saved API key for that upstream")
+                _ok(t("cli.status.saved_api_key"))
             else:
-                print("  ✓ No API key needed for that upstream")
+                _ok(t("cli.status.no_api_key"))
             print()
         elif connection_choice.value == "byok":
             preferred_provider_order = [
@@ -880,36 +1052,38 @@ def _cmd_init(args: list[str]) -> None:
             provider_names = [name for name in preferred_provider_order if name in KNOWN_BASE_URLS]
             added: list[str] = []
             if store.primary().upstream and prompter.confirm(
-                "Clear the existing primary upstream and use BYOK-only mode?",
+                t("cli.byok.clear_prompt"),
                 default=False,
             ):
                 store.reset()
-                print("  ✓ Cleared stored primary upstream")
+                _ok(t("cli.status.cleared_upstream"))
             while True:
                 provider_choice = prompter.choose(
-                    "Which provider key do you want to add?",
+                    t("cli.byok.add_prompt"),
                     [MenuOption(name, name) for name in provider_names],
                 )
-                api_key = prompter.ask(f"{provider_choice.label} API key", secret=True)
+                api_key = prompter.ask(t("cli.byok.key_prompt", name=provider_choice.label), secret=True)
                 add_provider(provider_choice.value, api_key)
                 added.append(provider_choice.value)
-                print(f"  ✓ Saved provider: {provider_choice.label}")
-                print("  ! Run `uncommon-route doctor` to validate the key and provider reachability.")
+                _ok(t("cli.status.saved_provider", name=provider_choice.label))
+                _warn(t("cli.status.run_doctor"))
                 print()
-                if not prompter.confirm("Add another provider?", default=False):
+                if not prompter.confirm(t("cli.byok.add_another"), default=False):
                     break
             configured_connection = f"byok:{','.join(added)}"
         else:
-            print("  Skipping connection setup.")
+            print(f"  {t('cli.status.skip_connection')}")
             print()
 
+        # Client step
+        _section_header(t("cli.section.client"))
         client_choice = prompter.choose(
-            "Which client do you want to configure?",
+            t("cli.client.prompt"),
             [
-                MenuOption("claude-code", "Claude Code"),
-                MenuOption("codex", "Codex"),
-                MenuOption("openai", "OpenAI SDK / Cursor"),
-                MenuOption("skip", "Skip client setup for now"),
+                MenuOption("claude-code", t("client.choice.claude_code")),
+                MenuOption("codex", t("client.choice.codex")),
+                MenuOption("openai", t("client.choice.openai")),
+                MenuOption("skip", t("cli.client.choice_skip")),
             ],
         )
 
@@ -921,19 +1095,20 @@ def _cmd_init(args: list[str]) -> None:
             client_exports = _render_client_exports(client_choice.value, port=port)
             rc_display, rc_path = _detect_rc_path()
             if prompter.confirm(
-                f"Write {client_choice.label} exports to {rc_display}?",
+                t("cli.client.write_rc_prompt", client=client_choice.label, rc=rc_display),
                 default=True,
             ):
                 upsert_shell_block(rc_path, "client", client_exports)
                 wrote_rc = True
-                print(f"  ✓ Updated {rc_display}")
+                _ok(t("cli.status.updated_rc", rc=rc_display))
                 print()
             else:
-                print("  Client exports:")
+                print(f"  {t('cli.client.exports_header')}")
                 for line in client_exports:
                     print(f"    {line}")
                 print()
 
+        # Proxy step
         effective = resolve_primary_connection(store=store)
         providers = load_providers()
         primary_ready = bool(effective.upstream) and (
@@ -943,49 +1118,53 @@ def _cmd_init(args: list[str]) -> None:
         ready = primary_ready or bool(providers.providers)
 
         started_proxy = False
-        if ready and prompter.confirm("Start the proxy in background now?", default=False):
-            started, message = _start_background_proxy(port=port, host="127.0.0.1")
-            print(f"  {'✓' if started else '!'} {message}")
-            if started:
-                print(f"  ✓ Logs: {_LOG_FILE}")
-                started_proxy = True
-            print()
+        if ready:
+            _section_header(t("cli.section.proxy"))
+            if prompter.confirm(t("cli.proxy.start_prompt"), default=False):
+                started, message = _start_background_proxy(port=port, host="127.0.0.1")
+                if started:
+                    _ok(message)
+                    _ok(t("cli.proxy.logs_at", path=str(_LOG_FILE)))
+                    started_proxy = True
+                else:
+                    _warn(message)
+                print()
 
-        print("  Setup summary")
-        print("  ─────────────────────────────────────────────")
+        # Summary
+        _section_header(t("cli.section.summary"))
         if configured_connection == "commonstack":
-            print("  ✓ Primary connection saved for Commonstack.")
+            _ok(t("cli.summary.commonstack_saved"))
         elif configured_connection == "local":
-            print("  ✓ Primary connection saved for a local/custom upstream.")
+            _ok(t("cli.summary.local_saved"))
         elif configured_connection.startswith("byok:"):
             configured = configured_connection.split(":", 1)[1].split(",")
-            print(f"  ✓ BYOK providers configured: {', '.join(name for name in configured if name)}")
+            _ok(t("cli.summary.byok_saved", names=", ".join(name for name in configured if name)))
         else:
-            print("  ! No connection path was changed in this run.")
+            _warn(t("cli.summary.no_change"))
 
         if client_choice.value != "skip":
             if wrote_rc:
-                print(f"  ✓ Client shell exports written to {rc_display}.")
-                print("  ! Restart your terminal or run `source` on that file before launching the client.")
+                _ok(t("cli.summary.rc_written", rc=rc_display))
+                _warn(t("cli.summary.restart_terminal"))
             else:
-                print("  ! Client exports were not written automatically.")
+                _warn(t("cli.summary.exports_not_written"))
         else:
-            print("  ! Client setup was skipped.")
+            _warn(t("cli.summary.client_skipped"))
 
         if started_proxy:
-            print(f"  ✓ Proxy is running at http://localhost:{port}")
+            _ok(t("cli.summary.proxy_running", port=port))
         elif ready:
             serve_cmd = "uncommon-route serve --daemon" if port == 8403 else f"uncommon-route serve --daemon --port {port}"
-            print(f"  Next: {serve_cmd}")
+            print(f"  {t('cli.summary.next_serve', cmd=serve_cmd)}")
         else:
-            print("  Next: finish connection setup, then run `uncommon-route doctor`.")
+            print(f"  {t('cli.summary.next_complete_setup')}")
 
         if client_choice.value in {"claude-code", "codex", "openai"}:
-            print('  Use model ID: "uncommon-route/auto"')
+            print(f"  {t('cli.summary.use_model_id')}")
         print()
     except KeyboardInterrupt:
         print()
-        print("  Setup cancelled.")
+        print(f"  {t('cli.cancelled')}")
         sys.exit(130)
 
 
@@ -1622,6 +1801,116 @@ def _setup_openai(args: list[str]) -> None:
 """)
     print(f"  Status: {status}")
 
+def _cmd_scene(args: list[str]) -> None:
+    """Manage named routing scenes."""
+    if not args:
+        print("Usage: uncommon-route scene <action>", file=sys.stderr)
+        print("  Actions: list, add, remove, show", file=sys.stderr)
+        sys.exit(1)
+
+    from uncommon_route.scene_store import SceneConfig, SceneStore
+
+    store = SceneStore()
+    action = args[0].lower()
+
+    if action == "list":
+        scenes = store.list()
+        if not scenes:
+            print("No scenes configured.")
+            print("  Add one: uncommon-route scene add intimate anthropic/claude-opus-4.6 --hard-pin")
+            return
+        for scene in scenes:
+            pin_label = " [hard-pin]" if scene.hard_pin else " [adaptive]"
+            desc = f"  ({scene.description})" if scene.description else ""
+            fallback_str = f" -> {', '.join(scene.fallback)}" if scene.fallback else ""
+            print(f"  {scene.name}: {scene.primary}{fallback_str}{pin_label}{desc}")
+
+    elif action == "add":
+        if len(args) < 3:
+            print(
+                "Usage: uncommon-route scene add <name> <primary> [fallback...] "
+                "[--hard-pin] [--description 'desc']",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        name = args[1]
+        primary = args[2]
+        fallback = []
+        hard_pin = False
+        description = ""
+        i = 3
+        while i < len(args):
+            if args[i] == "--hard-pin":
+                hard_pin = True
+                i += 1
+            elif args[i] == "--description" and i + 1 < len(args):
+                description = args[i + 1]
+                i += 2
+            elif args[i] == "--fallback":
+                i += 1
+                while i < len(args) and not args[i].startswith("--"):
+                    fallback.append(args[i])
+                    i += 1
+            elif not args[i].startswith("--"):
+                fallback.append(args[i])
+                i += 1
+            else:
+                i += 1
+
+        scene = SceneConfig(
+            name=name,
+            primary=primary,
+            fallback=fallback,
+            hard_pin=hard_pin,
+            description=description,
+        )
+        stored = store.add(scene)
+        pin_label = "hard-pin" if stored.hard_pin else "adaptive"
+        print(f"Scene '{stored.name}' saved: {stored.primary} [{pin_label}]")
+        if stored.fallback:
+            print(f"  Fallback: {', '.join(stored.fallback)}")
+
+    elif action == "remove":
+        if len(args) < 2:
+            print("Usage: uncommon-route scene remove <name>", file=sys.stderr)
+            sys.exit(1)
+        name = args[1]
+        if store.remove(name):
+            print(f"Scene '{name}' removed.")
+        else:
+            print(f"Scene '{name}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "show":
+        if len(args) < 2:
+            print("Usage: uncommon-route scene show <name>", file=sys.stderr)
+            sys.exit(1)
+        name = args[1]
+        scene = store.get(name)
+        if not scene:
+            print(f"Scene '{name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Scene: {scene.name}")
+        print(f"  Primary: {scene.primary}")
+        if scene.fallback:
+            print(f"  Fallback: {', '.join(scene.fallback)}")
+        print(f"  Mode: {'hard-pin' if scene.hard_pin else 'adaptive'}")
+        if scene.description:
+            print(f"  Description: {scene.description}")
+        if scene.tier_floor:
+            print(f"  Tier floor: {scene.tier_floor.value}")
+        if scene.tier_cap:
+            print(f"  Tier cap: {scene.tier_cap.value}")
+        if scene.allowed_providers:
+            print(f"  Allowed providers: {', '.join(scene.allowed_providers)}")
+        if scene.max_cost_per_request is not None:
+            print(f"  Max cost/req: ${scene.max_cost_per_request:.4f}")
+        print(f"  Model pool: {' -> '.join(scene.model_pool())}")
+
+    else:
+        print(f"Unknown scene action: {action}", file=sys.stderr)
+        print("  Actions: list, add, remove, show", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_telemetry(args: list[str]) -> None:
@@ -1664,25 +1953,42 @@ def _cmd_explain(args: list[str]) -> None:
         print("Usage: uncommon-route explain <prompt>")
         print('Example: uncommon-route explain "Design a distributed rate limiter"')
         return
-    from uncommon_route.router.api import _v2_classify, _TIER_ID_TO_COMPLEXITY
+    from uncommon_route.router.api import _v2_classify
     from uncommon_route.v2_tiers import ID_TO_TIER
     v2 = _v2_classify(prompt, None, None, None, None)
     print(f"\n  Tier: {ID_TO_TIER.get(v2.tier_id, '?')} (id={v2.tier_id})")
     print(f"  Confidence: {v2.confidence:.1%}")
     print(f"  Method: {v2.method}")
-    cost = _TIER_ID_TO_COMPLEXITY.get(v2.tier_id, 0.02)
     print(f"  Complexity: {v2.complexity:.2f}")
     signals = [
         ("metadata", v2.vote_a.tier_id, v2.vote_a.confidence, False),
         ("structural", v2.vote_b.tier_id, v2.vote_b.confidence, True),
         ("embedding", v2.vote_c.tier_id, v2.vote_c.confidence, False),
     ]
-    print(f"\n  Signals:")
+    print("\n  Signals:")
     for name, tier, conf, shadow in signals:
         shadow_tag = " [shadow]" if shadow else ""
         tier_str = str(tier) if tier is not None else "abstain"
         print(f"    {name:12s}  tier={tier_str}  confidence={conf:.2f}{shadow_tag}")
     print()
+
+
+def _cmd_traces_purge() -> int:
+    from uncommon_route.traces import FileTraceStorage
+    from uncommon_route.paths import data_dir as _data_dir
+
+    storage = FileTraceStorage(base_dir=_data_dir() / "traces")
+    storage.purge()
+    print("traces purged")
+    return 0
+
+
+def _cmd_traces(args: list[str]) -> None:
+    if not args or args[0] == "purge":
+        _cmd_traces_purge()
+        return
+    print(f"Unknown traces subcommand: {args[0]}", file=sys.stderr)
+    sys.exit(2)
 
 
 def main() -> None:
@@ -1721,6 +2027,8 @@ def main() -> None:
         "feedback": _cmd_feedback,
         "explain": _cmd_explain,
         "telemetry": _cmd_telemetry,
+        "traces": _cmd_traces,
+        "scene": _cmd_scene,
     }
 
     handler = commands.get(cmd)

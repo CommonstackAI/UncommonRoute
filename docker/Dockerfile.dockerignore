@@ -19,8 +19,12 @@ build
 docs
 bench/results
 bench/data/*.generated.jsonl
+node_modules
 frontend/node_modules
+frontend/dashboard/node_modules
+frontend/dashboard/dist
 openclaw-plugin/node_modules
 telemetry_buffer.jsonl
 telemetry_sent.jsonl
 uv.lock
+.DS_Store

@@ -7,8 +7,6 @@ can classify prompts correctly, making keyword lists unnecessary.
 from __future__ import annotations
 
 import json
-import math
-from collections import defaultdict
 from pathlib import Path
 
 from uncommon_route.router.structural import (
@@ -130,7 +128,7 @@ def test_keyword_free_training_accuracy():
     print(f"  Disagreements: {len(disagreements)}/{total}")
 
     if disagreements:
-        print(f"\n  Sample disagreements (first 10):")
+        print("\n  Sample disagreements (first 10):")
         for prompt, expected, pred_kw, pred_no_kw in disagreements[:10]:
             print(f"    '{prompt}...'")
             print(f"      expected={expected}  with_kw={pred_kw}  no_kw={pred_no_kw}")
@@ -143,7 +141,7 @@ def test_keyword_free_held_out():
     test_path = data_dir / "test.jsonl"
 
     if not train_path.exists() or not test_path.exists():
-        print(f"\n  train.jsonl or test.jsonl not found, skipping held-out test")
+        print("\n  train.jsonl or test.jsonl not found, skipping held-out test")
         return
 
     def load_jsonl(path):
@@ -232,7 +230,7 @@ def test_keyword_free_specific_cases():
         ("证明哥德尔不完备定理", "COMPLEX"),
     ]
 
-    print(f"\n  Keyword-free classifier on specific cases:")
+    print("\n  Keyword-free classifier on specific cases:")
     correct = 0
     total = len(test_prompts)
     for prompt, expected in test_prompts:

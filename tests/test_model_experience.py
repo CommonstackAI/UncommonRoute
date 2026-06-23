@@ -108,6 +108,24 @@ def test_incomplete_upstream_pricing_is_not_treated_as_free() -> None:
     assert capabilities.free is False
 
 
+def test_negative_upstream_pricing_is_not_treated_as_free() -> None:
+    pricing = _parse_upstream_pricing({
+        "prompt": "-1",
+        "completion": "-1",
+        "input_cache_reads": "-1",
+    })
+    capabilities = infer_capabilities(
+        "openrouter/auto",
+        pricing,
+        has_explicit_pricing=True,
+    )
+
+    assert pricing.input_price > 0
+    assert pricing.output_price > 0
+    assert pricing.cached_input_price is None
+    assert capabilities.free is False
+
+
 def test_model_experience_updates_from_observation_and_feedback() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
 
@@ -244,12 +262,12 @@ def test_route_adapts_to_model_experience() -> None:
     store = ModelExperienceStore(storage=InMemoryModelExperienceStorage())
     for _ in range(6):
         store.observe(
-            "moonshot/kimi-k2.5",
+            "nvidia/gpt-oss-120b",
             RoutingMode.AUTO,
             Tier.SIMPLE,
             success=False,
         )
-        store.record_feedback("moonshot/kimi-k2.5", RoutingMode.AUTO, Tier.SIMPLE, "weak")
+        store.record_feedback("nvidia/gpt-oss-120b", RoutingMode.AUTO, Tier.SIMPLE, "weak")
         store.observe(
             "google/gemini-2.5-flash-lite",
             RoutingMode.AUTO,
@@ -265,10 +283,10 @@ def test_route_adapts_to_model_experience() -> None:
         for _ in range(10):
             decision = route("hello", model_experience=store)
             gemini_score = next((s for s in decision.candidate_scores if s.model == "google/gemini-2.5-flash-lite"), None)
-            kimi_score = next((s for s in decision.candidate_scores if s.model == "moonshot/kimi-k2.5"), None)
-            if gemini_score and kimi_score and gemini_score.predicted_quality > kimi_score.predicted_quality:
+            gpt_oss_score = next((s for s in decision.candidate_scores if s.model == "nvidia/gpt-oss-120b"), None)
+            if gemini_score and gpt_oss_score and gemini_score.predicted_quality > gpt_oss_score.predicted_quality:
                 gemini_wins += 1
-        assert gemini_wins >= 5, f"Gemini (positive experience) should beat kimi (negative) majority of the time, got {gemini_wins}/10"
+        assert gemini_wins >= 5, f"Gemini (positive experience) should beat gpt-oss (negative) majority of the time, got {gemini_wins}/10"
     finally:
         selector._rng.setstate(rng_state)
 

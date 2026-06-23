@@ -89,6 +89,23 @@ def test_large_tool_result_is_offloaded(tmp_path) -> None:
     assert artifact["tool_name"] == "search"
 
 
+def test_disabled_artifact_store_keeps_tool_result_inline(tmp_path) -> None:
+    store = ArtifactStore(root=tmp_path / "artifacts", enabled=False)
+    large_json = "{\"rows\":[" + ",".join(f'"line {i}"' for i in range(1500)) + "]}"
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "call_1", "function": {"name": "search"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": large_json},
+    ]
+
+    result = compose_messages(messages, store, CompositionPolicy(tool_offload_threshold_tokens=400))
+
+    assert result.offloaded_messages == 0
+    assert result.artifact_ids == []
+    assert result.messages[1]["content"] == large_json
+    assert "artifact://" not in result.messages[1]["content"]
+    assert store.count() == 0
+
+
 def test_multimodal_content_keeps_block_structure(tmp_path) -> None:
     store = ArtifactStore(root=tmp_path / "artifacts")
     messages = [{

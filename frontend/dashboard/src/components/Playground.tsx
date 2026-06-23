@@ -11,10 +11,13 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { type RoutePreviewResult } from "../api";
+import { useT } from "../i18n";
+import type { Dictionary } from "../i18n/types";
 
 const TIER_NAMES = ["LOW", "MID", "MID_HIGH", "HIGH"];
 
 export default function Playground() {
+  const t = useT();
   const [prompt, setPrompt] = useState("");
   const [riskTolerance, setRiskTolerance] = useState(0.5);
   const [result, setResult] = useState<RoutePreviewResult | null>(null);
@@ -45,14 +48,14 @@ export default function Playground() {
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
-        if (!res.ok) { setError("[ERROR: PREVIEW FAILED]"); setResult(null); return; }
+        if (!res.ok) { setError(t.playground.errPreviewFailed); setResult(null); return; }
         const data: RoutePreviewResult = await res.json();
         if (controller.signal.aborted) return;
         setResult(data); setError(null);
         firstLoadRef.current = false;
       } catch (e: unknown) {
         if (e instanceof Error && e.name === "AbortError") return;
-        setError("[ERROR: PROXY UNREACHABLE]"); setResult(null);
+        setError(t.playground.errProxyUnreachable); setResult(null);
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -61,7 +64,7 @@ export default function Playground() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (abortRef.current) abortRef.current.abort();
     };
-  }, [prompt, riskTolerance]);
+  }, [prompt, riskTolerance, t.playground.errPreviewFailed, t.playground.errProxyUnreachable]);
 
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
@@ -69,26 +72,26 @@ export default function Playground() {
     <div className="animate-fadeIn">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="font-display text-[36px] text-n-display tracking-tight">PLAYGROUND</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.playground.title}</h1>
         <p className="mt-2 text-[14px] text-n-secondary">
-          Type a prompt. Watch the router decide in real time.
+          {t.playground.subtitle}
         </p>
       </div>
 
       <div className="grid grid-cols-5 gap-8">
         {/* ─── Left: Input ─── */}
         <div className="col-span-3">
-          <div className="label mb-2">PROMPT</div>
+          <div className="label mb-2">{t.playground.prompt}</div>
           <textarea
             className="w-full h-48 bg-n-surface border border-n-border rounded-compact p-4 font-sans text-[14px] text-n-primary placeholder:text-n-disabled focus:border-n-border-vis focus:outline-none resize-none transition-colors duration-150"
-            placeholder="Type a prompt to see where it would be routed..."
+            placeholder={t.playground.promptPlaceholder}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
 
           {/* Risk tolerance slider */}
           <div className="mt-6 flex items-center gap-4">
-            <div className="label w-32">RISK TOLERANCE</div>
+            <div className="label w-32">{t.playground.riskTolerance}</div>
             <input
               type="range" min="0" max="1" step="0.05"
               value={riskTolerance}
@@ -110,8 +113,8 @@ export default function Playground() {
             ))}
           </div>
           <div className="mt-1 flex justify-between font-mono text-[11px] text-n-disabled tracking-[0.06em]" style={{ maxWidth: 300 }}>
-            <span>CONSERVATIVE</span>
-            <span>AGGRESSIVE</span>
+            <span>{t.playground.conservative}</span>
+            <span>{t.playground.aggressive}</span>
           </div>
         </div>
 
@@ -125,31 +128,31 @@ export default function Playground() {
             <div>
               {/* Primary: Tier (Doto hero) */}
               <div className="mb-6">
-                <div className="label mb-2">PREDICTED TIER</div>
+                <div className="label mb-2">{t.playground.predictedTier}</div>
                 <div className="font-display text-[48px] text-n-display leading-none tracking-tight">
-                  {result.tier_name?.toUpperCase() || "—"}
+                  {result.tier_name ? t.common.tierLabel(result.tier_name) : "—"}
                 </div>
                 <div className="mt-2 font-mono text-[14px] text-n-secondary">
-                  {Math.round(result.confidence * 100)}% CONFIDENCE · {result.method?.toUpperCase()}
+                  {t.playground.confidence(Math.round(result.confidence * 100), (result.method ?? "").toUpperCase())}
                 </div>
               </div>
 
               {/* Cost comparison */}
               <div className="flex gap-6 mb-6 pb-6 border-b border-n-border">
                 <div>
-                  <div className="label mb-1">EST. COST</div>
+                  <div className="label mb-1">{t.playground.estCost}</div>
                   <div className="font-mono text-[20px] text-n-success">
                     ${result.cost_estimate?.toFixed(4)}
                   </div>
                 </div>
                 <div>
-                  <div className="label mb-1">VS PREMIUM</div>
+                  <div className="label mb-1">{t.playground.vsPremium}</div>
                   <div className="font-mono text-[20px] text-n-disabled line-through">
                     ${result.cost_baseline?.toFixed(4)}
                   </div>
                 </div>
                 <div>
-                  <div className="label mb-1">SAVED</div>
+                  <div className="label mb-1">{t.playground.saved}</div>
                   <div className="font-mono text-[20px] text-n-success">
                     {result.cost_baseline > 0
                       ? Math.round((1 - result.cost_estimate / result.cost_baseline) * 100)
@@ -159,7 +162,7 @@ export default function Playground() {
               </div>
 
               {/* Signal readout — instrument panel style */}
-              <div className="label mb-3">SIGNAL READOUT</div>
+              <div className="label mb-3">{t.playground.signalReadout}</div>
               <div className="space-y-0 border-t border-n-border">
                 {result.signals?.map((s) => (
                   <div
@@ -172,13 +175,13 @@ export default function Playground() {
                       </span>
                       {s.shadow && (
                         <span className="font-mono text-[11px] text-n-disabled border border-n-border px-1.5 py-0.5">
-                          SHADOW
+                          {t.common.shadow}
                         </span>
                       )}
                     </div>
                     <div className="flex items-center gap-4">
                       <span className="font-mono text-[12px] text-n-display">
-                        {s.tier !== null ? TIER_NAMES[s.tier] : "ABSTAIN"}
+                        {s.tier !== null ? t.common.tierLabel(TIER_NAMES[s.tier]) : t.common.abstain}
                       </span>
                       <span className="font-mono text-[11px] text-n-secondary">
                         {Math.round(s.confidence * 100)}%
@@ -190,7 +193,7 @@ export default function Playground() {
             </div>
           ) : (
             <div className="flex items-center justify-center h-64 border border-dashed border-n-border rounded-compact dot-grid-subtle animate-pulse" style={{ animationDuration: '3s' }}>
-              <LoadingLabel loading={loading} firstLoad={firstLoadRef.current} loadStart={loadStartRef.current} />
+              <LoadingLabel loading={loading} firstLoad={firstLoadRef.current} loadStart={loadStartRef.current} t={t} />
             </div>
           )}
         </div>
@@ -199,7 +202,7 @@ export default function Playground() {
   );
 }
 
-function LoadingLabel({ loading, firstLoad, loadStart }: { loading: boolean; firstLoad: boolean; loadStart: number }) {
+function LoadingLabel({ loading, firstLoad, loadStart, t }: { loading: boolean; firstLoad: boolean; loadStart: number; t: Dictionary }) {
   const [elapsed, setElapsed] = useState(0);
 
   const tick = useCallback(() => {
@@ -213,9 +216,9 @@ function LoadingLabel({ loading, firstLoad, loadStart }: { loading: boolean; fir
     return () => clearInterval(id);
   }, [loading, tick]);
 
-  let text = "[AWAITING INPUT]";
+  let text = t.playground.awaitingInput;
   if (loading) {
-    text = firstLoad && elapsed > 2000 ? "[LOADING EMBEDDING MODEL...]" : "[ANALYZING...]";
+    text = firstLoad && elapsed > 2000 ? t.playground.loadingEmbedding : t.playground.analyzing;
   }
 
   return (

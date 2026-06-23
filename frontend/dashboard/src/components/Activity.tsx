@@ -1,5 +1,7 @@
 import { type ReactNode, useMemo, useState } from "react";
 import type { Stats } from "../api";
+import { useT } from "../i18n";
+import type { Dictionary } from "../i18n/types";
 
 type UsageView = "requests" | "cost" | "avg";
 
@@ -8,6 +10,7 @@ interface Props {
 }
 
 export default function Activity({ stats }: Props) {
+  const t = useT();
   const [usageView, setUsageView] = useState<UsageView>("requests");
 
   const models = useMemo(() => {
@@ -28,7 +31,7 @@ export default function Activity({ stats }: Props) {
   }, [stats, usageView]);
 
   if (!stats || stats.total_requests === 0) {
-    return <div className="flex items-center justify-center py-20 font-mono text-[14px] text-n-disabled">No activity recorded yet.</div>;
+    return <div className="flex items-center justify-center py-20 font-mono text-[14px] text-n-disabled">{t.activity.noActivity}</div>;
   }
 
   const simpleCount = stats.by_tier.SIMPLE?.count ?? 0;
@@ -43,9 +46,9 @@ export default function Activity({ stats }: Props) {
   const passthroughCount = Math.max(stats.total_requests - classifiedCount, 0);
 
   const tierBuckets = [
-    { label: "Simple", count: simpleCount, totalCost: simpleCost },
-    { label: "Medium", count: mediumCount, totalCost: mediumCost },
-    { label: "Complex", count: complexCount, totalCost: complexCost },
+    { label: t.common.tierLabel("SIMPLE"), count: simpleCount, totalCost: simpleCost },
+    { label: t.common.tierLabel("MEDIUM"), count: mediumCount, totalCost: mediumCost },
+    { label: t.common.tierLabel("COMPLEX"), count: complexCount, totalCost: complexCost },
   ];
 
   const totalTierCount = tierBuckets.reduce((sum, bucket) => sum + bucket.count, 0) || 1;
@@ -62,13 +65,13 @@ export default function Activity({ stats }: Props) {
       mode,
       count,
       pct: stats.total_requests > 0 ? (count / stats.total_requests) * 100 : 0,
-      ...getModeMeta(mode),
+      ...getModeMeta(mode, t),
     }));
 
   const qualityRows = [
-    { quality: "economy", label: "Economy", count: stats.by_served_quality.economy ?? 0 },
-    { quality: "balanced", label: "Balanced", count: stats.by_served_quality.balanced ?? 0 },
-    { quality: "premium", label: "Premium", count: stats.by_served_quality.premium ?? 0 },
+    { quality: "economy", label: t.activity.qualityEconomy, count: stats.by_served_quality.economy ?? 0 },
+    { quality: "balanced", label: t.activity.qualityBalanced, count: stats.by_served_quality.balanced ?? 0 },
+    { quality: "premium", label: t.activity.qualityPremium, count: stats.by_served_quality.premium ?? 0 },
   ];
   const totalQualityCount = qualityRows.reduce((sum, row) => sum + row.count, 0) || 1;
   const qualitySegments = qualityRows.map((row) => ({
@@ -90,7 +93,7 @@ export default function Activity({ stats }: Props) {
       count: data.count,
       total_cost: data.total_cost,
       pct: stats.total_requests > 0 ? (data.count / stats.total_requests) * 100 : 0,
-      ...getTransportMeta(transport),
+      ...getTransportMeta(transport, t),
     }))
     .sort((a, b) => b.count - a.count);
 
@@ -99,9 +102,9 @@ export default function Activity({ stats }: Props) {
   return (
     <div className="space-y-6 animate-fadeIn">
       <div>
-        <h1 className="font-display text-[36px] text-n-display tracking-tight">ACTIVITY</h1>
+        <h1 className="font-display text-[36px] text-n-display tracking-tight">{t.activity.title}</h1>
         <p className="mt-1 text-[13px] text-n-secondary">
-          {formatTimeRange(stats.time_range_s)} · {stats.total_requests.toLocaleString()} routed requests
+          {t.activity.subtitleSummary(formatTimeRange(stats.time_range_s, t), stats.total_requests.toLocaleString())}
         </p>
       </div>
 
@@ -109,31 +112,34 @@ export default function Activity({ stats }: Props) {
       <div className="grid grid-cols-12 gap-3">
         <div className="col-span-3">
           <OverviewCard
-            label="ACTUAL SPEND"
+            label={t.activity.actualSpend}
             value={<>${stats.total_actual_cost.toFixed(2)}</>}
-            meta={`$${stats.total_baseline_cost.toFixed(2)} baseline`}
+            meta={t.activity.baselineMeta(stats.total_baseline_cost.toFixed(2))}
           />
         </div>
         <div className="col-span-3">
           <OverviewCard
-            label="SAVED"
+            label={t.activity.saved}
             value={<>{(stats.total_savings_ratio * 100).toFixed(1)}%</>}
-            meta={`$${stats.total_savings_absolute.toFixed(2)} below baseline`}
+            meta={t.activity.belowBaseline(stats.total_savings_absolute.toFixed(2))}
             tone="success"
           />
         </div>
         <div className="col-span-3">
           <OverviewCard
-            label="AVG LATENCY"
-            value={<>{stats.avg_latency_ms.toFixed(1)}ms</>}
-            meta={`${stats.total_requests.toLocaleString()} routed turns`}
+            label={t.activity.routeLatency}
+            value={<>{(stats.avg_route_latency_ms ?? stats.avg_latency_ms).toFixed(1)}ms</>}
+            meta={t.activity.latencyBreakdown(
+              formatMs(stats.avg_upstream_elapsed_ms),
+              formatMs(stats.avg_first_token_ms),
+            )}
           />
         </div>
         <div className="col-span-3">
           <OverviewCard
-            label="OPTIMIZATION"
+            label={t.activity.optimization}
             value={<>{(stats.avg_input_reduction_ratio * 100).toFixed(1)}%</>}
-            meta={`${(stats.avg_cache_hit_ratio * 100).toFixed(1)}% cache hit \u00B7 $${stats.total_compaction_savings.toFixed(2)} compaction`}
+            meta={t.activity.optimizationMeta((stats.avg_cache_hit_ratio * 100).toFixed(1), stats.total_compaction_savings.toFixed(2))}
           />
         </div>
       </div>
@@ -144,9 +150,9 @@ export default function Activity({ stats }: Props) {
           <div className="flex h-full flex-col rounded-card border border-n-border bg-n-surface p-6">
             <div>
               <div className="flex items-center justify-between mb-5">
-                <div className="label">REQUEST COMPLEXITY</div>
+                <div className="label">{t.activity.requestComplexity}</div>
                 <div className="font-mono text-[11px] text-n-secondary">
-                  {classifiedCount} classified · {passthroughCount} passthrough
+                  {t.activity.classifiedPassthrough(classifiedCount, passthroughCount)}
                 </div>
               </div>
 
@@ -180,7 +186,7 @@ export default function Activity({ stats }: Props) {
                     </div>
                     <div className="mt-1 label">{bucket.label.toUpperCase()}</div>
                     <div className="mt-3 font-mono text-[11px] text-n-secondary">
-                      Spent ${bucket.totalCost.toFixed(2)}
+                      {t.activity.spent(bucket.totalCost.toFixed(2))}
                     </div>
                   </div>
                 ))}
@@ -188,9 +194,9 @@ export default function Activity({ stats }: Props) {
             </div>
 
             <div className="mt-4 grid grid-cols-3 gap-2">
-              <MiniMetric label="DOMINANT BAND" value={`${dominantBucket.label} ${dominantBucket.pct.toFixed(0)}%`} />
-              <MiniMetric label="COMPLEX SHARE" value={`${complexShare.toFixed(0)}%`} />
-              <MiniMetric label="PASSTHROUGH" value={passthroughCount.toLocaleString()} />
+              <MiniMetric label={t.activity.dominantBand} value={`${dominantBucket.label} ${dominantBucket.pct.toFixed(0)}%`} />
+              <MiniMetric label={t.activity.complexShare} value={`${complexShare.toFixed(0)}%`} />
+              <MiniMetric label={t.activity.passthrough} value={passthroughCount.toLocaleString()} />
             </div>
           </div>
         </div>
@@ -200,8 +206,8 @@ export default function Activity({ stats }: Props) {
           <div className="flex h-full flex-col gap-5">
             <div className="rounded-card border border-n-border bg-n-surface p-6">
               <div className="flex items-center justify-between mb-5">
-                <div className="label">SERVED QUALITY</div>
-                <div className="font-mono text-[11px] text-n-secondary">{totalQualityCount} classified</div>
+                <div className="label">{t.activity.servedQuality}</div>
+                <div className="font-mono text-[11px] text-n-secondary">{t.activity.classified(totalQualityCount)}</div>
               </div>
 
               <div className="segmented-bar" style={{ height: "8px" }}>
@@ -238,8 +244,8 @@ export default function Activity({ stats }: Props) {
 
             <div className="rounded-card border border-n-border bg-n-surface p-6">
               <div className="flex items-center justify-between mb-5">
-                <div className="label">BY MODE</div>
-                <div className="font-mono text-[11px] text-n-secondary">{modeTiles.length} active modes</div>
+                <div className="label">{t.activity.byMode}</div>
+                <div className="font-mono text-[11px] text-n-secondary">{t.activity.activeModes(modeTiles.length)}</div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 {modeTiles.map((tile) => (
@@ -247,7 +253,7 @@ export default function Activity({ stats }: Props) {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="h-1.5 w-1.5 rounded-full bg-n-display" />
-                        <span className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">{tile.mode}</span>
+                        <span className="font-mono text-[12px] uppercase tracking-wider text-n-secondary">{t.tags.mode(tile.mode)}</span>
                       </div>
                       <span className="font-mono text-[11px] text-n-secondary">{tile.pct.toFixed(0)}%</span>
                     </div>
@@ -270,8 +276,8 @@ export default function Activity({ stats }: Props) {
 
             <div className="rounded-card border border-n-border bg-n-surface p-6">
               <div className="flex items-center justify-between mb-5">
-                <div className="label">CAPABILITY LANES</div>
-                <div className="font-mono text-[11px] text-n-secondary">{laneRows.length} active lanes</div>
+                <div className="label">{t.activity.capabilityLanes}</div>
+                <div className="font-mono text-[11px] text-n-secondary">{t.activity.activeLanes(laneRows.length)}</div>
               </div>
               <div className="space-y-3">
                 {laneRows.map((row) => (
@@ -294,8 +300,8 @@ export default function Activity({ stats }: Props) {
 
             <div className="rounded-card border border-n-border bg-n-surface p-6">
               <div className="flex items-center justify-between mb-5">
-                <div className="label">TRANSPORT MIX</div>
-                <div className="font-mono text-[11px] text-n-secondary">{transportRows.length} active paths</div>
+                <div className="label">{t.activity.transportMix}</div>
+                <div className="font-mono text-[11px] text-n-secondary">{t.activity.activePaths(transportRows.length)}</div>
               </div>
               <div className="space-y-3">
                 {transportRows.map((row) => (
@@ -341,10 +347,11 @@ export default function Activity({ stats }: Props) {
         <div className="col-span-12">
           <div className="rounded-card border border-n-border bg-n-surface overflow-hidden">
             <div className="flex items-center justify-between border-b border-n-border px-6 py-4">
-              <span className="label">MODEL USAGE</span>
+              <span className="label">{t.activity.modelUsage}</span>
               <div className="inline-flex gap-[2px] rounded-compact bg-n-black p-[2px]">
                 {(["requests", "cost", "avg"] as UsageView[]).map((view) => {
                   const active = usageView === view;
+                  const label = view === "requests" ? t.activity.requestsCol : view === "cost" ? t.activity.cost : t.activity.avgCost;
                   return (
                     <button
                       key={view}
@@ -353,7 +360,7 @@ export default function Activity({ stats }: Props) {
                         active ? "bg-n-raised text-n-display" : "text-n-secondary hover:text-n-primary"
                       }`}
                     >
-                      {view === "requests" ? "REQUESTS" : view === "cost" ? "COST" : "AVG COST"}
+                      {label}
                     </button>
                   );
                 })}
@@ -362,11 +369,11 @@ export default function Activity({ stats }: Props) {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-n-border">
-                  <th className="label px-6 py-3 text-left">MODEL</th>
-                  <th className="label px-6 py-3 text-right">REQUESTS</th>
-                  <th className="label px-6 py-3 text-right">SHARE</th>
-                  <th className="label px-6 py-3 text-right">TOTAL COST</th>
-                  <th className="label px-6 py-3 text-right">AVG / REQ</th>
+                  <th className="label px-6 py-3 text-left">{t.activity.model}</th>
+                  <th className="label px-6 py-3 text-right">{t.activity.requestsCol}</th>
+                  <th className="label px-6 py-3 text-right">{t.activity.share}</th>
+                  <th className="label px-6 py-3 text-right">{t.activity.totalCost}</th>
+                  <th className="label px-6 py-3 text-right">{t.activity.avgPerReq}</th>
                 </tr>
               </thead>
               <tbody>
@@ -390,7 +397,7 @@ export default function Activity({ stats }: Props) {
                               {row.name.split("/").pop()}
                             </div>
                             <div className="font-mono text-[11px] text-n-secondary">
-                              {formatUsageValue(row, usageView)}
+                              {formatUsageValue(row, usageView, t)}
                             </div>
                           </div>
                         </div>
@@ -444,47 +451,53 @@ function OverviewCard({
   );
 }
 
-function getModeMeta(mode: string): { description: string } {
+function getModeMeta(mode: string, t: Dictionary): { description: string } {
   switch (mode) {
     case "best":
-      return { description: "highest quality" };
+      return { description: t.activity.modeBest };
     case "fast":
-      return { description: "lighter and faster" };
+      return { description: t.activity.modeFast };
     case "passthrough":
-      return { description: "explicit model" };
+      return { description: t.activity.modePassthrough };
     case "auto":
     default:
-      return { description: "balanced default" };
+      return { description: t.activity.modeAuto };
   }
 }
 
-function getTransportMeta(transport: string): { label: string; description: string } {
+function getTransportMeta(transport: string, t: Dictionary): { label: string; description: string } {
   switch (transport) {
     case "anthropic-messages":
       return {
-        label: "Anthropic Messages",
-        description: "native block semantics preserved upstream",
+        label: t.activity.transportAnthropic,
+        description: t.activity.transportAnthropicDesc,
       };
     case "openai-responses":
       return {
-        label: "OpenAI Responses",
-        description: "responses-style path",
+        label: t.activity.transportOpenAIResponses,
+        description: t.activity.transportOpenAIResponsesDesc,
       };
     case "openai-chat":
     default:
       return {
-        label: "OpenAI Chat",
-        description: "chat-completions compatible path",
+        label: t.activity.transportOpenAIChat,
+        description: t.activity.transportOpenAIChatDesc,
       };
   }
 }
 
-function formatTimeRange(seconds: number): string {
-  if (seconds <= 0) return "No recent window";
-  if (seconds >= 86400) return `${(seconds / 86400).toFixed(1)}d history`;
-  if (seconds >= 3600) return `${Math.round(seconds / 3600)}h history`;
-  if (seconds >= 60) return `${Math.round(seconds / 60)}m history`;
-  return `${Math.round(seconds)}s history`;
+function formatTimeRange(seconds: number, t: Dictionary): string {
+  if (seconds <= 0) return t.activity.timeNoRecent;
+  if (seconds >= 86400) return t.activity.timeDays((seconds / 86400).toFixed(1));
+  if (seconds >= 3600) return t.activity.timeHours(Math.round(seconds / 3600));
+  if (seconds >= 60) return t.activity.timeMinutes(Math.round(seconds / 60));
+  return t.activity.timeSeconds(Math.round(seconds));
+}
+
+function formatMs(value?: number): string {
+  if (!value || value <= 0) return "n/a";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value.toFixed(0)}ms`;
 }
 
 function getUsageValue(
@@ -499,8 +512,9 @@ function getUsageValue(
 function formatUsageValue(
   row: { count: number; total_cost: number; avg_cost: number; share: number },
   view: UsageView,
+  t: Dictionary,
 ): string {
-  if (view === "cost") return `$${row.total_cost.toFixed(4)} total`;
-  if (view === "avg") return `$${row.avg_cost.toFixed(4)} avg`;
-  return `${row.count.toLocaleString()} requests \u00B7 ${row.share.toFixed(1)}%`;
+  if (view === "cost") return t.activity.usageTotal(row.total_cost.toFixed(4));
+  if (view === "avg") return t.activity.usageAvg(row.avg_cost.toFixed(4));
+  return t.activity.usageRequests(row.count.toLocaleString(), row.share.toFixed(1));
 }

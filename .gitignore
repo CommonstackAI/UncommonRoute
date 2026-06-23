@@ -44,6 +44,9 @@ tmp/
 test-results/
 tests/screenshots/
 
+# Frontend dashboard build cache
+frontend/dashboard/*.tsbuildinfo
+
 # Spend control local data
 spending.json
 

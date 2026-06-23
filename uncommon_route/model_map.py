@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ logger = logging.getLogger("uncommon-route")
 
 GATEWAY_DOMAINS: dict[str, str] = {
     "commonstack.ai": "commonstack",
+    "openrouter.ai": "openrouter",
 }
 
 DIRECT_PROVIDER_DOMAINS: dict[str, str] = {
@@ -90,14 +92,19 @@ SEED_ALIASES: dict[str, list[str]] = {
         "google/gemini-3.1-pro-preview",
     ],
     "xai/grok-4-0709": [
+        "x-ai/grok-4",
         "x-ai/grok-4-1-fast-non-reasoning",
     ],
     "xai/grok-4-1-fast-reasoning": [
         "x-ai/grok-4.1-fast-reasoning",
         "x-ai/grok-4-1-fast-reasoning",
+        "x-ai/grok-4.1-fast",
+        "x-ai/grok-4-fast",
     ],
     "xai/grok-4-1-fast-non-reasoning": [
         "x-ai/grok-4-1-fast-non-reasoning",
+        "x-ai/grok-4.1-fast",
+        "x-ai/grok-4-fast",
     ],
     "xai/grok-code-fast-1": [
         "x-ai/grok-code-fast-1",
@@ -109,6 +116,7 @@ SEED_ALIASES: dict[str, list[str]] = {
         "openai/gpt-5.3-codex",
     ],
     "openai/o1-mini": [
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-mini-2026-03-17",
     ],
     "openai/o3": [
@@ -116,12 +124,25 @@ SEED_ALIASES: dict[str, list[str]] = {
         "openai/gpt-5",
     ],
     "openai/o4-mini": [
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-mini-2026-03-17",
     ],
 }
 
 # Backward compat
 KNOWN_ALIASES = SEED_ALIASES
+
+ROUTING_SUPERSEDED_MODELS: dict[str, tuple[str, ...]] = {
+    "google/gemini-2.5-pro": (
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3-pro-preview",
+        "google/gemini-3.1-pro",
+    ),
+    "google/gemini-3-pro-preview": (
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-pro",
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -135,15 +156,33 @@ def _parse_upstream_pricing(raw: dict | None) -> ModelPricing:
     if "prompt" not in raw or "completion" not in raw:
         return ModelPricing(5.0, 25.0)
     try:
-        input_price = float(raw.get("prompt", 0)) * 1_000_000
-        output_price = float(raw.get("completion", 0)) * 1_000_000
+        prompt_price = float(raw.get("prompt", 0))
+        completion_price = float(raw.get("completion", 0))
+        if (
+            not math.isfinite(prompt_price)
+            or not math.isfinite(completion_price)
+            or prompt_price < 0
+            or completion_price < 0
+        ):
+            return ModelPricing(5.0, 25.0)
+        input_price = prompt_price * 1_000_000
+        output_price = completion_price * 1_000_000
         cached_input = raw.get("input_cache_reads")
         cache_write = raw.get("input_cache_writes")
+
+        def optional_price(value: object) -> float | None:
+            if value in (None, ""):
+                return None
+            parsed = float(value)
+            if not math.isfinite(parsed) or parsed < 0:
+                return None
+            return round(parsed * 1_000_000, 4)
+
         return ModelPricing(
             input_price=round(input_price, 4),
             output_price=round(output_price, 4),
-            cached_input_price=round(float(cached_input) * 1_000_000, 4) if cached_input else None,
-            cache_write_price=round(float(cache_write) * 1_000_000, 4) if cache_write else None,
+            cached_input_price=optional_price(cached_input),
+            cache_write_price=optional_price(cache_write),
         )
     except (ValueError, TypeError):
         return ModelPricing(5.0, 25.0)
@@ -177,6 +216,23 @@ def is_routable_chat_model(model_id: str) -> bool:
     """
     core = _core(str(model_id or "").lower())
     return not any(marker in core for marker in _NON_CHAT_MODEL_MARKERS)
+
+
+def _superseded_routing_models(model_ids: set[str]) -> set[str]:
+    """Return routable IDs to hide when their live successor is available."""
+    return {
+        model_id
+        for model_id, successors in ROUTING_SUPERSEDED_MODELS.items()
+        if model_id in model_ids and any(successor in model_ids for successor in successors)
+    }
+
+
+def filter_superseded_routing_models(model_ids: list[str]) -> list[str]:
+    """Remove older model IDs when a configured successor is also available."""
+    superseded = _superseded_routing_models(set(model_ids))
+    if not superseded:
+        return model_ids
+    return [model_id for model_id in model_ids if model_id not in superseded]
 
 
 def infer_capabilities(
@@ -361,7 +417,7 @@ class ModelMapper:
     def _build_map(self) -> None:
         """Match every internal model name to the best upstream candidate.
 
-        Priority: learned alias > exact match > seed alias > fuzzy match.
+        Priority: exact match > seed alias > learned alias > fuzzy match.
         """
         from uncommon_route.router.config import DEFAULT_MODEL_PRICING
 
@@ -369,15 +425,15 @@ class ModelMapper:
         for internal in DEFAULT_MODEL_PRICING:
             if internal in self._upstream_models:
                 continue
+            alias = self._seed_alias_match(internal)
+            if alias:
+                self._map[internal] = alias
+                continue
             if internal in self._learned_aliases:
                 candidate = self._learned_aliases[internal]
                 if candidate in self._upstream_models:
                     self._map[internal] = candidate
                     continue
-            alias = self._seed_alias_match(internal)
-            if alias:
-                self._map[internal] = alias
-                continue
             match = self._fuzzy_match(internal)
             if match:
                 self._map[internal] = match
@@ -442,21 +498,24 @@ class ModelMapper:
         """Translate an internal model name to what the upstream expects.
 
         Priority:
-          1. Learned alias
-          2. Dynamic map (from ``/v1/models`` discovery + fuzzy matching)
-          3. Exact match in upstream model set
+          1. Exact match in discovered upstream model set
+          2. Dynamic map (from ``/v1/models`` discovery + seed/fuzzy matching)
+          3. Learned fallback alias, when it can be validated for this upstream
           4. Gateway -> keep full ``provider/model``; direct -> strip prefix
         """
-        if internal_name in self._learned_aliases:
-            candidate = self._learned_aliases[internal_name]
-            if not self._discovered or candidate in self._upstream_models:
-                return candidate
+        if self._discovered and internal_name in self._upstream_models:
+            return internal_name
 
         if internal_name in self._map:
             return self._map[internal_name]
 
-        if self._discovered and internal_name in self._upstream_models:
-            return internal_name
+        if internal_name in self._learned_aliases:
+            candidate = self._learned_aliases[internal_name]
+            if self._discovered:
+                if candidate in self._upstream_models:
+                    return candidate
+            elif not (self.is_gateway and "/" in internal_name):
+                return candidate
 
         if not self.is_gateway and "/" in internal_name:
             return internal_name.split("/", 1)[-1]
@@ -504,7 +563,12 @@ class ModelMapper:
     @property
     def routable_models(self) -> list[str]:
         """Chat-routable upstream model IDs, sorted."""
-        return [model for model in self.available_models if is_routable_chat_model(model)]
+        routable = [
+            model
+            for model in self.available_models
+            if is_routable_chat_model(model)
+        ]
+        return filter_superseded_routing_models(routable)
 
     def get_pricing(self, model_id: str) -> ModelPricing | None:
         """Look up pricing for a single model (internal or upstream ID)."""

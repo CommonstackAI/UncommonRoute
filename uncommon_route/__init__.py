@@ -137,6 +137,7 @@ __all__ = [
     "route",
     "classify",
     "select_model",
+    "select_from_pool",
     "get_fallback_chain",
     "Tier",
     "RoutingMode",

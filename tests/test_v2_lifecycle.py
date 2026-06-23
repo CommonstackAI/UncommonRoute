@@ -1,7 +1,6 @@
 """Tests for v2 lifecycle: startup, shutdown, per-request hooks."""
 
 import json
-from pathlib import Path
 
 import uncommon_route.v2_lifecycle as lc
 

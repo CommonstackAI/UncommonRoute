@@ -11,26 +11,18 @@ Issues:
 
 from __future__ import annotations
 
-import json
-import copy
-from dataclasses import replace
 
 from uncommon_route.router.api import route
-from uncommon_route.router.classifier import classify, extract_features, _ensure_model_loaded, update_model, save_online_model, rollback_online_model
-from uncommon_route.router.config import DEFAULT_CONFIG, DEFAULT_MODEL_PRICING, DEFAULT_MODEL_CAPABILITIES
+from uncommon_route.router.classifier import classify, extract_features, _ensure_model_loaded, update_model, rollback_online_model
 from uncommon_route.router.types import (
     ModelCapabilities,
     ModelPricing,
-    RequestRequirements,
-    RoutingConstraints,
     RoutingFeatures,
     RoutingMode,
-    ScoringConfig,
     Tier,
     WorkloadHints,
 )
 from uncommon_route.model_experience import (
-    CandidateExperience,
     InMemoryModelExperienceStorage,
     ModelExperienceStore,
 )
@@ -189,7 +181,6 @@ def test_issue3_minimax_never_wins_for_complex():
 def test_issue3_minimax_ranking_across_tiers():
     """Check MiniMax's position in ranking for each complexity level."""
     for complexity, label in [(0.15, "SIMPLE"), (0.45, "MEDIUM"), (0.85, "COMPLEX")]:
-        tier = Tier.SIMPLE if complexity < 0.33 else (Tier.MEDIUM if complexity < 0.67 else Tier.COMPLEX)
         # Use a neutral prompt and force complexity via routing features
         decision = route(
             "do something",
@@ -211,7 +202,7 @@ def test_issue3_quality_prior_is_benchmark_based():
     opus_quality = cache.get_quality("anthropic/claude-opus-4.6")
     oss_quality = cache.get_quality("nvidia/gpt-oss-120b")
 
-    print(f"\n  Benchmark quality (not price-based):")
+    print("\n  Benchmark quality (not price-based):")
     print(f"    MiniMax: {minimax_quality:.3f}")
     print(f"    Opus:    {opus_quality:.3f}")
     print(f"    gpt-oss: {oss_quality:.3f}")
@@ -248,7 +239,7 @@ def test_issue4_any_tools_means_agentic():
         prompt="hello",
     )
 
-    print(f"\n  Prompt: 'hello'")
+    print("\n  Prompt: 'hello'")
     print(f"  step_type: {step_type}")
     print(f"  is_agentic: {features.is_agentic}")
     print(f"  needs_tool_calling: {features.needs_tool_calling}")
@@ -270,6 +261,33 @@ def test_issue4_tool_selection_always_triggers():
         }
         step_type, _ = _classify_step(body)
         assert step_type == "tool-selection", f"'{msg}' got step_type={step_type}"
+
+
+def test_anthropic_tool_names_are_counted_for_step_risk():
+    """Anthropic messages use top-level tool names, not OpenAI function wrappers."""
+    from uncommon_route.proxy import _classify_step, _extract_routing_features
+
+    tools = [
+        {"name": f"Tool{i}", "input_schema": {"type": "object"}}
+        for i in range(8)
+    ]
+    body = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": tools,
+    }
+
+    step_type, tool_names = _classify_step(body)
+    features = _extract_routing_features(
+        body,
+        step_type=step_type,
+        tool_names=tool_names,
+        prompt="hello",
+    )
+
+    assert step_type == "tool-selection"
+    assert len(tool_names) == 8
+    assert features.tool_names == tuple(f"Tool{i}" for i in range(8))
+    assert features.step_risk == "normal"
 
 
 # ─── Issue 5: Feedback mechanism ineffective ───
@@ -404,7 +422,7 @@ def test_issue6_anthropic_model_resolution():
     opus_resolved = mapper.resolve("anthropic/claude-opus-4.6")
     sonnet_resolved = mapper.resolve("anthropic/claude-sonnet-4.6")
 
-    print(f"\n  Pre-discovery:")
+    print("\n  Pre-discovery:")
     print(f"    Opus → {opus_resolved}")
     print(f"    Sonnet → {sonnet_resolved}")
     print(f"    Is gateway: {mapper.is_gateway}")
@@ -413,23 +431,57 @@ def test_issue6_anthropic_model_resolution():
     # Gateway mode should keep the full provider/model prefix
 
 
+def test_issue6_openrouter_detected_as_gateway():
+    """OpenRouter should keep provider/model ids when resolving upstream names."""
+    from uncommon_route.model_map import ModelMapper
+
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
+
+    assert mapper.provider == "openrouter"
+    assert mapper.is_gateway
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "xai/grok-4-1-fast-reasoning"
+
+
+def test_issue6_learned_fallbacks_do_not_override_gateway_seed_aliases():
+    """Runtime fallback aliases from one gateway should not hide known model renames."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
+    mapper._learned_aliases["xai/grok-4-1-fast-reasoning"] = "google/gemini-2.5-flash"
+    for model_id in ["x-ai/grok-4.1-fast", "google/gemini-2.5-flash"]:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=False, reasoning=False),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast"
+
+
 def test_issue6_legacy_model_ids_resolve_to_live_successors():
     """Legacy internal ids should map onto current upstream successors."""
     from uncommon_route.model_map import DiscoveredModel, ModelMapper
-    from uncommon_route.router.types import ModelCapabilities, ModelPricing
 
     live_models = [
-        "x-ai/grok-4-1-fast-non-reasoning",
-        "x-ai/grok-4.1-fast-reasoning",
+        "x-ai/grok-4",
+        "x-ai/grok-4.1-fast",
         "x-ai/grok-code-fast-1",
         "google/gemini-3.1-pro-preview",
         "openai/gpt-4.1",
         "openai/gpt-5.3-codex",
-        "openai/gpt-5.4-mini-2026-03-17",
+        "openai/gpt-5.4-mini",
         "openai/gpt-5.4-2026-03-05",
+        "openai/o3",
+        "openai/o4-mini",
     ]
 
-    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    mapper = ModelMapper("https://openrouter.ai/api/v1")
     for model_id in live_models:
         provider = model_id.split("/", 1)[0]
         mapper._pool[model_id] = DiscoveredModel(
@@ -443,17 +495,17 @@ def test_issue6_legacy_model_ids_resolve_to_live_successors():
     mapper._build_map()
     mapper._discovered = True
 
-    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4-1-fast-non-reasoning"
-    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast-reasoning"
-    assert mapper.resolve("xai/grok-4-1-fast-non-reasoning") == "x-ai/grok-4-1-fast-non-reasoning"
+    assert mapper.resolve("xai/grok-4-0709") == "x-ai/grok-4"
+    assert mapper.resolve("xai/grok-4-1-fast-reasoning") == "x-ai/grok-4.1-fast"
+    assert mapper.resolve("xai/grok-4-1-fast-non-reasoning") == "x-ai/grok-4.1-fast"
     assert mapper.resolve("xai/grok-code-fast-1") == "x-ai/grok-code-fast-1"
     assert mapper.resolve("google/gemini-3-pro-preview") == "google/gemini-3.1-pro-preview"
     assert mapper.resolve("google/gemini-3.1-pro") == "google/gemini-3.1-pro-preview"
     assert mapper.resolve("openai/gpt-4o") == "openai/gpt-4.1"
     assert mapper.resolve("openai/gpt-5.2-codex") == "openai/gpt-5.3-codex"
-    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini-2026-03-17"
-    assert mapper.resolve("openai/o3") == "openai/gpt-5.4-2026-03-05"
-    assert mapper.resolve("openai/o4-mini") == "openai/gpt-5.4-mini-2026-03-17"
+    assert mapper.resolve("openai/o1-mini") == "openai/gpt-5.4-mini"
+    assert mapper.resolve("openai/o3") == "openai/o3"
+    assert mapper.resolve("openai/o4-mini") == "openai/o4-mini"
     assert not any(
         model in mapper.unresolved_models()
         for model in (
@@ -475,7 +527,6 @@ def test_issue6_legacy_model_ids_resolve_to_live_successors():
 def test_issue6_image_generation_models_do_not_enter_chat_routing_pool():
     """Image-generation catalog entries should not become chat candidates."""
     from uncommon_route.model_map import DiscoveredModel, ModelMapper, is_routable_chat_model
-    from uncommon_route.router.types import ModelCapabilities, ModelPricing
 
     mapper = ModelMapper("https://api.commonstack.ai/v1")
     for model_id in [
@@ -502,6 +553,54 @@ def test_issue6_image_generation_models_do_not_enter_chat_routing_pool():
     assert "google/gemini-3-pro-image-preview" not in mapper.routable_models
     assert "google/gemini-3.1-flash-image-preview" not in mapper.routable_models
     assert "google/gemini-3.1-pro-preview" in mapper.routable_models
+
+
+def test_superseded_gemini_pro_is_not_routed_when_successor_exists():
+    """Catalog discovery can include old Gemini Pro IDs, but routing should use the successor."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    for model_id in [
+        "google/gemini-2.5-pro",
+        "google/gemini-3-pro-preview",
+        "google/gemini-3.1-pro-preview",
+        "zai-org/glm-4.7",
+    ]:
+        provider = model_id.split("/", 1)[0]
+        mapper._pool[model_id] = DiscoveredModel(
+            id=model_id,
+            provider=provider,
+            owned_by=provider,
+            pricing=ModelPricing(0.2, 0.8),
+            capabilities=ModelCapabilities(tool_calling=True, vision=True),
+        )
+        mapper._upstream_models.add(model_id)
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert "google/gemini-2.5-pro" in mapper.available_models
+    assert "google/gemini-2.5-pro" not in mapper.routable_models
+    assert "google/gemini-3-pro-preview" not in mapper.routable_models
+    assert "google/gemini-3.1-pro-preview" in mapper.routable_models
+
+
+def test_gemini_pro_stays_routable_without_successor():
+    """A discovered model is hidden only when a live successor is also present."""
+    from uncommon_route.model_map import DiscoveredModel, ModelMapper
+
+    mapper = ModelMapper("https://api.commonstack.ai/v1")
+    mapper._pool["google/gemini-2.5-pro"] = DiscoveredModel(
+        id="google/gemini-2.5-pro",
+        provider="google",
+        owned_by="google",
+        pricing=ModelPricing(0.2, 0.8),
+        capabilities=ModelCapabilities(tool_calling=True, vision=True),
+    )
+    mapper._upstream_models.add("google/gemini-2.5-pro")
+    mapper._build_map()
+    mapper._discovered = True
+
+    assert "google/gemini-2.5-pro" in mapper.routable_models
 
 
 # ─── Summary: combined issue reproduction ───

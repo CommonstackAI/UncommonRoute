@@ -42,6 +42,9 @@ export interface Stats {
   avg_confidence: number;
   avg_savings: number;
   avg_latency_ms: number;
+  avg_route_latency_ms: number;
+  avg_upstream_elapsed_ms: number;
+  avg_first_token_ms: number;
   avg_input_reduction_ratio: number;
   avg_cache_hit_ratio: number;
   total_estimated_cost: number;
@@ -342,6 +345,7 @@ export async function resetRoutingConfig(): Promise<RoutingConfigState | null> {
 
 export interface RecentRequest {
   request_id: string;
+  turn_id: string;
   timestamp: number;
   mode: string;
   model: string;
@@ -349,6 +353,10 @@ export interface RecentRequest {
   method: string;
   cost: number;
   savings: number;
+  latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
   transport: string;
   cache_mode: string;
   cache_family: string;
@@ -394,6 +402,13 @@ export interface TraceAttempt {
   cache_family: string;
   cache_breakpoints: number;
   fallback_from: string;
+  fallback_reason?: string;
+  started_at?: number;
+  response_headers_ms?: number;
+  upstream_elapsed_ms?: number;
+  first_token_ms?: number;
+  provider_ttft_ms?: number;
+  tokens_per_second?: number;
   status_code: number;
   success: boolean;
   error_code: string;
@@ -433,6 +448,9 @@ export interface TraceRecord {
   actual_cost?: number | null;
   savings: number;
   latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
   usage_input_tokens: number;
   usage_output_tokens: number;
   cache_read_input_tokens: number;
@@ -521,3 +539,54 @@ export async function fetchRoutePreview(prompt: string, riskTolerance: number = 
     return res.json();
   } catch { return null; }
 }
+
+// === conversation view (PR 2) ===
+
+export interface DecisionCard {
+  model: string;
+  decision_tier: string;
+  served_quality: string;
+  capability_lane: string;
+  raw_confidence: number;
+  latency_us: number;
+  route_latency_ms: number;
+  upstream_elapsed_ms: number;
+  first_token_ms: number;
+  estimated_cost: number;
+  route_reasoning: string;
+  feature_tags: string[];
+  constraint_tags: string[];
+  hint_tags: string[];
+  transport: string;
+  transport_reason: string;
+  attempts_payload: TraceAttempt[];
+  fallback_reason: string;
+}
+
+export interface ConversationToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown> | string;
+}
+
+export interface ConversationMessage {
+  role: "user" | "assistant" | "tool_result";
+  text: string;
+  tool_calls?: ConversationToolCall[];
+  tool_use_id?: string;
+  ts?: number | null;
+  request_id?: string | null;
+  from_request_id?: string;
+  decision?: DecisionCard | null;
+}
+
+export interface Conversation {
+  session_id: string;
+  turn_count: number;
+  content_available: boolean;
+  compact_breaks: number[];
+  messages: ConversationMessage[];
+}
+
+export const fetchConversation = (sessionId: string) =>
+  get<Conversation>(`/v1/sessions/${encodeURIComponent(sessionId)}/conversation`);

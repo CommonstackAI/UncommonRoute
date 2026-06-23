@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
 from uncommon_route.signals.base import TierVote
+from uncommon_route.router.signal_tuning import strip_client_wrapper_blocks
 
 try:
     import numpy as np
@@ -25,6 +27,25 @@ logger = logging.getLogger("uncommon-route.embedding")
 
 K_NEIGHBORS = 7
 MIN_CONFIDENCE_TO_VOTE = 0.3
+
+
+def _classifier_load_warning(path: Path, error: Exception) -> str:
+    detail = str(error).strip() or error.__class__.__name__
+    hint = ""
+    marker = f"{error.__class__.__name__} {detail}".lower()
+    if "xgboost" in marker or "libomp" in marker:
+        hint = " On macOS, install the OpenMP runtime with `brew install libomp`, then restart UncommonRoute."
+    return (
+        f"Embedding classifier failed to load from {path}: {detail}. "
+        "Routing will continue with weaker metadata/structural signals until this is fixed."
+        f"{hint}"
+    )
+
+
+def _warn_classifier_load_failure(path: Path, error: Exception) -> None:
+    message = _classifier_load_warning(path, error)
+    logger.warning(message)
+    print(f"[UncommonRoute] Warning: {message}", file=sys.stderr)
 
 
 def _normalize_content(content: Any) -> str:
@@ -45,7 +66,9 @@ def _normalize_content(content: Any) -> str:
 def _extract_last_user_message(messages: list[dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            return _normalize_content(m.get("content", ""))
+            text = _normalize_content(m.get("content", ""))
+            stripped = strip_client_wrapper_blocks(text)
+            return stripped if stripped else text
     return ""
 
 
@@ -158,7 +181,7 @@ class EmbeddingSignal:
                     logger.info("Loaded trained embedding classifier from %s", classifier_path)
                     self._try_load_scaler(Path(classifier_path).parent)
                 except Exception as e:
-                    logger.warning("Failed to load classifier: %s — falling back to KNN", e)
+                    _warn_classifier_load_failure(Path(classifier_path), e)
             elif index_path:
                 # Auto-detect classifier next to the index
                 auto_clf = Path(index_path).parent / "embedding_classifier.pkl"
@@ -169,7 +192,7 @@ class EmbeddingSignal:
                         logger.info("Auto-loaded embedding classifier from %s", auto_clf)
                         self._try_load_scaler(Path(index_path).parent)
                     except Exception as e:
-                        logger.warning("Failed to auto-load embedding classifier from %s: %s", auto_clf, e)
+                        _warn_classifier_load_failure(auto_clf, e)
 
         if model_name:
             try:

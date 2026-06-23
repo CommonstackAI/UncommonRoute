@@ -33,6 +33,15 @@ from uncommon_route.router.types import (
 from uncommon_route.router.config import DEFAULT_MODEL_PRICING
 from uncommon_route.router.selector import select_from_pool, _derive_tier
 from uncommon_route.router.structural import estimate_tokens
+from uncommon_route.router.signal_tuning import (
+    DEFAULT_SIGNAL_TUNING,
+    contextual_followup_floor_from_text,
+    strip_client_wrapper_blocks,
+    system_prompt_has_structured_output_constraint,
+    text_high_substance_score,
+    text_substance_score,
+    vision_prompt_needs_medium_floor,
+)
 from uncommon_route.router.config import (
     DEFAULT_CONFIG,
     get_bandit_config,
@@ -68,19 +77,6 @@ _PUBLIC_TIER_COMPLEXITY = {
     Tier.MEDIUM: 0.40,
     Tier.COMPLEX: 0.68,
 }
-_EXPLICIT_HIGH_COMPLEXITY_MARKERS = (
-    "byzantine",
-    "consensus algorithm",
-    "distributed consensus",
-    "formal correctness",
-    "formal proof",
-    "correctness proof",
-    "cryptographic protocol",
-    "zero-knowledge",
-    "compiler",
-    "type system",
-    "kernel",
-)
 _TOOL_FAILURE_MARKERS = (
     "traceback",
     "exception",
@@ -168,7 +164,6 @@ _READ_ONLY_COMMAND_RE = re.compile(
 )
 _XML_RETURN_CODE_RE = re.compile(r"<returncode>\s*(-?\d+)\s*</returncode>", re.IGNORECASE)
 
-
 def _message_text(value: Any) -> str:
     if value is None:
         return ""
@@ -194,6 +189,10 @@ def _message_text(value: Any) -> str:
             if value.get(key) is not None
         )
     return str(value)
+
+
+def _user_context_text(value: Any) -> str:
+    return strip_client_wrapper_blocks(_message_text(value))
 
 
 def _message_has_tool_result(value: Any) -> bool:
@@ -536,6 +535,12 @@ def _pressure_rescue_tier_floor(
         return None, None
 
     rescue_floor = _PRESSURE_RESCUE_NEXT_TIER[predicted_tier]
+    cap_reason = str(features.tier_cap_reason or "").strip().lower()
+    if (
+        cap_reason in {"routine-success", "short-observation", "recoverable-tool-error"}
+        and predicted_tier is not Tier.COMPLEX
+    ):
+        return None, None
     return rescue_floor, f"agent-pressure-floor={rescue_floor.value}(from={predicted_tier.value})"
 
 
@@ -576,7 +581,18 @@ def _soften_tier_cap_for_agent_state(
         return tier_cap, f"tier-cap-preserved({cap_reason})"
     elif cap_reason == "invocation-recovery":
         return tier_cap, f"tier-cap-preserved({cap_reason})"
+    elif cap_reason in {"suggestion-mode", "title-generation"}:
+        return tier_cap, f"tier-cap-preserved({cap_reason})"
     elif cap_reason == "low-risk":
+        standalone_complex_support = (
+            not features.has_tool_results
+            and not features.is_agentic
+            and v2.tier_id >= 2
+            and predicted_tier is Tier.COMPLEX
+            and v2.confidence >= 0.25
+        )
+        if standalone_complex_support:
+            return None, "tier-cap-softened(current-complex-evidence)"
         pressure_cap_support = (
             rescue_exceeds_cap
             and (embedding_support or v2.tier_id >= 1 or v2.confidence >= 0.30)
@@ -653,14 +669,138 @@ def _strongest_non_structural_tier(vote_a: TierVote, vote_c: TierVote) -> int | 
     return max(supported) if supported else None
 
 
-def _has_explicit_high_complexity_text(row: dict[str, Any]) -> bool:
-    text_parts: list[str] = []
+def _latest_user_has_high_substance(row: dict[str, Any]) -> bool:
+    return text_high_substance_score(_row_latest_user_text(row)) >= DEFAULT_SIGNAL_TUNING.high_substance_score
+
+
+def _row_latest_user_text(row: dict[str, Any]) -> str:
+    for message in reversed(row.get("messages", [])):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            return _message_text(message.get("content"))
+    return ""
+
+
+def _row_has_structured_system_prompt(row: dict[str, Any]) -> bool:
     for message in row.get("messages", []):
-        content = message.get("content", "")
-        if isinstance(content, str):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "system":
+            continue
+        if system_prompt_has_structured_output_constraint(_message_text(message.get("content"))):
+            return True
+    return False
+
+
+def _strong_embedding_low(vote_c: TierVote) -> bool:
+    return (
+        not vote_c.abstained
+        and vote_c.tier_id == 0
+        and vote_c.confidence >= 0.90
+    )
+
+
+def _allow_short_structural_medium_floor(row: dict[str, Any], vote_c: TierVote) -> bool:
+    """Use Signal B's soft medium floor only for short asks with real substance.
+
+    Short prompts like "write one subject line" and "give me a shell one-liner"
+    often trip the structural classifier's medium band. A high-confidence
+    embedding LOW vote is trustworthy there unless a weighted text-shape score
+    says the current prompt has enough substance to deserve a floor.
+    """
+    if not _strong_embedding_low(vote_c):
+        return True
+    if _row_has_structured_system_prompt(row):
+        return True
+    routing_features = row.get("routing_features")
+    if (
+        getattr(routing_features, "needs_tool_calling", False)
+        and str(getattr(routing_features, "step_risk", "") or "").lower() != "low"
+    ):
+        return True
+
+    text = _row_latest_user_text(row)
+    if not text.strip():
+        return True
+    if text_substance_score(text) >= DEFAULT_SIGNAL_TUNING.short_medium_substance_score:
+        return True
+    return len(text.split()) > 15 and text_substance_score(text) > 0.0
+
+
+def _latest_tool_text_and_command(
+    messages: list[dict[str, Any]] | None,
+) -> tuple[str, str]:
+    _message, text, command = _latest_tool_result_message(messages)
+    return text, command
+
+
+def _messages_have_explicit_final_verification_failure(
+    messages: list[dict[str, Any]] | None,
+) -> bool:
+    text, command = _latest_tool_text_and_command(messages)
+    lowered = f"{command}\n{text}".lower()
+    return bool(
+        "final verification" in lowered
+        and _tool_result_is_verification_failure(text)
+    )
+
+
+def _messages_contextual_followup_floor(
+    messages: list[dict[str, Any]] | None,
+) -> Tier | None:
+    if not messages:
+        return None
+    user_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    if len(user_indexes) < 2:
+        return None
+
+    latest_index = user_indexes[-1]
+    latest = _user_context_text(messages[latest_index].get("content"))
+    prior_context = "\n".join(
+        (
+            _user_context_text(message.get("content"))
+            if isinstance(message, dict) and message.get("role") == "user"
+            else _message_text(message.get("content"))
+        )
+        for message in messages[:latest_index]
+        if isinstance(message, dict) and message.get("role") != "system"
+    )
+    return contextual_followup_floor_from_text(
+        prior_text=prior_context,
+        latest_text=latest,
+    )
+
+
+def _messages_need_vision_analysis_floor(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    has_vision = False
+    text_parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") in {"image_url", "input_image"}:
+                    has_vision = True
+                if item.get("type") in {"text", "input_text"}:
+                    text_parts.append(str(item.get("text") or ""))
+        elif isinstance(content, str):
             text_parts.append(content)
-    text = "\n".join(text_parts).lower()
-    return any(marker in text for marker in _EXPLICIT_HIGH_COMPLEXITY_MARKERS)
+    if not has_vision:
+        return False
+    return vision_prompt_needs_medium_floor(
+        has_vision=True,
+        prompt="\n".join(text_parts),
+    )
 
 
 def _cap_uncorroborated_structural_high(
@@ -687,12 +827,12 @@ def _cap_uncorroborated_structural_high(
         return vote_b, False, None
 
     support_tier = _strongest_non_structural_tier(vote_a, vote_c)
-    explicit_high_complexity = _has_explicit_high_complexity_text(row)
+    latest_high_substance = _latest_user_has_high_substance(row)
     if support_tier is not None and support_tier >= 3:
         return vote_b, False, None
     capped_tier = (
         2
-        if (support_tier is not None and support_tier >= 2) or explicit_high_complexity
+        if (support_tier is not None and support_tier >= 2) or latest_high_substance
         else 1
     )
     if vote_b.tier_id <= capped_tier:
@@ -729,7 +869,6 @@ def _ensure_v2_signals() -> None:
     # Try to load embedding index
     try:
         from uncommon_route.paths import data_dir
-        from pathlib import Path
         splits_dir = data_dir() / "v2_splits"
         emb_path = splits_dir / "seed_embeddings.npy"
         labels_path = splits_dir / "seed_labels.json"
@@ -803,6 +942,7 @@ def _build_signal_row(
         "scenario": scenario,
         "step_index": step_index,
         "total_steps": total_steps,
+        "routing_features": routing_features,
     }
 
 
@@ -908,6 +1048,8 @@ def _v2_classify(
         tier_id = effective_vote_b.tier_id
         structural_floor_applied = True
     structural_medium_floor_applied = False
+    substance_structural_high_floor_applied = False
+    substance_complexity_floor_applied = False
     if (
         not structural_floor_applied
         and tool_msg_count == 0
@@ -916,6 +1058,7 @@ def _v2_classify(
         and effective_vote_b.confidence >= 0.70
         and (effective_vote_b.tier_id or 0) >= 1
         and tier_id < 1
+        and _allow_short_structural_medium_floor(row, vote_c)
     ):
         # Short standalone implementation/design prompts are often capped to
         # 0.70 confidence by Signal B's short-text dampener. Do not let
@@ -923,6 +1066,29 @@ def _v2_classify(
         # escalating them all the way to premium unless Signal B is stronger.
         tier_id = 1
         structural_medium_floor_applied = True
+    if (
+        not structural_floor_applied
+        and tool_msg_count == 0
+        and len(row.get("messages", [])) <= 3
+        and not effective_vote_b.abstained
+        and (effective_vote_b.tier_id or 0) >= 3
+        and effective_vote_b.confidence >= 0.70
+        and tier_id < 2
+        and _latest_user_has_high_substance(row)
+    ):
+        tier_id = 2
+        substance_structural_high_floor_applied = True
+    if (
+        tier_id < 2
+        and tool_msg_count == 0
+        and len(row.get("messages", [])) <= 3
+        and not effective_vote_b.abstained
+        and (effective_vote_b.tier_id or 0) >= 1
+        and effective_vote_b.confidence >= 0.70
+        and _latest_user_has_high_substance(row)
+    ):
+        tier_id = 2
+        substance_complexity_floor_applied = True
     complexity = _TIER_ID_TO_COMPLEXITY.get(tier_id, 0.40)
 
     signals_parts = [
@@ -935,6 +1101,10 @@ def _v2_classify(
         signals_parts.append("v2:structural-floor")
     if structural_medium_floor_applied:
         signals_parts.append("v2:structural-medium-floor")
+    if substance_structural_high_floor_applied:
+        signals_parts.append("v2:substance-structural-high-floor")
+    if substance_complexity_floor_applied:
+        signals_parts.append("v2:substance-complexity-floor")
     if structural_high_capped:
         signals_parts.append(f"v2:structural-high-cap={structural_cap_tier}")
     if weak_metadata_only_cap_applied:
@@ -1013,6 +1183,63 @@ def route(
 
     effective_tier_floor = features.tier_floor or tier_floor
     effective_tier_cap = features.tier_cap or tier_cap
+    feature_bound_notes: list[str] = []
+    early_semantic_failure_cap_applied = False
+    contextual_followup_floor = _messages_contextual_followup_floor(messages)
+    if (
+        contextual_followup_floor is not None
+        and (
+            effective_tier_floor is None
+            or _TIER_ORDER[effective_tier_floor] < _TIER_ORDER[contextual_followup_floor]
+        )
+    ):
+        effective_tier_floor = contextual_followup_floor
+        feature_bound_notes.append(f"context-followup-floor={contextual_followup_floor.value}")
+    if (
+        (features.needs_structured_output or _row_has_structured_system_prompt({"messages": messages or []}))
+        and (
+            effective_tier_floor is None
+            or _TIER_ORDER[effective_tier_floor] < _TIER_ORDER[Tier.MEDIUM]
+        )
+    ):
+        effective_tier_floor = Tier.MEDIUM
+        feature_bound_notes.append("structured-output-floor=MEDIUM")
+    if (
+        (features.needs_vision or _messages_need_vision_analysis_floor(messages))
+        and (
+            effective_tier_floor is None
+            or _TIER_ORDER[effective_tier_floor] < _TIER_ORDER[Tier.MEDIUM]
+        )
+    ):
+        effective_tier_floor = Tier.MEDIUM
+        feature_bound_notes.append("vision-floor=MEDIUM")
+    if (
+        features.verification_failed
+        and _messages_have_explicit_final_verification_failure(messages)
+        and (
+            effective_tier_floor is None
+            or _TIER_ORDER[effective_tier_floor] < _TIER_ORDER[Tier.COMPLEX]
+        )
+    ):
+        effective_tier_floor = Tier.COMPLEX
+        effective_tier_cap = None
+        feature_bound_notes.append("final-verification-floor=COMPLEX")
+    elif (
+        features.verification_failed
+        and features.agent_pressure < 0.55
+        and effective_tier_cap is None
+    ):
+        effective_tier_cap = Tier.MEDIUM
+        early_semantic_failure_cap_applied = True
+        feature_bound_notes.append("early-semantic-failure-cap=MEDIUM")
+    if (
+        str(features.step_risk or "").strip().lower() == "low"
+        and features.tier_cap_reason == "routine-success"
+        and not features.verification_failed
+        and features.agent_pressure < 0.35
+    ):
+        effective_tier_cap = Tier.SIMPLE
+        feature_bound_notes.append("routine-success-cap=SIMPLE")
     pressure_rescue_floor, pressure_floor_note_candidate = _pressure_rescue_tier_floor(v2, features)
     pressure_floor_note = None
     if (
@@ -1030,6 +1257,9 @@ def route(
         effective_tier_cap,
         pressure_rescue_floor,
     )
+    if early_semantic_failure_cap_applied and cap_softened_note:
+        effective_tier_cap = Tier.MEDIUM
+        cap_softened_note = "tier-cap-preserved(early-semantic-failure)"
     bounded_complexity, bound_notes = _apply_tier_bounds(
         v2.complexity,
         tier_floor=effective_tier_floor,
@@ -1053,6 +1283,7 @@ def route(
         reasoning_parts.append(pressure_floor_note)
     if cap_softened_note:
         reasoning_parts.append(cap_softened_note)
+    reasoning_parts.extend(feature_bound_notes)
     reasoning_parts.extend(bound_notes)
     reasoning = ", ".join(reasoning_parts)
 

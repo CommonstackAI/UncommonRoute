@@ -62,6 +62,9 @@ class RouteRecord:
     actual_cost: float | None = None
     savings: float = 0.0
     latency_us: float = 0.0
+    route_latency_ms: float = 0.0
+    upstream_elapsed_ms: float = 0.0
+    first_token_ms: float = 0.0
     usage_input_tokens: int = 0
     usage_output_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -84,6 +87,7 @@ class RouteRecord:
     sidechannel_estimated_cost: float = 0.0
     sidechannel_actual_cost: float | None = None
     session_id: str | None = None
+    turn_id: str = ""
     step_type: str = "general"
     fallback_reason: str = ""
     streaming: bool = False
@@ -143,6 +147,9 @@ class StatsSummary:
     avg_confidence: float
     avg_savings: float
     avg_latency_us: float
+    avg_route_latency_ms: float
+    avg_upstream_elapsed_ms: float
+    avg_first_token_ms: float
     avg_input_reduction_ratio: float
     avg_cache_hit_ratio: float
     total_estimated_cost: float
@@ -328,53 +335,7 @@ class RouteStats:
     def recent(self, limit: int = 30) -> list[dict[str, Any]]:
         """Most recent routed requests that carry a request_id (for feedback)."""
         records = [r for r in reversed(self._records) if r.request_id]
-        return [
-            {
-                "request_id": r.request_id,
-                "timestamp": r.timestamp,
-                "mode": r.mode,
-                "model": r.model,
-                "tier": _normalize_tier_label(r.tier),
-                "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
-                "served_quality": _normalize_served_quality(r.served_quality),
-                "served_quality_target": _normalize_served_quality(r.served_quality_target),
-                "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
-                "capability_lane": str(r.capability_lane or "").strip().lower(),
-                "method": r.method,
-                "cost": _effective_cost(r),
-                "savings": r.savings,
-                "raw_confidence": r.raw_confidence,
-                "confidence_source": r.confidence_source,
-                "transport": r.transport,
-                "cache_mode": r.cache_mode,
-                "cache_family": r.cache_family,
-                "cache_breakpoints": r.cache_breakpoints,
-                "cache_hit_ratio": r.cache_hit_ratio,
-                "cache_read_input_tokens": r.cache_read_input_tokens,
-                "input_tokens_before": r.input_tokens_before,
-                "input_tokens_after": r.input_tokens_after,
-                "artifacts_created": r.artifacts_created,
-                "prompt_preview": r.prompt_preview,
-                "complexity": getattr(r, "complexity", 0.33),
-                "route_reasoning": r.route_reasoning,
-                "constraint_tags": list(r.constraint_tags or []),
-                "hint_tags": list(r.hint_tags or []),
-                "feature_tags": list(r.feature_tags or []),
-                "answer_depth": r.answer_depth,
-                "status_code": r.status_code,
-                "error_code": r.error_code,
-                "error_stage": r.error_stage,
-                "error_message": r.error_message,
-                "feedback_signal": r.feedback_signal,
-                "feedback_ok": r.feedback_ok,
-                "feedback_action": r.feedback_action,
-                "feedback_from_tier": r.feedback_from_tier,
-                "feedback_to_tier": r.feedback_to_tier,
-                "feedback_reason": r.feedback_reason,
-                "feedback_submitted_at": r.feedback_submitted_at,
-            }
-            for r in records[:limit]
-        ]
+        return [record_to_recent_dict(r) for r in records[:limit]]
 
     def summary(self) -> StatsSummary:
         if not self._records:
@@ -384,6 +345,8 @@ class RouteStats:
                 by_transport={}, by_cache_mode={}, by_cache_family={},
                 by_mode={}, by_method={}, complexity_distribution={},
                 avg_confidence=0.0, avg_savings=0.0, avg_latency_us=0.0,
+                avg_route_latency_ms=0.0, avg_upstream_elapsed_ms=0.0,
+                avg_first_token_ms=0.0,
                 avg_input_reduction_ratio=0.0, avg_cache_hit_ratio=0.0,
                 total_estimated_cost=0.0, total_baseline_cost=0.0, total_actual_cost=0.0,
                 total_savings_absolute=0.0, total_savings_ratio=0.0,
@@ -490,6 +453,16 @@ class RouteStats:
         total_compaction_savings = sum(_compaction_savings(r) for r in self._records)
         total_savings_absolute = total_baseline - total_act
         total_savings_ratio = (total_savings_absolute / total_baseline) if total_baseline > 0 else 0.0
+        route_latency_values = [
+            r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0
+            for r in self._records
+        ]
+        upstream_elapsed_values = [
+            r.upstream_elapsed_ms for r in self._records if r.upstream_elapsed_ms > 0
+        ]
+        first_token_values = [
+            r.first_token_ms for r in self._records if r.first_token_ms > 0
+        ]
 
         return StatsSummary(
             total_requests=n,
@@ -508,6 +481,15 @@ class RouteStats:
             avg_confidence=sum(r.confidence for r in self._records) / n,
             avg_savings=sum(r.savings for r in self._records) / n,
             avg_latency_us=sum(r.latency_us for r in self._records) / n,
+            avg_route_latency_ms=sum(route_latency_values) / len(route_latency_values),
+            avg_upstream_elapsed_ms=(
+                sum(upstream_elapsed_values) / len(upstream_elapsed_values)
+                if upstream_elapsed_values else 0.0
+            ),
+            avg_first_token_ms=(
+                sum(first_token_values) / len(first_token_values)
+                if first_token_values else 0.0
+            ),
             avg_input_reduction_ratio=(sum(ratios) / len(ratios)) if ratios else 0.0,
             avg_cache_hit_ratio=sum(r.cache_hit_ratio for r in self._records) / n,
             total_estimated_cost=total_est,
@@ -579,6 +561,9 @@ class RouteStats:
                 actual_cost=r.get("actual_cost"),
                 savings=r.get("savings", 0.0),
                 latency_us=r.get("latency_us", 0.0),
+                route_latency_ms=r.get("route_latency_ms", 0.0),
+                upstream_elapsed_ms=r.get("upstream_elapsed_ms", 0.0),
+                first_token_ms=r.get("first_token_ms", 0.0),
                 usage_input_tokens=r.get("usage_input_tokens", 0),
                 usage_output_tokens=r.get("usage_output_tokens", 0),
                 cache_read_input_tokens=r.get("cache_read_input_tokens", 0),
@@ -601,6 +586,7 @@ class RouteStats:
                 sidechannel_estimated_cost=r.get("sidechannel_estimated_cost", 0.0),
                 sidechannel_actual_cost=r.get("sidechannel_actual_cost"),
                 session_id=r.get("session_id"),
+                turn_id=r.get("turn_id", ""),
                 step_type=r.get("step_type", "general"),
                 fallback_reason=r.get("fallback_reason", ""),
                 streaming=r.get("streaming", False),
@@ -630,6 +616,59 @@ class RouteStats:
         self._cleanup()
 
 
+def record_to_recent_dict(r: RouteRecord) -> dict[str, Any]:
+    """Serialize a RouteRecord into the shape returned by /v1/stats/recent."""
+    return {
+        "request_id": r.request_id,
+        "turn_id": r.turn_id,
+        "timestamp": r.timestamp,
+        "mode": r.mode,
+        "model": r.model,
+        "tier": _normalize_tier_label(r.tier),
+        "decision_tier": _normalize_tier_label(r.decision_tier or r.tier),
+        "served_quality": _normalize_served_quality(r.served_quality),
+        "served_quality_target": _normalize_served_quality(r.served_quality_target),
+        "served_quality_floor": _normalize_served_quality(r.served_quality_floor),
+        "capability_lane": str(r.capability_lane or "").strip().lower(),
+        "method": r.method,
+        "cost": _effective_cost(r),
+        "savings": r.savings,
+        "latency_us": r.latency_us,
+        "route_latency_ms": r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0,
+        "upstream_elapsed_ms": r.upstream_elapsed_ms,
+        "first_token_ms": r.first_token_ms,
+        "raw_confidence": r.raw_confidence,
+        "confidence_source": r.confidence_source,
+        "transport": r.transport,
+        "cache_mode": r.cache_mode,
+        "cache_family": r.cache_family,
+        "cache_breakpoints": r.cache_breakpoints,
+        "cache_hit_ratio": r.cache_hit_ratio,
+        "cache_read_input_tokens": r.cache_read_input_tokens,
+        "input_tokens_before": r.input_tokens_before,
+        "input_tokens_after": r.input_tokens_after,
+        "artifacts_created": r.artifacts_created,
+        "prompt_preview": r.prompt_preview,
+        "complexity": getattr(r, "complexity", 0.33),
+        "route_reasoning": r.route_reasoning,
+        "constraint_tags": list(r.constraint_tags or []),
+        "hint_tags": list(r.hint_tags or []),
+        "feature_tags": list(r.feature_tags or []),
+        "answer_depth": r.answer_depth,
+        "status_code": r.status_code,
+        "error_code": r.error_code,
+        "error_stage": r.error_stage,
+        "error_message": r.error_message,
+        "feedback_signal": r.feedback_signal,
+        "feedback_ok": r.feedback_ok,
+        "feedback_action": r.feedback_action,
+        "feedback_from_tier": r.feedback_from_tier,
+        "feedback_to_tier": r.feedback_to_tier,
+        "feedback_reason": r.feedback_reason,
+        "feedback_submitted_at": r.feedback_submitted_at,
+    }
+
+
 def _record_payload(r: RouteRecord) -> dict[str, Any]:
     return {
         "timestamp": r.timestamp,
@@ -655,6 +694,9 @@ def _record_payload(r: RouteRecord) -> dict[str, Any]:
         "actual_cost": r.actual_cost,
         "savings": r.savings,
         "latency_us": r.latency_us,
+        "route_latency_ms": r.route_latency_ms if r.route_latency_ms > 0 else r.latency_us / 1000.0,
+        "upstream_elapsed_ms": r.upstream_elapsed_ms,
+        "first_token_ms": r.first_token_ms,
         "usage_input_tokens": r.usage_input_tokens,
         "usage_output_tokens": r.usage_output_tokens,
         "cache_read_input_tokens": r.cache_read_input_tokens,
@@ -677,6 +719,7 @@ def _record_payload(r: RouteRecord) -> dict[str, Any]:
         "sidechannel_estimated_cost": r.sidechannel_estimated_cost,
         "sidechannel_actual_cost": r.sidechannel_actual_cost,
         "session_id": r.session_id,
+        "turn_id": r.turn_id,
         "step_type": r.step_type,
         "fallback_reason": r.fallback_reason,
         "streaming": r.streaming,

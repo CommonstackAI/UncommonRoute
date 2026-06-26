@@ -1,0 +1,10 @@
+{
+  "default_mode": "auto",
+  "modes": {
+    "auto": {
+      "SIMPLE":  { "primary": "openai/gpt-4o-mini",         "fallback": [], "hard_pin": true },
+      "MEDIUM":  { "primary": "anthropic/claude-sonnet-4-6", "fallback": [], "hard_pin": true },
+      "COMPLEX": { "primary": "anthropic/claude-opus-4-8",   "fallback": [], "hard_pin": true }
+    }
+  }
+}

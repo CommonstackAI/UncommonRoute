@@ -27,10 +27,14 @@ RUN python -m pip install --upgrade pip \
     && mkdir -p /data \
     && chown -R uncommon-route:uncommon-route /app /data
 
+# Bake the pinned routing pool into the data dir. RoutingConfigStore reads
+# $UNCOMMON_ROUTE_DATA_DIR/routing_config.json at startup. /data is a normal
+# image dir (no VOLUME), so this is always present and never masked by a mount.
+COPY --chown=uncommon-route:uncommon-route deploy/routing_config.json /data/routing_config.json
+
 USER uncommon-route
 
 EXPOSE 8403
-VOLUME ["/data"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD []

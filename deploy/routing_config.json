@@ -32,6 +32,70 @@
         ],
         "hard_pin": false
       }
+    },
+    "fast": {
+      "SIMPLE": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      },
+      "MEDIUM": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      },
+      "COMPLEX": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      }
+    },
+    "best": {
+      "SIMPLE": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      },
+      "MEDIUM": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      },
+      "COMPLEX": {
+        "primary": "anthropic/claude-opus-4-8",
+        "fallback": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4-2026-03-05",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "hard_pin": false
+      }
     }
   }
 }

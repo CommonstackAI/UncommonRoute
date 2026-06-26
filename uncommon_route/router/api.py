@@ -45,6 +45,7 @@ from uncommon_route.router.signal_tuning import (
 from uncommon_route.router.config import (
     DEFAULT_CONFIG,
     get_bandit_config,
+    get_mode_tiers,
     get_selection_weights,
 )
 from uncommon_route.signals.base import TierVote
@@ -1286,6 +1287,18 @@ def route(
     reasoning_parts.extend(feature_bound_notes)
     reasoning_parts.extend(bound_notes)
     reasoning = ", ".join(reasoning_parts)
+
+    # Honor per-tier routing_config overrides (`config set-tier` / routing_config.json).
+    # select_from_pool() evaluates the full discovered pool and does not read the
+    # configured per-tier primary/fallback, so translate the override for the chosen
+    # tier into an allowed_models constraint, which select_from_pool DOES enforce.
+    # Skip when an allowlist is already set (e.g. an active scene) so we never widen it.
+    if not constraints.allowed_models:
+        tier_tc = get_mode_tiers(cfg, mode).get(final_tier)
+        if tier_tc is not None and tier_tc.primary:
+            pinned = [tier_tc.primary] if tier_tc.hard_pin else [tier_tc.primary, *tier_tc.fallback]
+            constraints = replace(constraints, allowed_models=tuple(pinned))
+            reasoning = f"{reasoning} | tier-override={'hard-pin' if tier_tc.hard_pin else 'pool'}:{','.join(pinned)}"
 
     decision = select_from_pool(
         complexity=bounded_complexity,

@@ -4393,7 +4393,15 @@ def create_app(
                 _retrial_detector._history[-1].tier = tier_value
 
             body["model"] = selected_model
-            if not body.get("stream") and "logprobs" not in body:
+            # logprobs is injected only as an implicit-feedback signal. Many upstreams
+            # reject it (Anthropic Messages has no logprobs; OpenAI reasoning models —
+            # o3/o4-mini — reject logprobs/top_logprobs), which 400s the request. Gate
+            # it behind an opt-in env flag; default off so non-streaming requests work
+            # against logprobs-incapable upstreams.
+            _inject_logprobs = str(
+                os.environ.get("UNCOMMON_ROUTE_UPSTREAM_LOGPROBS", "")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if _inject_logprobs and not body.get("stream") and "logprobs" not in body:
                 body["logprobs"] = True
                 body["top_logprobs"] = 3
 

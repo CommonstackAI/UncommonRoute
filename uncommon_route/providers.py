@@ -48,7 +48,7 @@ KNOWN_BASE_URLS: dict[str, str] = {
 }
 
 PROVIDER_MODELS: dict[str, list[str]] = {
-    "minimax": ["minimax/minimax-m2.5"],
+    "minimax": ["minimax/minimax-m2.5", "minimax/minimax-m3"],
     "deepseek": ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"],
     "openai": ["openai/gpt-4o-mini", "openai/gpt-4o", "openai/gpt-5.2", "openai/gpt-5.2-codex", "openai/o1-mini", "openai/o3", "openai/o4-mini"],
     "anthropic": ["anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.6"],

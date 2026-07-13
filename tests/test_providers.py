@@ -41,7 +41,11 @@ class TestProviderConfig:
         cfg = add_provider("minimax", "eyJ-test", plan="coding-plan")
         entry = cfg.providers["minimax"]
         assert entry.plan == "coding-plan"
-        assert "minimax/minimax-m2.5" in entry.models
+        assert entry.models == [
+            "minimax/minimax-m2.5",
+            "minimax/minimax-m3",
+            "minimax/minimax-m2.7",
+        ]
 
     def test_add_provider_custom_url(self) -> None:
         cfg = add_provider("openai", "sk-openai", base_url="https://my-proxy.com/v1")

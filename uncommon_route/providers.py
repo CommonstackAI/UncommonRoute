@@ -12,7 +12,11 @@ Example (providers.json):
         "minimax": {
           "api_key": "eyJ...",
           "base_url": "https://api.minimax.io/v1",
-          "models": ["minimax/minimax-m2.5"],
+          "models": [
+            "minimax/minimax-m2.5",
+            "minimax/minimax-m3",
+            "minimax/minimax-m2.7"
+          ],
           "plan": "coding-plan"
         },
         "deepseek": {

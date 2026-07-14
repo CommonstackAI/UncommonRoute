@@ -92,7 +92,7 @@ class TestUpstreamSemanticCompressor:
             upstream_chat="https://primary.example/v1/chat/completions",
             primary_api_key="primary-test-key",
             providers_config=providers,
-            model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+            model_mapper=ModelMapper("https://primary.example/v1"),
             composition_policy=CompositionPolicy(),
         )
 

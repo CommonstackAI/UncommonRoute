@@ -106,6 +106,7 @@ from uncommon_route.providers import (
     ProvidersConfig,
     add_provider,
     load_providers,
+    resolve_upstream_model,
     remove_provider,
     verify_key,
 )
@@ -4635,7 +4636,9 @@ def create_app(
                     attempt_headers[_ORIGINAL_MODEL_HEADER] = requested_model
 
             resolved_model = model_name
-            if not attempt_provider_entry:
+            if attempt_provider_entry:
+                resolved_model = resolve_upstream_model(attempt_provider_entry.name, model_name)
+            else:
                 resolved_model = _mapper.resolve(model_name)
             attempt_upstream_body["model"] = resolved_model
 

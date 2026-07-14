@@ -1956,7 +1956,7 @@ class TestTransportRouting:
                     "id": "msg_minimax_byok",
                     "type": "message",
                     "role": "assistant",
-                    "model": "minimax/minimax-m3",
+                    "model": "MiniMax-M3",
                     "content": [{"type": "text", "text": "ok"}],
                     "stop_reason": "end_turn",
                     "stop_sequence": None,
@@ -1993,6 +1993,9 @@ class TestTransportRouting:
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "mm-key-123"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["model"] == "MiniMax-M3"
         finally:
             asyncio.run(async_client.aclose())
 
@@ -2021,7 +2024,7 @@ class TestTransportRouting:
                     "id": "chatcmpl_minimax",
                     "object": "chat.completion",
                     "created": 1,
-                    "model": "minimax/minimax-m3",
+                    "model": "MiniMax-M3",
                     "choices": [{
                         "index": 0,
                         "message": {"role": "assistant", "content": "done"},
@@ -2065,7 +2068,7 @@ class TestTransportRouting:
             assert headers["authorization"] == "Bearer mm-key-123"
             body = captured["body"]
             assert isinstance(body, dict)
-            assert body["model"] == "minimax/minimax-m3"
+            assert body["model"] == "MiniMax-M3"
         finally:
             asyncio.run(async_client.aclose())
 

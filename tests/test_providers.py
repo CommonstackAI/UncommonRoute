@@ -11,6 +11,7 @@ from uncommon_route.providers import (
     ProviderEntry,
     add_provider,
     load_providers,
+    resolve_upstream_model,
     remove_provider,
     select_preferred_model,
 )
@@ -50,6 +51,11 @@ class TestProviderConfig:
     def test_add_provider_custom_url(self) -> None:
         cfg = add_provider("openai", "sk-openai", base_url="https://my-proxy.com/v1")
         assert cfg.providers["openai"].base_url == "https://my-proxy.com/v1"
+
+    def test_resolve_minimax_upstream_model_ids(self) -> None:
+        assert resolve_upstream_model("minimax", "minimax/minimax-m3") == "MiniMax-M3"
+        assert resolve_upstream_model("minimax", "minimax/minimax-m2.7") == "MiniMax-M2.7"
+        assert resolve_upstream_model("minimax", "minimax/unknown") == "minimax/unknown"
 
     def test_add_provider_custom_models(self) -> None:
         cfg = add_provider(

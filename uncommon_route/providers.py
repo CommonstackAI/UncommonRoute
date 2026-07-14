@@ -61,6 +61,17 @@ PROVIDER_MODELS: dict[str, list[str]] = {
     "moonshot": ["moonshot/kimi-k2.5"],
 }
 
+UPSTREAM_MODEL_IDS: dict[str, dict[str, str]] = {
+    "minimax": {
+        "minimax/minimax-m3": "MiniMax-M3",
+        "minimax/minimax-m2.7": "MiniMax-M2.7",
+    },
+}
+
+
+def resolve_upstream_model(provider_name: str, model_id: str) -> str:
+    return UPSTREAM_MODEL_IDS.get(provider_name, {}).get(model_id, model_id)
+
 
 @dataclass
 class ProviderEntry:

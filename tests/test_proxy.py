@@ -17,6 +17,7 @@ from uncommon_route.model_map import DiscoveredModel, ModelMapper
 from uncommon_route.model_experience import InMemoryModelExperienceStorage, ModelExperienceStore
 from uncommon_route.providers import ProviderEntry, ProvidersConfig
 from uncommon_route.proxy import (
+    UpstreamSemanticCompressor,
     _extract_current_message,
     _extract_prompt,
     _normalize_reasoning_content_chunk,
@@ -75,6 +76,36 @@ def _build_test_mapper(*model_ids: str) -> ModelMapper:
         mapper._upstream_models.add(model_id)
     mapper._discovered = True
     return mapper
+
+
+class TestUpstreamSemanticCompressor:
+    def test_direct_minimax_provider_uses_upstream_model_id(self) -> None:
+        providers = ProvidersConfig(providers={
+            "minimax": ProviderEntry(
+                name="minimax",
+                api_key="test-key",
+                base_url="https://api.minimax.io/v1",
+                models=["minimax/minimax-m3"],
+            ),
+        })
+        compressor = UpstreamSemanticCompressor(
+            upstream_chat="https://primary.example/v1/chat/completions",
+            primary_api_key="primary-test-key",
+            providers_config=providers,
+            model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+            composition_policy=CompositionPolicy(),
+        )
+
+        resolved = compressor._resolve_request(
+            "minimax/minimax-m3",
+            httpx.Request("POST", "https://local.example/v1/chat/completions"),
+        )
+
+        assert resolved is not None
+        target_url, headers, upstream_model = resolved
+        assert target_url == "https://api.minimax.io/v1/chat/completions"
+        assert headers["authorization"] == "Bearer test-key"
+        assert upstream_model == "MiniMax-M3"
 
 
 class TestPromptExtraction:

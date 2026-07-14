@@ -915,7 +915,7 @@ class UpstreamSemanticCompressor:
         provider_entry = self._providers.get_for_model(model_id)
         if provider_entry and provider_entry.base_url:
             target_chat_url = f"{provider_entry.base_url.rstrip('/')}/chat/completions"
-            upstream_model = model_id
+            upstream_model = resolve_upstream_model(provider_entry.name, model_id)
         elif self._upstream_chat:
             target_chat_url = self._upstream_chat
             upstream_model = self._mapper.resolve(model_id)

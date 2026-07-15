@@ -59,6 +59,8 @@ from uncommon_route.router.config import (
     BASELINE_MODEL,
     DEFAULT_CONFIG,
     DEFAULT_MODEL_PRICING,
+    PROVIDER_MODEL_CAPABILITIES,
+    PROVIDER_MODEL_PRICING,
     VIRTUAL_MODEL_IDS,
     routing_mode_from_model,
     virtual_model_entries,
@@ -321,6 +323,7 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     mp = _get_pricing().get(model)
     if mp is None:
         return 0.0
+    mp = mp.for_usage(input_tokens)
     return (input_tokens / 1_000_000) * mp.input_price + (output_tokens / 1_000_000) * mp.output_price
 
 
@@ -2847,6 +2850,11 @@ def create_app(
         dynamic = _mapper.dynamic_pricing
         if dynamic:
             merged.update(dynamic)
+        keyed_models = _providers.keyed_models()
+        for model_id in keyed_models:
+            provider_pricing = PROVIDER_MODEL_PRICING.get(model_id)
+            if provider_pricing is not None:
+                merged[model_id] = provider_pricing
         _active_pricing = merged
 
         import copy
@@ -2855,7 +2863,13 @@ def create_app(
         if dynamic_caps:
             merged_caps = dict(updated.model_capabilities)
             merged_caps.update(dynamic_caps)
-            updated.model_capabilities = merged_caps
+        else:
+            merged_caps = dict(updated.model_capabilities)
+        for model_id in keyed_models:
+            provider_capabilities = PROVIDER_MODEL_CAPABILITIES.get(model_id)
+            if provider_capabilities is not None:
+                merged_caps[model_id] = provider_capabilities
+        updated.model_capabilities = merged_caps
         _routing_config = updated
 
     def _reload_providers() -> ProvidersConfig:
@@ -2863,7 +2877,10 @@ def create_app(
         _providers = load_providers()
         if isinstance(_semantic, UpstreamSemanticCompressor):
             _semantic.rebind_providers(_providers)
+        _refresh_active_pricing()
         return _providers
+
+    _refresh_active_pricing()
 
     def _current_connection_payload() -> dict[str, Any]:
         effective = resolve_primary_connection(

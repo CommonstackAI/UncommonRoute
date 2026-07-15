@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from uncommon_route.cache_support import apply_anthropic_cache_breakpoints, parse_stream_usage_metrics
-from uncommon_route.router.types import ModelPricing
+from uncommon_route.cache_support import apply_anthropic_cache_breakpoints, estimate_usage_cost, parse_stream_usage_metrics
+from uncommon_route.router.types import ModelPricing, ModelPricingTier
 
 
 def test_anthropic_cache_breakpoints_do_not_upgrade_after_existing_5m() -> None:
@@ -88,3 +88,24 @@ def test_stream_usage_falls_back_to_reasoning_content_tokens_when_usage_missing(
     assert usage.output_tokens > 0
     assert usage.total_tokens == usage.output_tokens
     assert usage.actual_cost is not None
+
+
+def test_usage_cost_applies_long_context_pricing_tier() -> None:
+    pricing = ModelPricing(
+        0.30,
+        1.20,
+        pricing_tiers=(
+            ModelPricingTier("standard", 0.30, 1.20, input_tokens_lte=512_000),
+            ModelPricingTier("standard", 0.60, 2.40, input_tokens_gt=512_000),
+        ),
+    )
+
+    cost = estimate_usage_cost(
+        input_tokens_uncached=600_000,
+        output_tokens=100_000,
+        cache_read_input_tokens=0,
+        cache_write_input_tokens=0,
+        pricing=pricing,
+    )
+
+    assert cost == 0.60

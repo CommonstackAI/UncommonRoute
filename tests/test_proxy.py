@@ -108,6 +108,93 @@ class TestUpstreamSemanticCompressor:
         assert upstream_model == "MiniMax-M3"
 
 
+class TestProviderModelMetadata:
+    def test_minimax_byok_metadata_is_available_to_virtual_routing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        routed: dict[str, object] = {}
+
+        def fake_route(*_args, **kwargs) -> RoutingDecision:
+            routed["pricing"] = kwargs["pricing"]
+            routed["capabilities"] = kwargs["model_capabilities"]
+            return RoutingDecision(
+                model="minimax/minimax-m3",
+                tier=Tier.COMPLEX,
+                capability_lane=CapabilityLane.VISION,
+                served_quality=ServedQuality.PREMIUM,
+                served_quality_target=ServedQuality.PREMIUM,
+                served_quality_floor=ServedQuality.PREMIUM,
+                continuity_quality_floor=kwargs["routing_features"].continuity_quality_floor,
+                mode=RoutingMode.AUTO,
+                confidence=0.9,
+                method="provider metadata test",
+                reasoning="provider metadata test",
+                cost_estimate=0.001,
+                baseline_cost=0.002,
+                savings=0.5,
+                routing_features=kwargs["routing_features"],
+            )
+
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_minimax_metadata",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "MiniMax-M3",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        providers = ProvidersConfig(providers={
+            "minimax": ProviderEntry(
+                name="minimax",
+                api_key="test-key",
+                base_url="https://api.minimax.io/v1",
+                models=["minimax/minimax-m3", "minimax/minimax-m2.7"],
+            ),
+        })
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
+
+        try:
+            app = create_app(
+                upstream="https://primary.example/v1",
+                providers_config=providers,
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/v1/chat/completions", json={
+                "model": "uncommon-route/auto",
+                "messages": [{"role": "user", "content": "describe this image"}],
+            })
+
+            assert resp.status_code == 200
+            pricing = routed["pricing"]
+            capabilities = routed["capabilities"]
+            assert isinstance(pricing, dict)
+            assert isinstance(capabilities, dict)
+            assert pricing["minimax/minimax-m3"].cached_input_price == 0.06
+            assert pricing["minimax/minimax-m2.7"].cache_write_price == 0.375
+            assert capabilities["minimax/minimax-m3"].vision is True
+            assert capabilities["minimax/minimax-m2.7"].thinking_modes == ("always_on",)
+            assert captured["body"]["model"] == "MiniMax-M3"
+        finally:
+            asyncio.run(async_client.aclose())
+
+
 class TestPromptExtraction:
     def test_extract_prompt_ignores_claude_code_wrapper_blocks(self) -> None:
         prompt, system_prompt, max_tokens = _extract_prompt({

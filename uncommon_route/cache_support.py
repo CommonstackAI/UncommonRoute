@@ -268,6 +268,7 @@ def parse_usage_metrics(
     actual_cost: float | None = None
     input_cost_multiplier = 1.0
     if mp is not None:
+        effective_pricing = mp.for_usage(input_tokens_total)
         actual_cost = estimate_usage_cost(
             input_tokens_uncached=input_tokens_uncached,
             output_tokens=output_tokens,
@@ -275,7 +276,7 @@ def parse_usage_metrics(
             cache_write_input_tokens=cache_write_input_tokens,
             pricing=mp,
         )
-        baseline_input_cost = (input_tokens_total / 1_000_000) * mp.input_price
+        baseline_input_cost = (input_tokens_total / 1_000_000) * effective_pricing.input_price
         effective_input_cost = estimate_input_cost(
             input_tokens_uncached=input_tokens_uncached,
             cache_read_input_tokens=cache_read_input_tokens,
@@ -411,6 +412,8 @@ def estimate_input_cost(
     cache_write_input_tokens: int,
     pricing: ModelPricing,
 ) -> float:
+    total_input_tokens = input_tokens_uncached + cache_read_input_tokens + cache_write_input_tokens
+    pricing = pricing.for_usage(total_input_tokens)
     cached_read_price = (
         pricing.cached_input_price
         if pricing.cached_input_price is not None
@@ -436,6 +439,8 @@ def estimate_usage_cost(
     cache_write_input_tokens: int,
     pricing: ModelPricing,
 ) -> float:
+    total_input_tokens = input_tokens_uncached + cache_read_input_tokens + cache_write_input_tokens
+    pricing = pricing.for_usage(total_input_tokens)
     return estimate_input_cost(
         input_tokens_uncached=input_tokens_uncached,
         cache_read_input_tokens=cache_read_input_tokens,

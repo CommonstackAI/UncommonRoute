@@ -63,6 +63,7 @@ PROVIDER_MODELS: dict[str, list[str]] = {
 
 UPSTREAM_MODEL_IDS: dict[str, dict[str, str]] = {
     "minimax": {
+        "minimax/minimax-m2.5": "MiniMax-M2.5",
         "minimax/minimax-m3": "MiniMax-M3",
         "minimax/minimax-m2.7": "MiniMax-M2.7",
     },

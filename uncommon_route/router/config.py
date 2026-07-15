@@ -6,6 +6,7 @@ from uncommon_route.router.types import (
     ModeConfig,
     ModelCapabilities,
     ModelPricing,
+    ModelPricingTier,
     RoutingConfig,
     RoutingMode,
     ScoringConfig,
@@ -40,6 +41,68 @@ DEFAULT_MODEL_PRICING: dict[str, ModelPricing] = {
     "anthropic/claude-sonnet-4.6": ModelPricing(3.00, 15.00, cached_input_price=0.30, cache_write_price=3.75),
     "anthropic/claude-opus-4.6": ModelPricing(5.00, 25.00, cached_input_price=0.50, cache_write_price=6.25),
     "anthropic/claude-opus-4-7": ModelPricing(5.00, 25.00, cached_input_price=0.50, cache_write_price=6.25),
+}
+
+PROVIDER_MODEL_PRICING: dict[str, ModelPricing] = {
+    "minimax/minimax-m3": ModelPricing(
+        0.30,
+        1.20,
+        cached_input_price=0.06,
+        pricing_tiers=(
+            ModelPricingTier(
+                service_tier="standard",
+                input_tokens_lte=512_000,
+                input_price=0.30,
+                output_price=1.20,
+                cached_input_price=0.06,
+            ),
+            ModelPricingTier(
+                service_tier="standard",
+                input_tokens_gt=512_000,
+                input_price=0.60,
+                output_price=2.40,
+                cached_input_price=0.12,
+            ),
+            ModelPricingTier(
+                service_tier="priority",
+                input_tokens_lte=512_000,
+                input_price=0.45,
+                output_price=1.80,
+                cached_input_price=0.09,
+            ),
+            ModelPricingTier(
+                service_tier="priority",
+                input_tokens_gt=512_000,
+                input_price=0.90,
+                output_price=3.60,
+                cached_input_price=0.18,
+            ),
+        ),
+    ),
+    "minimax/minimax-m2.7": ModelPricing(
+        0.30,
+        1.20,
+        cached_input_price=0.06,
+        cache_write_price=0.375,
+    ),
+}
+
+PROVIDER_MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
+    "minimax/minimax-m3": ModelCapabilities(
+        tool_calling=True,
+        vision=True,
+        reasoning=True,
+        context_window=1_000_000,
+        input_modalities=("text", "image", "video"),
+        thinking_modes=("adaptive", "disabled"),
+    ),
+    "minimax/minimax-m2.7": ModelCapabilities(
+        tool_calling=True,
+        reasoning=True,
+        context_window=204_800,
+        input_modalities=("text",),
+        thinking_modes=("always_on",),
+    ),
 }
 
 BASELINE_MODEL = "anthropic/claude-opus-4-7"

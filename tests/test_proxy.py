@@ -114,6 +114,16 @@ class TestProviderModelMetadata:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         routed: dict[str, object] = {}
+        estimated_tiers: list[str] = []
+
+        def fake_estimate_cost(
+            _model: str,
+            _input_tokens: int,
+            _output_tokens: int,
+            service_tier: str = "standard",
+        ) -> float:
+            estimated_tiers.append(service_tier)
+            return 0.001
 
         def fake_route(*_args, **kwargs) -> RoutingDecision:
             routed["pricing"] = kwargs["pricing"]
@@ -167,6 +177,7 @@ class TestProviderModelMetadata:
         })
         async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+        monkeypatch.setattr("uncommon_route.proxy._estimate_cost", fake_estimate_cost)
         monkeypatch.setattr("uncommon_route.proxy.route", fake_route)
 
         try:
@@ -178,6 +189,7 @@ class TestProviderModelMetadata:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/v1/chat/completions", json={
                 "model": "uncommon-route/auto",
+                "service_tier": "priority",
                 "messages": [{"role": "user", "content": "describe this image"}],
             })
 
@@ -191,6 +203,8 @@ class TestProviderModelMetadata:
             assert capabilities["minimax/minimax-m3"].vision is True
             assert capabilities["minimax/minimax-m2.7"].thinking_modes == ("always_on",)
             assert captured["body"]["model"] == "MiniMax-M3"
+            assert captured["body"]["service_tier"] == "priority"
+            assert "priority" in estimated_tiers
         finally:
             asyncio.run(async_client.aclose())
 

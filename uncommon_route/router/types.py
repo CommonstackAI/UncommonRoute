@@ -449,14 +449,19 @@ class ModelPricing:
 
     def for_usage(self, input_tokens: int, service_tier: str = "standard") -> ModelPricing:
         normalized_tier = str(service_tier or "standard").strip().lower()
-        for tier in self.pricing_tiers:
-            if tier.matches(max(0, input_tokens), normalized_tier):
-                return ModelPricing(
-                    input_price=tier.input_price,
-                    output_price=tier.output_price,
-                    cached_input_price=tier.cached_input_price,
-                    cache_write_price=tier.cache_write_price,
-                )
+        available_tiers = {tier.service_tier for tier in self.pricing_tiers}
+        tier_candidates = [normalized_tier]
+        if normalized_tier not in available_tiers and "standard" in available_tiers:
+            tier_candidates.append("standard")
+        for tier_name in tier_candidates:
+            for tier in self.pricing_tiers:
+                if tier.matches(max(0, input_tokens), tier_name):
+                    return ModelPricing(
+                        input_price=tier.input_price,
+                        output_price=tier.output_price,
+                        cached_input_price=tier.cached_input_price,
+                        cache_write_price=tier.cache_write_price,
+                    )
         return self
 
 

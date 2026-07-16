@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import json
 
-from uncommon_route.cache_support import apply_anthropic_cache_breakpoints, estimate_usage_cost, parse_stream_usage_metrics
+import pytest
+
+from uncommon_route.cache_support import (
+    apply_anthropic_cache_breakpoints,
+    estimate_usage_cost,
+    parse_stream_usage_metrics,
+    parse_usage_metrics,
+)
 from uncommon_route.router.types import ModelPricing, ModelPricingTier
 
 
@@ -109,3 +116,53 @@ def test_usage_cost_applies_long_context_pricing_tier() -> None:
     )
 
     assert cost == 0.60
+
+
+def test_usage_cost_applies_priority_pricing_tier() -> None:
+    pricing = ModelPricing(
+        0.30,
+        1.20,
+        pricing_tiers=(
+            ModelPricingTier("standard", 0.60, 2.40, input_tokens_gt=512_000),
+            ModelPricingTier("priority", 0.90, 3.60, input_tokens_gt=512_000),
+        ),
+    )
+
+    cost = estimate_usage_cost(
+        input_tokens_uncached=600_000,
+        output_tokens=100_000,
+        cache_read_input_tokens=0,
+        cache_write_input_tokens=0,
+        pricing=pricing,
+        service_tier="priority",
+    )
+
+    assert cost == pytest.approx(0.90)
+
+
+def test_usage_metrics_prefers_response_service_tier() -> None:
+    pricing = ModelPricing(
+        0.30,
+        1.20,
+        pricing_tiers=(
+            ModelPricingTier("standard", 0.60, 2.40, input_tokens_gt=512_000),
+            ModelPricingTier("priority", 0.90, 3.60, input_tokens_gt=512_000),
+        ),
+    )
+    content = json.dumps({
+        "service_tier": "priority",
+        "usage": {
+            "prompt_tokens": 600_000,
+            "completion_tokens": 100_000,
+            "total_tokens": 700_000,
+        },
+    }).encode()
+
+    usage = parse_usage_metrics(
+        content,
+        "test/model",
+        {"test/model": pricing},
+    )
+
+    assert usage is not None
+    assert usage.actual_cost == pytest.approx(0.90)

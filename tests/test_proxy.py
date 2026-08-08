@@ -198,7 +198,10 @@ class TestProviderModelMetadata:
             capabilities = routed["capabilities"]
             assert isinstance(pricing, dict)
             assert isinstance(capabilities, dict)
-            assert pricing["minimax/minimax-m3"].cached_input_price == 0.06
+            assert pricing["minimax/minimax-m3"].input_price == 0.60
+            assert pricing["minimax/minimax-m3"].output_price == 2.40
+            assert pricing["minimax/minimax-m3"].cached_input_price == 0.12
+            assert pricing["minimax/minimax-m3"].cache_write_price is None
             assert pricing["minimax/minimax-m2.7"].cache_write_price == 0.375
             assert capabilities["minimax/minimax-m3"].vision is True
             assert capabilities["minimax/minimax-m2.7"].thinking_modes == ("always_on",)

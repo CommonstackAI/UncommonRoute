@@ -61,10 +61,10 @@ class TestProviderConfig:
 
     def test_minimax_provider_model_metadata(self) -> None:
         m3_pricing = PROVIDER_MODEL_PRICING["minimax/minimax-m3"]
-        assert m3_pricing.for_usage(512_000).input_price == 0.30
-        assert m3_pricing.for_usage(512_001).input_price == 0.60
-        assert m3_pricing.for_usage(512_000, "priority").input_price == 0.45
-        assert m3_pricing.for_usage(512_001, "priority").input_price == 0.90
+        assert m3_pricing.input_price == 0.60
+        assert m3_pricing.output_price == 2.40
+        assert m3_pricing.cached_input_price == 0.12
+        assert m3_pricing.cache_write_price is None
 
         m27_pricing = PROVIDER_MODEL_PRICING["minimax/minimax-m2.7"]
         assert m27_pricing.cached_input_price == 0.06

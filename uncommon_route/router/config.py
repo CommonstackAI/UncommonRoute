@@ -6,7 +6,6 @@ from uncommon_route.router.types import (
     ModeConfig,
     ModelCapabilities,
     ModelPricing,
-    ModelPricingTier,
     RoutingConfig,
     RoutingMode,
     ScoringConfig,
@@ -45,39 +44,9 @@ DEFAULT_MODEL_PRICING: dict[str, ModelPricing] = {
 
 PROVIDER_MODEL_PRICING: dict[str, ModelPricing] = {
     "minimax/minimax-m3": ModelPricing(
-        0.30,
-        1.20,
-        cached_input_price=0.06,
-        pricing_tiers=(
-            ModelPricingTier(
-                service_tier="standard",
-                input_tokens_lte=512_000,
-                input_price=0.30,
-                output_price=1.20,
-                cached_input_price=0.06,
-            ),
-            ModelPricingTier(
-                service_tier="standard",
-                input_tokens_gt=512_000,
-                input_price=0.60,
-                output_price=2.40,
-                cached_input_price=0.12,
-            ),
-            ModelPricingTier(
-                service_tier="priority",
-                input_tokens_lte=512_000,
-                input_price=0.45,
-                output_price=1.80,
-                cached_input_price=0.09,
-            ),
-            ModelPricingTier(
-                service_tier="priority",
-                input_tokens_gt=512_000,
-                input_price=0.90,
-                output_price=3.60,
-                cached_input_price=0.18,
-            ),
-        ),
+        0.60,
+        2.40,
+        cached_input_price=0.12,
     ),
     "minimax/minimax-m2.7": ModelPricing(
         0.30,

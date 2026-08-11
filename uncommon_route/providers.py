@@ -13,7 +13,6 @@ Example (providers.json):
           "api_key": "eyJ...",
           "base_url": "https://api.minimax.io/v1",
           "models": [
-            "minimax/minimax-m2.5",
             "minimax/minimax-m3",
             "minimax/minimax-m2.7"
           ],
@@ -52,7 +51,7 @@ KNOWN_BASE_URLS: dict[str, str] = {
 }
 
 PROVIDER_MODELS: dict[str, list[str]] = {
-    "minimax": ["minimax/minimax-m2.5", "minimax/minimax-m3", "minimax/minimax-m2.7"],
+    "minimax": ["minimax/minimax-m3", "minimax/minimax-m2.7"],
     "deepseek": ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"],
     "openai": ["openai/gpt-4o-mini", "openai/gpt-4o", "openai/gpt-5.2", "openai/gpt-5.2-codex", "openai/o1-mini", "openai/o3", "openai/o4-mini"],
     "anthropic": ["anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.6"],
@@ -63,7 +62,6 @@ PROVIDER_MODELS: dict[str, list[str]] = {
 
 UPSTREAM_MODEL_IDS: dict[str, dict[str, str]] = {
     "minimax": {
-        "minimax/minimax-m2.5": "MiniMax-M2.5",
         "minimax/minimax-m3": "MiniMax-M3",
         "minimax/minimax-m2.7": "MiniMax-M2.7",
     },

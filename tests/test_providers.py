@@ -15,6 +15,7 @@ from uncommon_route.providers import (
     remove_provider,
     select_preferred_model,
 )
+from uncommon_route.model_map import detect_provider
 from uncommon_route.router.config import PROVIDER_MODEL_CAPABILITIES, PROVIDER_MODEL_PRICING
 from uncommon_route.router.types import RoutingFeatures, Tier
 
@@ -44,7 +45,6 @@ class TestProviderConfig:
         entry = cfg.providers["minimax"]
         assert entry.plan == "coding-plan"
         assert entry.models == [
-            "minimax/minimax-m2.5",
             "minimax/minimax-m3",
             "minimax/minimax-m2.7",
         ]
@@ -54,10 +54,19 @@ class TestProviderConfig:
         assert cfg.providers["openai"].base_url == "https://my-proxy.com/v1"
 
     def test_resolve_minimax_upstream_model_ids(self) -> None:
-        assert resolve_upstream_model("minimax", "minimax/minimax-m2.5") == "MiniMax-M2.5"
         assert resolve_upstream_model("minimax", "minimax/minimax-m3") == "MiniMax-M3"
         assert resolve_upstream_model("minimax", "minimax/minimax-m2.7") == "MiniMax-M2.7"
         assert resolve_upstream_model("minimax", "minimax/unknown") == "minimax/unknown"
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.minimax.io/v1",
+            "https://api.minimaxi.com/v1",
+        ],
+    )
+    def test_detect_minimax_regional_endpoints(self, base_url: str) -> None:
+        assert detect_provider(base_url) == ("minimax", False)
 
     def test_minimax_provider_model_metadata(self) -> None:
         m3_pricing = PROVIDER_MODEL_PRICING["minimax/minimax-m3"]
@@ -118,7 +127,8 @@ class TestProviderConfig:
         keyed = cfg.keyed_models()
         assert "deepseek/deepseek-chat" in keyed
         assert "deepseek/deepseek-reasoner" in keyed
-        assert "minimax/minimax-m2.5" in keyed
+        assert "minimax/minimax-m3" in keyed
+        assert "minimax/minimax-m2.7" in keyed
 
     def test_get_for_model(self) -> None:
         add_provider("deepseek", "sk-1")

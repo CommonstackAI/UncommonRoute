@@ -59,6 +59,8 @@ from uncommon_route.router.config import (
     BASELINE_MODEL,
     DEFAULT_CONFIG,
     DEFAULT_MODEL_PRICING,
+    PROVIDER_MODEL_CAPABILITIES,
+    PROVIDER_MODEL_PRICING,
     VIRTUAL_MODEL_IDS,
     routing_mode_from_model,
     virtual_model_entries,
@@ -106,6 +108,7 @@ from uncommon_route.providers import (
     ProvidersConfig,
     add_provider,
     load_providers,
+    resolve_upstream_model,
     remove_provider,
     verify_key,
 )
@@ -315,11 +318,17 @@ def _get_pricing() -> dict[str, ModelPricing]:
     return _active_pricing or DEFAULT_MODEL_PRICING
 
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def _estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    service_tier: str = "standard",
+) -> float:
     """Compute dollar cost from token counts using the model pricing table."""
     mp = _get_pricing().get(model)
     if mp is None:
         return 0.0
+    mp = mp.for_usage(input_tokens, service_tier)
     return (input_tokens / 1_000_000) * mp.input_price + (output_tokens / 1_000_000) * mp.output_price
 
 
@@ -914,7 +923,7 @@ class UpstreamSemanticCompressor:
         provider_entry = self._providers.get_for_model(model_id)
         if provider_entry and provider_entry.base_url:
             target_chat_url = f"{provider_entry.base_url.rstrip('/')}/chat/completions"
-            upstream_model = model_id
+            upstream_model = resolve_upstream_model(provider_entry.name, model_id)
         elif self._upstream_chat:
             target_chat_url = self._upstream_chat
             upstream_model = self._mapper.resolve(model_id)
@@ -2846,6 +2855,11 @@ def create_app(
         dynamic = _mapper.dynamic_pricing
         if dynamic:
             merged.update(dynamic)
+        keyed_models = _providers.keyed_models()
+        for model_id in keyed_models:
+            provider_pricing = PROVIDER_MODEL_PRICING.get(model_id)
+            if provider_pricing is not None:
+                merged[model_id] = provider_pricing
         _active_pricing = merged
 
         import copy
@@ -2854,7 +2868,13 @@ def create_app(
         if dynamic_caps:
             merged_caps = dict(updated.model_capabilities)
             merged_caps.update(dynamic_caps)
-            updated.model_capabilities = merged_caps
+        else:
+            merged_caps = dict(updated.model_capabilities)
+        for model_id in keyed_models:
+            provider_capabilities = PROVIDER_MODEL_CAPABILITIES.get(model_id)
+            if provider_capabilities is not None:
+                merged_caps[model_id] = provider_capabilities
+        updated.model_capabilities = merged_caps
         _routing_config = updated
 
     def _reload_providers() -> ProvidersConfig:
@@ -2862,7 +2882,10 @@ def create_app(
         _providers = load_providers()
         if isinstance(_semantic, UpstreamSemanticCompressor):
             _semantic.rebind_providers(_providers)
+        _refresh_active_pricing()
         return _providers
+
+    _refresh_active_pricing()
 
     def _current_connection_payload() -> dict[str, Any]:
         effective = resolve_primary_connection(
@@ -3934,6 +3957,7 @@ def create_app(
 
         model = (body.get("model") or "").strip().lower()
         is_streaming = body.get("stream", False)
+        request_service_tier = str(body.get("service_tier") or "standard").strip().lower()
         response_model = str(body.pop("_client_requested_model", "") or model).strip()
         recursion_guarded = _recursion_guard_enabled(request)
 
@@ -4146,6 +4170,7 @@ def create_app(
                         _active_scene.primary,
                         input_token_estimate,
                         scene_output_budget,
+                        request_service_tier,
                     )
                     scene_baseline = _estimate_baseline_cost(
                         input_token_estimate,
@@ -4403,6 +4428,7 @@ def create_app(
                 selected_model,
                 input_tokens_after,
                 effective_output_tokens,
+                request_service_tier,
             )
             baseline_cost = _estimate_baseline_cost(
                 input_tokens_before if input_tokens_before > 0 else input_tokens_after,
@@ -4560,7 +4586,12 @@ def create_app(
             full_text = f"{system_prompt or ''} {prompt}".strip()
             input_tokens_before = estimate_tokens(full_text) if full_text else 0
             input_tokens_after = input_tokens_before
-            estimated_cost = _estimate_cost(selected_model, input_tokens_after, max_tokens)
+            estimated_cost = _estimate_cost(
+                selected_model,
+                input_tokens_after,
+                max_tokens,
+                request_service_tier,
+            )
             baseline_cost = estimated_cost
             main_estimated_cost = estimated_cost
             effective_output_tokens = max_tokens
@@ -4600,7 +4631,12 @@ def create_app(
 
         def _estimated_total_cost_for(model_name: str) -> tuple[float, float]:
             token_input = input_tokens_after if input_tokens_after > 0 else input_tokens_before
-            main_cost = _estimate_cost(model_name, token_input, effective_output_tokens)
+            main_cost = _estimate_cost(
+                model_name,
+                token_input,
+                effective_output_tokens,
+                request_service_tier,
+            )
             total_cost = main_cost + (sidechannel_estimated_cost if is_virtual else 0.0)
             return main_cost, total_cost
 
@@ -4635,7 +4671,9 @@ def create_app(
                     attempt_headers[_ORIGINAL_MODEL_HEADER] = requested_model
 
             resolved_model = model_name
-            if not attempt_provider_entry:
+            if attempt_provider_entry:
+                resolved_model = resolve_upstream_model(attempt_provider_entry.name, model_name)
+            else:
                 resolved_model = _mapper.resolve(model_name)
             attempt_upstream_body["model"] = resolved_model
 
@@ -5610,7 +5648,12 @@ def create_app(
                                 for ev in converter.finish():
                                     yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                parse_stream_usage_metrics(
+                                    stream_chunks,
+                                    selected_model,
+                                    _get_pricing(),
+                                    request_service_tier,
+                                ),
                                 stream_chunks=stream_chunks,
                             )
                         except Exception:
@@ -5649,7 +5692,12 @@ def create_app(
                             for ev in converter.finish():
                                 yield ev
                             await _record_stream_success(
-                                parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                                parse_stream_usage_metrics(
+                                    stream_chunks,
+                                    selected_model,
+                                    _get_pricing(),
+                                    request_service_tier,
+                                ),
                                 stream_chunks=stream_chunks,
                             )
                         except Exception:
@@ -5677,7 +5725,12 @@ def create_app(
                             _mark_current_attempt_first_token()
                             yield _normalize_reasoning_content_chunk(chunk)
                         await _record_stream_success(
-                            parse_stream_usage_metrics(stream_chunks, selected_model, _get_pricing()),
+                            parse_stream_usage_metrics(
+                                stream_chunks,
+                                selected_model,
+                                _get_pricing(),
+                                request_service_tier,
+                            ),
                             stream_chunks=stream_chunks,
                         )
                     except Exception:
@@ -5751,7 +5804,12 @@ def create_app(
             tps: float | None = None
             usage_metrics: UsageMetrics | None = None
             if resp.status_code == 200:
-                usage_metrics = parse_usage_metrics(resp.content, selected_model, _get_pricing())
+                usage_metrics = parse_usage_metrics(
+                    resp.content,
+                    selected_model,
+                    _get_pricing(),
+                    request_service_tier,
+                )
                 if usage_metrics is not None:
                     actual_cost = (
                         usage_metrics.actual_cost

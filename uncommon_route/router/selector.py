@@ -94,7 +94,7 @@ def _calc_cost(
     *,
     input_cost_multiplier: float = 1.0,
 ) -> float:
-    mp = _pricing_for_model(model, pricing)
+    mp = _pricing_for_model(model, pricing).for_usage(input_tokens)
     effective_multiplier = max(0.1, min(2.0, input_cost_multiplier))
     return (
         (input_tokens / 1_000_000) * mp.input_price * effective_multiplier

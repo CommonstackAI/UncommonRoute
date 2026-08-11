@@ -1931,9 +1931,18 @@ class TestTransportRouting:
         finally:
             asyncio.run(async_client.aclose())
 
+    @pytest.mark.parametrize(
+        ("base_url", "expected_url"),
+        [
+            ("https://api.minimax.io/v1", "https://api.minimax.io/anthropic/v1/messages"),
+            ("https://api.minimaxi.com/v1", "https://api.minimaxi.com/anthropic/v1/messages"),
+        ],
+    )
     def test_messages_use_minimax_anthropic_endpoint_for_direct_provider(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        base_url: str,
+        expected_url: str,
     ) -> None:
         captured: dict[str, object] = {}
 
@@ -1947,7 +1956,7 @@ class TestTransportRouting:
                     "id": "msg_minimax_byok",
                     "type": "message",
                     "role": "assistant",
-                    "model": "minimax/minimax-m2.1",
+                    "model": "MiniMax-M3",
                     "content": [{"type": "text", "text": "ok"}],
                     "stop_reason": "end_turn",
                     "stop_sequence": None,
@@ -1964,32 +1973,44 @@ class TestTransportRouting:
                 "minimax": ProviderEntry(
                     name="minimax",
                     api_key="mm-key-123",
-                    base_url="https://api.minimax.io/v1",
-                    models=["minimax/minimax-m2.1"],
+                    base_url=base_url,
+                    models=["minimax/minimax-m3"],
                 ),
             })
             app = create_app(
-                upstream="https://api.commonstack.ai/v1",
+                upstream="https://primary.example/v1",
                 providers_config=providers,
             )
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/v1/messages", json={
-                "model": "minimax/minimax-m2.1",
+                "model": "minimax/minimax-m3",
                 "max_tokens": 32,
                 "messages": [{"role": "user", "content": "hello"}],
             })
 
             assert resp.status_code == 200
-            assert captured["url"] == "https://api.minimax.io/anthropic/v1/messages"
+            assert captured["url"] == expected_url
             headers = captured["headers"]
             assert isinstance(headers, dict)
             assert headers["x-api-key"] == "mm-key-123"
+            body = captured["body"]
+            assert isinstance(body, dict)
+            assert body["model"] == "MiniMax-M3"
         finally:
             asyncio.run(async_client.aclose())
 
-    def test_chat_completions_keep_openai_transport_for_minimax_models(
+    @pytest.mark.parametrize(
+        ("base_url", "expected_url"),
+        [
+            ("https://api.minimax.io/v1", "https://api.minimax.io/v1/chat/completions"),
+            ("https://api.minimaxi.com/v1", "https://api.minimaxi.com/v1/chat/completions"),
+        ],
+    )
+    def test_chat_completions_use_minimax_openai_endpoint_for_direct_provider(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        base_url: str,
+        expected_url: str,
     ) -> None:
         captured: dict[str, object] = {}
 
@@ -2003,7 +2024,7 @@ class TestTransportRouting:
                     "id": "chatcmpl_minimax",
                     "object": "chat.completion",
                     "created": 1,
-                    "model": "minimax/minimax-m2.1",
+                    "model": "MiniMax-M3",
                     "choices": [{
                         "index": 0,
                         "message": {"role": "assistant", "content": "done"},
@@ -2016,13 +2037,23 @@ class TestTransportRouting:
 
         async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
-        monkeypatch.setenv("UNCOMMON_ROUTE_API_KEY", "env-key-123")
 
         try:
-            app = create_app(upstream="https://api.commonstack.ai/v1")
+            providers = ProvidersConfig(providers={
+                "minimax": ProviderEntry(
+                    name="minimax",
+                    api_key="mm-key-123",
+                    base_url=base_url,
+                    models=["minimax/minimax-m3"],
+                ),
+            })
+            app = create_app(
+                upstream="https://primary.example/v1",
+                providers_config=providers,
+            )
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/v1/chat/completions", json={
-                "model": "minimax/minimax-m2.1",
+                "model": "minimax/minimax-m3",
                 "max_tokens": 32,
                 "messages": [{"role": "user", "content": "hello"}],
             })
@@ -2031,10 +2062,13 @@ class TestTransportRouting:
             assert resp.headers["x-uncommon-route-requested-transport"] == "openai-chat"
             assert resp.headers["x-uncommon-route-transport"] == "openai-chat"
             assert resp.headers["x-uncommon-route-transport-source"] == "ingress-policy"
-            assert captured["url"] == "https://api.commonstack.ai/v1/chat/completions"
+            assert captured["url"] == expected_url
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["authorization"] == "Bearer mm-key-123"
             body = captured["body"]
             assert isinstance(body, dict)
-            assert body["model"] == "minimax/minimax-m2.1"
+            assert body["model"] == "MiniMax-M3"
         finally:
             asyncio.run(async_client.aclose())
 

@@ -11,9 +11,12 @@ from uncommon_route.providers import (
     ProviderEntry,
     add_provider,
     load_providers,
+    resolve_upstream_model,
     remove_provider,
     select_preferred_model,
 )
+from uncommon_route.model_map import detect_provider
+from uncommon_route.router.config import PROVIDER_MODEL_CAPABILITIES, PROVIDER_MODEL_PRICING
 from uncommon_route.router.types import RoutingFeatures, Tier
 
 
@@ -41,11 +44,54 @@ class TestProviderConfig:
         cfg = add_provider("minimax", "eyJ-test", plan="coding-plan")
         entry = cfg.providers["minimax"]
         assert entry.plan == "coding-plan"
-        assert "minimax/minimax-m2.5" in entry.models
+        assert entry.models == [
+            "minimax/minimax-m3",
+            "minimax/minimax-m2.7",
+        ]
 
     def test_add_provider_custom_url(self) -> None:
         cfg = add_provider("openai", "sk-openai", base_url="https://my-proxy.com/v1")
         assert cfg.providers["openai"].base_url == "https://my-proxy.com/v1"
+
+    def test_resolve_minimax_upstream_model_ids(self) -> None:
+        assert resolve_upstream_model("minimax", "minimax/minimax-m3") == "MiniMax-M3"
+        assert resolve_upstream_model("minimax", "minimax/minimax-m2.7") == "MiniMax-M2.7"
+        assert resolve_upstream_model("minimax", "minimax/unknown") == "minimax/unknown"
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.minimax.io/v1",
+            "https://api.minimaxi.com/v1",
+        ],
+    )
+    def test_detect_minimax_regional_endpoints(self, base_url: str) -> None:
+        assert detect_provider(base_url) == ("minimax", False)
+
+    def test_minimax_provider_model_metadata(self) -> None:
+        m3_pricing = PROVIDER_MODEL_PRICING["minimax/minimax-m3"]
+        assert m3_pricing.input_price == 0.60
+        assert m3_pricing.output_price == 2.40
+        assert m3_pricing.cached_input_price == 0.12
+        assert m3_pricing.cache_write_price is None
+
+        m27_pricing = PROVIDER_MODEL_PRICING["minimax/minimax-m2.7"]
+        assert m27_pricing.cached_input_price == 0.06
+        assert m27_pricing.cache_write_price == 0.375
+
+        m3_capabilities = PROVIDER_MODEL_CAPABILITIES["minimax/minimax-m3"]
+        assert m3_capabilities.context_window == 1_000_000
+        assert m3_capabilities.input_modalities == ("text", "image", "video")
+        assert m3_capabilities.thinking_modes == ("adaptive", "disabled")
+        assert m3_capabilities.vision is True
+        assert m3_capabilities.reasoning is True
+
+        m27_capabilities = PROVIDER_MODEL_CAPABILITIES["minimax/minimax-m2.7"]
+        assert m27_capabilities.context_window == 204_800
+        assert m27_capabilities.input_modalities == ("text",)
+        assert m27_capabilities.thinking_modes == ("always_on",)
+        assert m27_capabilities.vision is False
+        assert m27_capabilities.reasoning is True
 
     def test_add_provider_custom_models(self) -> None:
         cfg = add_provider(
@@ -81,7 +127,8 @@ class TestProviderConfig:
         keyed = cfg.keyed_models()
         assert "deepseek/deepseek-chat" in keyed
         assert "deepseek/deepseek-reasoner" in keyed
-        assert "minimax/minimax-m2.5" in keyed
+        assert "minimax/minimax-m3" in keyed
+        assert "minimax/minimax-m2.7" in keyed
 
     def test_get_for_model(self) -> None:
         add_provider("deepseek", "sk-1")

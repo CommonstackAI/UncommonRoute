@@ -60,6 +60,9 @@ class ModelCapabilities:
     free: bool = False
     local: bool = False
     responses: bool = False
+    context_window: int | None = None
+    input_modalities: tuple[str, ...] = ()
+    thinking_modes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,11 +420,49 @@ class TierConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPricingTier:
+    service_tier: str
+    input_price: float
+    output_price: float
+    cached_input_price: float | None = None
+    cache_write_price: float | None = None
+    input_tokens_lte: int | None = None
+    input_tokens_gt: int | None = None
+
+    def matches(self, input_tokens: int, service_tier: str) -> bool:
+        if self.service_tier != service_tier:
+            return False
+        if self.input_tokens_lte is not None and input_tokens > self.input_tokens_lte:
+            return False
+        if self.input_tokens_gt is not None and input_tokens <= self.input_tokens_gt:
+            return False
+        return True
+
+
+@dataclass(frozen=True, slots=True)
 class ModelPricing:
     input_price: float  # per 1M tokens
     output_price: float  # per 1M tokens
     cached_input_price: float | None = None  # per 1M cached-read tokens
     cache_write_price: float | None = None  # per 1M cache-write / cache-create tokens
+    pricing_tiers: tuple[ModelPricingTier, ...] = ()
+
+    def for_usage(self, input_tokens: int, service_tier: str = "standard") -> ModelPricing:
+        normalized_tier = str(service_tier or "standard").strip().lower()
+        available_tiers = {tier.service_tier for tier in self.pricing_tiers}
+        tier_candidates = [normalized_tier]
+        if normalized_tier not in available_tiers and "standard" in available_tiers:
+            tier_candidates.append("standard")
+        for tier_name in tier_candidates:
+            for tier in self.pricing_tiers:
+                if tier.matches(max(0, input_tokens), tier_name):
+                    return ModelPricing(
+                        input_price=tier.input_price,
+                        output_price=tier.output_price,
+                        cached_input_price=tier.cached_input_price,
+                        cache_write_price=tier.cache_write_price,
+                    )
+        return self
 
 
 @dataclass(frozen=True, slots=True)

@@ -256,6 +256,23 @@ uncommon-route provider add google     AIza...
 uncommon-route serve
 ```
 
+MiniMax uses the global OpenAI-compatible endpoint by default. Pass the China
+endpoint explicitly when needed:
+
+```bash
+uncommon-route provider add minimax eyJ-...
+uncommon-route provider add minimax eyJ-... --url https://api.minimaxi.com/v1
+```
+
+| Region | OpenAI-compatible base URL | Anthropic-compatible base URL |
+|---|---|---|
+| Global | `https://api.minimax.io/v1` | `https://api.minimax.io/anthropic` |
+| China | `https://api.minimaxi.com/v1` | `https://api.minimaxi.com/anthropic` |
+
+Provider configuration stores the OpenAI-compatible base URL. Anthropic
+requests use the corresponding `/anthropic` base and append `/v1/messages`
+internally.
+
 > UncommonRoute doesn't automatically read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Use `init`, a saved connection, or one of the manual setup paths above.
 
 ### Routing Modes

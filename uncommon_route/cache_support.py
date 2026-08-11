@@ -205,6 +205,7 @@ def parse_usage_metrics(
     content: bytes,
     model: str,
     pricing: dict[str, ModelPricing],
+    service_tier: str = "standard",
 ) -> UsageMetrics | None:
     try:
         data = json.loads(content)
@@ -214,6 +215,9 @@ def parse_usage_metrics(
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         return None
+    effective_service_tier = str(
+        data.get("service_tier") or usage.get("service_tier") or service_tier or "standard"
+    ).strip().lower()
 
     prompt_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
     output_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
@@ -268,19 +272,22 @@ def parse_usage_metrics(
     actual_cost: float | None = None
     input_cost_multiplier = 1.0
     if mp is not None:
+        effective_pricing = mp.for_usage(input_tokens_total, effective_service_tier)
         actual_cost = estimate_usage_cost(
             input_tokens_uncached=input_tokens_uncached,
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_input_tokens,
             cache_write_input_tokens=cache_write_input_tokens,
             pricing=mp,
+            service_tier=effective_service_tier,
         )
-        baseline_input_cost = (input_tokens_total / 1_000_000) * mp.input_price
+        baseline_input_cost = (input_tokens_total / 1_000_000) * effective_pricing.input_price
         effective_input_cost = estimate_input_cost(
             input_tokens_uncached=input_tokens_uncached,
             cache_read_input_tokens=cache_read_input_tokens,
             cache_write_input_tokens=cache_write_input_tokens,
             pricing=mp,
+            service_tier=effective_service_tier,
         )
         if baseline_input_cost > 0:
             input_cost_multiplier = max(0.05, min(2.0, effective_input_cost / baseline_input_cost))
@@ -317,6 +324,7 @@ def parse_stream_usage_metrics(
     chunks: list[bytes],
     model: str,
     pricing: dict[str, ModelPricing],
+    service_tier: str = "standard",
 ) -> UsageMetrics | None:
     if not chunks:
         return None
@@ -330,6 +338,7 @@ def parse_stream_usage_metrics(
     fallback_output_tokens = 0
     fallback_prompt_tokens = 0
     fallback_has_content = False
+    effective_service_tier = service_tier
 
     for line in text.splitlines():
         if not line.startswith("data:"):
@@ -341,9 +350,16 @@ def parse_stream_usage_metrics(
             data = json.loads(payload)
         except json.JSONDecodeError:
             continue
+        if isinstance(data, dict) and data.get("service_tier"):
+            effective_service_tier = str(data["service_tier"])
         if isinstance(data, dict) and isinstance(data.get("usage"), dict):
             anthropic_usage.update(data["usage"])
-            parsed = parse_usage_metrics(json.dumps({"usage": anthropic_usage}).encode("utf-8"), model, pricing)
+            parsed = parse_usage_metrics(
+                json.dumps({"usage": anthropic_usage}).encode("utf-8"),
+                model,
+                pricing,
+                effective_service_tier,
+            )
             if parsed is not None:
                 latest = parsed
             continue
@@ -352,6 +368,8 @@ def parse_stream_usage_metrics(
         message = data.get("message")
         if isinstance(message, dict) and isinstance(message.get("usage"), dict):
             anthropic_usage.update(message["usage"])
+        if isinstance(message, dict) and message.get("service_tier"):
+            effective_service_tier = str(message["service_tier"])
         if data.get("type") == "message_delta" and isinstance(data.get("usage"), dict):
             anthropic_usage.update(data["usage"])
         if anthropic_usage:
@@ -359,6 +377,7 @@ def parse_stream_usage_metrics(
                 json.dumps({"usage": anthropic_usage}).encode("utf-8"),
                 model,
                 pricing,
+                effective_service_tier,
             )
             if parsed is not None:
                 latest = parsed
@@ -387,6 +406,7 @@ def parse_stream_usage_metrics(
                 cache_read_input_tokens=0,
                 cache_write_input_tokens=0,
                 pricing=mp,
+                service_tier=effective_service_tier,
             )
         latest = UsageMetrics(
             input_tokens_total=fallback_prompt_tokens,
@@ -410,7 +430,10 @@ def estimate_input_cost(
     cache_read_input_tokens: int,
     cache_write_input_tokens: int,
     pricing: ModelPricing,
+    service_tier: str = "standard",
 ) -> float:
+    total_input_tokens = input_tokens_uncached + cache_read_input_tokens + cache_write_input_tokens
+    pricing = pricing.for_usage(total_input_tokens, service_tier)
     cached_read_price = (
         pricing.cached_input_price
         if pricing.cached_input_price is not None
@@ -435,12 +458,16 @@ def estimate_usage_cost(
     cache_read_input_tokens: int,
     cache_write_input_tokens: int,
     pricing: ModelPricing,
+    service_tier: str = "standard",
 ) -> float:
+    total_input_tokens = input_tokens_uncached + cache_read_input_tokens + cache_write_input_tokens
+    pricing = pricing.for_usage(total_input_tokens, service_tier)
     return estimate_input_cost(
         input_tokens_uncached=input_tokens_uncached,
         cache_read_input_tokens=cache_read_input_tokens,
         cache_write_input_tokens=cache_write_input_tokens,
         pricing=pricing,
+        service_tier=service_tier,
     ) + ((output_tokens / 1_000_000) * pricing.output_price)
 
 

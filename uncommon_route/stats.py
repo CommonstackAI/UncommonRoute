@@ -256,6 +256,8 @@ def _cache_savings(r: RouteRecord) -> float:
     pricing = _get_stats_pricing().get(r.model)
     if pricing is None:
         return 0.0
+    billed_input_tokens = r.usage_input_tokens or r.input_tokens_after
+    pricing = pricing.for_usage(billed_input_tokens)
     cached_input_price = pricing.cached_input_price if pricing.cached_input_price is not None else pricing.input_price
     cache_write_price = pricing.cache_write_price if pricing.cache_write_price is not None else pricing.input_price
     read_delta = ((pricing.input_price - cached_input_price) * r.cache_read_input_tokens) / 1_000_000
@@ -269,8 +271,11 @@ def _compaction_savings(r: RouteRecord) -> float:
     pricing = _get_stats_pricing().get(r.model)
     if pricing is None:
         return 0.0
-    reduced_tokens = r.input_tokens_before - r.input_tokens_after
-    return (reduced_tokens / 1_000_000) * pricing.input_price
+    before_pricing = pricing.for_usage(r.input_tokens_before)
+    after_pricing = pricing.for_usage(r.input_tokens_after)
+    before_cost = (r.input_tokens_before / 1_000_000) * before_pricing.input_price
+    after_cost = (r.input_tokens_after / 1_000_000) * after_pricing.input_price
+    return max(0.0, before_cost - after_cost)
 
 
 class RouteStats:

@@ -4622,6 +4622,10 @@ def create_app(
                 val = request.headers.get(key)
                 if val:
                     attempt_headers[key] = val
+            request_auth = str(request.headers.get("authorization", "") or "").strip()
+            request_bearer = ""
+            if request_auth.lower().startswith("bearer "):
+                request_bearer = request_auth[7:].strip()
             if api_format == "anthropic" and "authorization" not in attempt_headers:
                 x_api_key = request.headers.get("x-api-key")
                 if x_api_key:
@@ -4721,12 +4725,14 @@ def create_app(
                     attempt_headers["x-api-key"] = attempt_provider_entry.api_key
                 else:
                     attempt_headers["authorization"] = f"Bearer {attempt_provider_entry.api_key}"
-            elif primary_key:
-                if attempt_native_anthropic_transport:
-                    attempt_headers.pop("authorization", None)
-                    attempt_headers["x-api-key"] = primary_key
-                else:
-                    attempt_headers["authorization"] = f"Bearer {primary_key}"
+            else:
+                upstream_api_key = request_bearer or primary_key
+                if upstream_api_key:
+                    if attempt_native_anthropic_transport:
+                        attempt_headers.pop("authorization", None)
+                        attempt_headers["x-api-key"] = upstream_api_key
+                    else:
+                        attempt_headers["authorization"] = f"Bearer {upstream_api_key}"
             if attempt_native_anthropic_transport:
                 if "x-api-key" not in attempt_headers and "authorization" in attempt_headers:
                     bearer = attempt_headers["authorization"]

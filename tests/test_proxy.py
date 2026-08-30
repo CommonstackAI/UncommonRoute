@@ -1668,6 +1668,108 @@ class TestChatCompletions:
         assert data["model"] == "uncommon-route/debug"
         assert "UncommonRoute Debug" in data["choices"][0]["message"]["content"]
 
+    def test_request_bearer_key_overrides_primary_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-request-key",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "openai/gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        store = ConnectionsStore(storage=InMemoryConnectionsStorage())
+        store.set_primary(
+            upstream="https://api.example.test/v1",
+            api_key="sk-connection-key",
+        )
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+
+        try:
+            app = create_app(
+                connections_store=store,
+                model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/v1/messages",
+                headers={"authorization": "Bearer sk-claude-cli-key"},
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            assert response.status_code == 200
+            headers = captured["headers"]
+            assert isinstance(headers, dict)
+            assert headers["authorization"] == "Bearer sk-claude-cli-key"
+            assert store.primary().api_key == "sk-connection-key"
+        finally:
+            asyncio.run(async_client.aclose())
+
+    def test_connection_key_is_used_when_request_has_no_bearer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-connection-key",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "openai/gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        store = ConnectionsStore(storage=InMemoryConnectionsStorage())
+        store.set_primary(
+            upstream="https://api.example.test/v1",
+            api_key="sk-connection-key",
+        )
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr("uncommon_route.proxy._get_client", lambda: async_client)
+
+        try:
+            app = create_app(
+                connections_store=store,
+                model_mapper=_build_test_mapper("openai/gpt-4o-mini"),
+                spend_control=SpendControl(storage=InMemorySpendControlStorage()),
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post("/v1/chat/completions", json={
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+            assert response.status_code == 200
+            assert captured["headers"]["authorization"] == "Bearer sk-connection-key"
+        finally:
+            asyncio.run(async_client.aclose())
+
     def test_routing_headers_present(self, client: TestClient) -> None:
         """Non-debug requests forward to upstream; headers are set even if upstream fails."""
         resp = client.post("/v1/chat/completions", json={
